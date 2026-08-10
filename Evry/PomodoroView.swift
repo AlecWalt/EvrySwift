@@ -13,6 +13,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 // MARK: - Embeddable pomodoro content
 
@@ -81,12 +82,21 @@ struct PomodoroContent: View {
 
     private var controls: some View {
         HStack(spacing: 12) {
-            secondaryButton("Reset") { pomodoro.reset() }
+            secondaryButton("Reset") {
+                let gen = UIImpactFeedbackGenerator(style: .heavy)
+                gen.impactOccurred()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) {
+                    gen.impactOccurred(intensity: 0.5)
+                }
+                pomodoro.reset()
+            }
 
             Button {
                 if pomodoro.running {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     pomodoro.pause()
                 } else {
+                    UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
                     pomodoro.start()
                     onStart?()
                 }
@@ -100,7 +110,10 @@ struct PomodoroContent: View {
             }
             .buttonStyle(PressScaleStyle(scale: 0.97))
 
-            secondaryButton("Skip") { pomodoro.skip() }
+            secondaryButton("Skip") {
+                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                pomodoro.skip()
+            }
         }
     }
 
@@ -118,28 +131,58 @@ struct PomodoroContent: View {
     }
 
     private var schedule: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("SCHEDULE")
-                .font(.system(size: 12, weight: .bold))
-                .tracking(0.9)
-                .foregroundStyle(palette.textSec)
-                .padding(.horizontal, 4)
+        VStack(alignment: .leading, spacing: 16) {
+            // Preset picker
+            VStack(alignment: .leading, spacing: 8) {
+                Text("SCHEDULE")
+                    .font(.system(size: 12, weight: .bold))
+                    .tracking(0.9)
+                    .foregroundStyle(palette.textSec)
+                    .padding(.horizontal, 4)
 
-            HStack(spacing: 8) {
-                ForEach(PomodoroPreset.all) { preset in
-                    let active = pomodoro.preset == preset
-                    Button {
-                        pomodoro.selectPreset(preset)
-                    } label: {
-                        Text(preset.label)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(active ? palette.primary : palette.textSec)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(active ? palette.primaryLight : palette.card, in: Capsule())
-                            .overlay(Capsule().strokeBorder(active ? palette.primary : palette.border, lineWidth: 1.5))
+                VStack(spacing: 8) {
+                    ForEach(PomodoroPreset.all) { preset in
+                        let active = pomodoro.preset == preset
+                        Button {
+                            pomodoro.selectPreset(preset)
+                        } label: {
+                            Text("\(preset.workMin)/\(preset.shortBreakMin)")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(active ? palette.primary : palette.textSec)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(active ? palette.primaryLight : palette.card, in: Capsule())
+                                .overlay(Capsule().strokeBorder(active ? palette.primary : palette.border, lineWidth: 1.5))
+                        }
+                        .buttonStyle(PressScaleStyle(scale: 0.97))
                     }
-                    .buttonStyle(PressScaleStyle(scale: 0.97))
+                }
+            }
+
+            // Sessions target
+            VStack(alignment: .leading, spacing: 8) {
+                Text("SESSIONS")
+                    .font(.system(size: 12, weight: .bold))
+                    .tracking(0.9)
+                    .foregroundStyle(palette.textSec)
+                    .padding(.horizontal, 4)
+
+                HStack(spacing: 6) {
+                    ForEach([0, 1, 2, 3, 4], id: \.self) { n in
+                        let active = pomodoro.targetSessions == n
+                        Button {
+                            pomodoro.setTargetSessions(n)
+                        } label: {
+                            Text(n == 0 ? "∞" : "\(n)")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(active ? palette.primary : palette.textSec)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(active ? palette.primaryLight : palette.card, in: Capsule())
+                                .overlay(Capsule().strokeBorder(active ? palette.primary : palette.border, lineWidth: 1.5))
+                        }
+                        .buttonStyle(PressScaleStyle(scale: 0.97))
+                    }
                 }
             }
         }
@@ -147,20 +190,54 @@ struct PomodoroContent: View {
     }
 }
 
-// MARK: - Focus tab (PathView with pomodoro widget)
+// MARK: - Focus tab (landing page — "Enter Focus Mode" button opens the sheet)
 
 struct FocusTabView: View {
     let palette: Palette
-    var onEdit: (TaskItem) -> Void
-    var onDelete: (TaskItem) -> Void
+    var onEnterFocusMode: () -> Void
+
+    @State private var showPomodoro = false
 
     var body: some View {
-        PathView(
-            palette: palette,
-            onEdit: onEdit,
-            onDelete: onDelete,
-            inFocusMode: false
-        )
+        VStack(spacing: 0) {
+            Spacer()
+
+            VStack(spacing: 12) {
+                Image(systemName: "timer")
+                    .font(.system(size: 52, weight: .light))
+                    .foregroundStyle(palette.primary)
+                    .padding(.bottom, 4)
+                Text("Focus Mode")
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundStyle(palette.text)
+                Text("Start a Pomodoro session to enter\na distraction-free focus environment.")
+                    .font(.system(size: 15))
+                    .foregroundStyle(palette.textSec)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 32)
+
+            Spacer()
+
+            Button {
+                showPomodoro = true
+            } label: {
+                Text("Enter Focus Mode")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(palette.onPrimary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(palette.primary, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            }
+            .buttonStyle(PressScaleStyle(scale: 0.97))
+            .padding(.horizontal, 24)
+            .padding(.bottom, 120)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(palette.bg)
+        .sheet(isPresented: $showPomodoro) {
+            PomodoroView(onStart: onEnterFocusMode)
+        }
     }
 }
 
@@ -179,9 +256,8 @@ struct PomodoroView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                PomodoroContent(palette: palette, onStart: {
-                    dismiss()
-                    onStart?()
+                PomodoroContent(palette: palette, onStart: onStart.map { startCallback in
+                    { dismiss(); startCallback() }
                 })
                 .padding(20)
             }
@@ -202,7 +278,7 @@ struct PomodoroView: View {
 }
 
 #Preview("Focus tab") {
-    FocusTabView(palette: Palette(dark: false, accent: .byKey("default")), onEdit: { _ in }, onDelete: { _ in })
+    FocusTabView(palette: Palette(dark: false, accent: .byKey("default")), onEnterFocusMode: {})
         .environment(Appearance())
         .environment(PomodoroModel())
 }

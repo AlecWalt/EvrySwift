@@ -34,9 +34,11 @@ struct PathView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            pomodoroWidget
-                .padding(.horizontal, 20)
-                .padding(.top, inFocusMode ? 52 : 16)
+            if !inFocusMode {
+                pomodoroWidget
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+            }
 
             if let candidate {
                 VStack(spacing: 16) {
@@ -62,28 +64,26 @@ struct PathView: View {
                     Spacer()
                 }
                 .padding(.horizontal, 20)
+                .padding(.top, inFocusMode ? 60 : 0)
                 .padding(.bottom, inFocusMode ? 80 : 110)
             } else {
                 VStack {
                     Spacer()
                     EmptyStateView(
-                        imageName: "DogEmptyState",
+                        imageName: "Dog",
                         title: "All done!",
                         text: "Now relax and enjoy the day!",
                         palette: palette
                     )
                     Spacer()
                 }
+                .padding(.top, inFocusMode ? 60 : 0)
                 .padding(.bottom, inFocusMode ? 80 : 110)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.bg)
-        .onAppear {
-            if !inFocusMode && !pomodoro.running {
-                showPomodoro = true
-            }
-        }
+
     }
 
     // MARK: Pomodoro trigger (same card style as the Profile tab's)

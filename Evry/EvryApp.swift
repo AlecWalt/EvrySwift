@@ -7,11 +7,27 @@
 
 import SwiftUI
 import SwiftData
+import UserNotifications
+
+// Allows notification banners to appear even while the app is in the foreground.
+class EvryAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        return true
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound, .badge])
+    }
+}
 
 @main
 struct EvryApp: App {
+    @UIApplicationDelegateAdaptor(EvryAppDelegate.self) private var appDelegate
     @State private var appearance = Appearance()
     @State private var pomodoro = PomodoroModel()
+    @State private var calendarService = CalendarService()
+    @State private var tourCoordinator = TourCoordinator()
 
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
@@ -43,6 +59,8 @@ struct EvryApp: App {
             ContentView()
                 .environment(appearance)
                 .environment(pomodoro)
+                .environment(calendarService)
+                .environment(tourCoordinator)
                 .preferredColorScheme(appearance.preferredColorScheme)
         }
         .modelContainer(sharedModelContainer)

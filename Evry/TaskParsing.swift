@@ -49,6 +49,14 @@ func dateCategory(_ date: Date?) -> DateCategory? {
     return .later
 }
 
+private let weekdayFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "EEEE"
+    return f
+}()
+
+private let iso8601Formatter = ISO8601DateFormatter()
+
 /// "Today", "Tomorrow", "Friday", "Next Friday", "Jan 15" — plus
 /// " at 3:00 PM" when the date carries a time component.
 func formatDueDate(_ date: Date?) -> String? {
@@ -63,12 +71,10 @@ func formatDueDate(_ date: Date?) -> String? {
         datePart = "Tomorrow"
     } else {
         let diff = Calendar.current.dateComponents([.day], from: today, to: day).day ?? 99
-        let weekdayFmt = DateFormatter()
-        weekdayFmt.dateFormat = "EEEE"
         if diff >= 2 && diff < 7 {
-            datePart = weekdayFmt.string(from: date)
+            datePart = weekdayFormatter.string(from: date)
         } else if diff >= 7 && diff < 14 {
-            datePart = "Next \(weekdayFmt.string(from: date))"
+            datePart = "Next \(weekdayFormatter.string(from: date))"
         } else {
             datePart = date.formatted(.dateTime.month(.abbreviated).day())
         }
@@ -101,7 +107,7 @@ private func rx(_ pattern: String) -> NSRegularExpression {
 }
 
 private let weekdayWords = "sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?"
-private let monthWords = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+private let monthWords = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
 
 /// 0=Sun … 6=Sat from a matched weekday word.
 private func weekdayIndex(_ word: String) -> Int {
@@ -141,6 +147,19 @@ private func followingWeekday(_ target: Int) -> Date {
     addDays(thisWeekday(target), 7)
 }
 
+/// The upcoming Saturday — unless today is already the weekend (Saturday or
+/// Sunday), in which case it skips to the *following* weekend's Saturday.
+/// Shared by the typed "weekend"/"next weekend" keyword and the swipe-left
+/// schedule gesture so both entry points always agree.
+func nextWeekend() -> Date {
+    let todayIdx = Calendar.current.component(.weekday, from: Date()) - 1 // 0=Sun … 6=Sat
+    var saturday = thisWeekday(6) // upcoming Saturday (could be today)
+    if todayIdx == 0 || todayIdx == 6 {
+        saturday = addDays(saturday, 7)
+    }
+    return saturday
+}
+
 private func resolveMonthDay(_ month: String, _ day: Int) -> Date {
     let today = startOfDay(Date())
     let year = Calendar.current.component(.year, from: today)
@@ -155,6 +174,9 @@ private func resolveMonthDay(_ month: String, _ day: Int) -> Date {
 
 // Most-specific first — same ordering as the webapp's DATE_PATTERNS.
 private let datePatterns: [DatePattern] = [
+    // "weekend" / "next weekend" — resolved by the shared nextWeekend() rule.
+    // Listed before "next week" so "next weekend" isn't shadowed.
+    DatePattern(regex: rx(#"\b(?:next\s+)?weekend\b"#)) { _ in nextWeekend() },
     DatePattern(regex: rx(#"\bnext\s+week\b"#)) { _ in addDays(Date(), 7) },
     DatePattern(regex: rx("\\bnext\\s+(\(weekdayWords))\\b")) { g in followingWeekday(weekdayIndex(g[1])) },
     DatePattern(regex: rx("\\bthis\\s+(\(weekdayWords))\\b")) { g in thisWeekday(weekdayIndex(g[1])) },
@@ -235,6 +257,19 @@ private extension NSRegularExpression {
         }
         return (whole, groups)
     }
+}
+
+/// Resolves a bare date keyword ("today", "tomorrow", "next weekend", "friday", …)
+/// to a `Date` using the exact same `datePatterns` that back quick-add parsing.
+/// This is the single source of truth for what a keyword means, so typed input
+/// and the swipe-to-schedule gestures never drift apart.
+func resolveDateKeyword(_ keyword: String) -> Date? {
+    for pattern in datePatterns {
+        if let m = pattern.regex.firstGroups(in: keyword) {
+            return pattern.resolve(m.groups)
+        }
+    }
+    return nil
 }
 
 func parseTaskInput(_ raw: String) -> ParsedTask {

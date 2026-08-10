@@ -7,8 +7,10 @@
 //  wall-clock-based timing so backgrounding doesn't drift the timer.
 //
 
+import AudioToolbox
 import Foundation
 import Observation
+import UIKit
 
 enum PomodoroPhase: String, Codable {
     case work, shortBreak, longBreak
@@ -43,8 +45,8 @@ struct PomodoroPreset: Identifiable, Equatable {
 
     static let all: [PomodoroPreset] = [
         PomodoroPreset(key: "classic", label: "Classic",     workMin: 25, shortBreakMin: 5,  longBreakMin: 15, sessionsUntilLongBreak: 4),
-        PomodoroPreset(key: "short",   label: "Short Focus", workMin: 15, shortBreakMin: 3,  longBreakMin: 10, sessionsUntilLongBreak: 4),
-        PomodoroPreset(key: "deep",    label: "Deep Work",   workMin: 50, shortBreakMin: 10, longBreakMin: 20, sessionsUntilLongBreak: 2),
+        PomodoroPreset(key: "short",   label: "Short Focus", workMin: 15, shortBreakMin: 5,  longBreakMin: 10, sessionsUntilLongBreak: 4),
+        PomodoroPreset(key: "deep",    label: "Deep Work",   workMin: 45, shortBreakMin: 15, longBreakMin: 30, sessionsUntilLongBreak: 2),
     ]
 
     static func byKey(_ key: String) -> PomodoroPreset {
@@ -60,6 +62,7 @@ private struct PomodoroSnapshot: Codable {
     var phaseEndAt: Date?
     var remainingAtPause: TimeInterval?
     var completedSessions: Int
+    var targetSessions: Int?    // nil in legacy saves → treated as 0 (unlimited)
 }
 
 @Observable
@@ -68,6 +71,8 @@ final class PomodoroModel {
     private(set) var phase: PomodoroPhase = .work
     private(set) var running = false
     private(set) var completedSessions = 0
+    /// 0 = run indefinitely; >0 = stop after this many work sessions complete.
+    private(set) var targetSessions: Int = 0
 
     /// Fires once per phase change so the shell can raise a toast wherever
     /// the user is.
@@ -143,13 +148,18 @@ final class PomodoroModel {
     }
 
     func skip() {
-        advancePhase()
+        if advancePhase() {
+            save()
+            syncTimer()
+            return
+        }
         if running {
             phaseEndAt = Date().addingTimeInterval(totalDuration)
         } else {
             remainingAtPause = nil
         }
         save()
+        playPhaseTransitionFeedback()
     }
 
     func selectPreset(_ preset: PomodoroPreset) {
@@ -157,25 +167,51 @@ final class PomodoroModel {
         reset()
     }
 
+    func setTargetSessions(_ n: Int) {
+        targetSessions = n
+        save()
+    }
+
     // MARK: Internals
 
-    private func advancePhase() {
+    /// Returns `true` if the session target was just reached (caller should stop rather than continue).
+    @discardableResult
+    private func advancePhase() -> Bool {
         if phase == .work {
             completedSessions += 1
+            if targetSessions > 0 && completedSessions >= targetSessions {
+                running = false
+                phaseEndAt = nil
+                remainingAtPause = nil
+                phase = .work
+                return true
+            }
             phase = completedSessions % preset.sessionsUntilLongBreak == 0 ? .longBreak : .shortBreak
         } else {
             phase = .work
         }
+        return false
     }
 
     private func tick() {
         now = Date()
         if running, let end = phaseEndAt, now >= end {
-            advancePhase()
+            if advancePhase() {
+                save()
+                syncTimer()
+                return
+            }
             phaseEndAt = now.addingTimeInterval(totalDuration)
             save()
+            playPhaseTransitionFeedback()
             onPhaseChange?(phase)
         }
+    }
+
+    private func playPhaseTransitionFeedback() {
+        let style: UIImpactFeedbackGenerator.FeedbackStyle = phase == .work ? .medium : .heavy
+        UIImpactFeedbackGenerator(style: style).impactOccurred()
+        AudioServicesPlaySystemSound(1057)
     }
 
     private func syncTimer() {
@@ -200,7 +236,8 @@ final class PomodoroModel {
             running: running,
             phaseEndAt: phaseEndAt,
             remainingAtPause: remainingAtPause,
-            completedSessions: completedSessions
+            completedSessions: completedSessions,
+            targetSessions: targetSessions
         )
         if let data = try? JSONEncoder().encode(snapshot) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)
@@ -216,6 +253,7 @@ final class PomodoroModel {
         phaseEndAt = snapshot.phaseEndAt
         remainingAtPause = snapshot.remainingAtPause
         completedSessions = snapshot.completedSessions
+        targetSessions = snapshot.targetSessions ?? 0
         now = Date()
         // A phase that expired while the app was closed advances on the
         // first tick after the timer restarts.

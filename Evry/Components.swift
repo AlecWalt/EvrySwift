@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 // MARK: - Palette access
 
@@ -100,7 +101,8 @@ struct ProgressArea: View {
     let total: Int
     let palette: Palette
 
-    private var pct: Int { total > 0 ? Int((Double(done) / Double(total) * 100).rounded()) : 0 }
+    private var fraction: Double { total > 0 ? Double(done) / Double(total) : 0 }
+    private var pct: Int { Int((fraction * 100).rounded()) }
 
     var body: some View {
         VStack(spacing: 5) {
@@ -111,7 +113,7 @@ struct ProgressArea: View {
             }
             .font(.system(size: 12))
             .foregroundStyle(palette.textSec)
-            ProgressBarView(fraction: total > 0 ? Double(done) / Double(total) : 0, palette: palette)
+            ProgressBarView(fraction: fraction, palette: palette)
         }
         .padding(.top, 14)
     }
@@ -153,7 +155,7 @@ struct PressScaleStyle: ButtonStyle {
 
 struct CardBackground: ViewModifier {
     let palette: Palette
-    var cornerRadius: CGFloat = 16
+    var cornerRadius: CGFloat = 24
 
     func body(content: Content) -> some View {
         content
@@ -167,7 +169,7 @@ struct CardBackground: ViewModifier {
 }
 
 extension View {
-    func evryCard(_ palette: Palette, cornerRadius: CGFloat = 16) -> some View {
+    func evryCard(_ palette: Palette, cornerRadius: CGFloat = 24) -> some View {
         modifier(CardBackground(palette: palette, cornerRadius: cornerRadius))
     }
 }
@@ -217,7 +219,10 @@ struct TaskCheckbox: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
+        Button {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            action()
+        } label: {
             ZStack {
                 Circle()
                     .fill(checked ? Palette.success : .clear)
@@ -231,6 +236,10 @@ struct TaskCheckbox: View {
                 }
             }
             .frame(width: size, height: size)
+            // Expand hit area without shifting the visual — extra space goes
+            // to the right and below so leading/top position is unchanged.
+            .frame(width: size + 16, height: size + 16, alignment: .topLeading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .animation(.spring(response: 0.25, dampingFraction: 0.6), value: checked)
@@ -274,34 +283,310 @@ struct ToastView: View {
     }
 }
 
+// MARK: - Multi-select action bar
+
+struct MultiSelectBar: View {
+    let selectedCount: Int
+    let palette: Palette
+    var onDelete: () -> Void
+    var onMove: () -> Void
+    var onCancel: () -> Void
+    var showMove: Bool = true
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onCancel) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(palette.textSec)
+                    .frame(width: 34, height: 34)
+                    .background(palette.hover, in: Circle())
+            }
+            .buttonStyle(.plain)
+
+            Text(selectedCount == 0 ? "Select tasks" : "\(selectedCount) selected")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(palette.text)
+
+            Spacer()
+
+            if selectedCount > 0 {
+                if showMove {
+                    Button(action: onMove) {
+                        Text("Move")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(palette.primary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(palette.primaryLight, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button(action: onDelete) {
+                    Text("Delete")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Palette.danger, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.14), radius: 16, y: 4)
+        .padding(.horizontal, 16)
+    }
+}
+
+// MARK: - Swipe Action Row
+
+/// Wraps any content with swipe-to-reveal action buttons.
+/// Swipe left → trailing action (delete). Swipe right → leading action (complete).
+/// Reveals swipe actions on horizontal drags.
+/// Direction is locked after 10pt of combined movement so there is no initial jump and
+/// both left and right swipes work equally well. Tracking is purely 1:1 from lock-in.
+/// Rubber-band resistance kicks in past `revealWidth`. Light haptic = primed; medium = fired.
+struct SwipeActionRow<Content: View>: View {
+    struct Action {
+        let label: String
+        let icon: String
+        let color: Color
+        let action: () -> Void
+    }
+
+    var leadingAction: Action?
+    var trailingAction: Action?
+    var isDragging: Bool = false
+    @ViewBuilder var content: () -> Content
+
+    @State private var offset: CGFloat = 0
+    @State private var primed = false
+    // Direction decided once per gesture; gestureOriginX zeros the card at lock-in.
+    @State private var lockedHorizontal: Bool? = nil
+    @State private var gestureOriginX: CGFloat = 0
+
+    private let revealWidth: CGFloat = 80
+    // Fire when 80% of the action button is revealed; hard-clamped so the row
+    // never slides past the button edge (no gap between content and action).
+    private var threshold: CGFloat { revealWidth * 0.8 }
+
+    private func dampedOffset(_ raw: CGFloat) -> CGFloat {
+        let s: CGFloat = raw < 0 ? -1 : 1
+        return s * min(abs(raw), revealWidth)  // hard clamp — no overshoot
+    }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if let leading = leadingAction {
+                HStack {
+                    actionSlot(leading, isLeading: true).frame(width: revealWidth)
+                    Spacer()
+                }
+            }
+            if let trailing = trailingAction {
+                HStack {
+                    Spacer()
+                    actionSlot(trailing, isLeading: false).frame(width: revealWidth)
+                }
+            }
+
+            content()
+                .offset(x: offset)
+                .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.86), value: offset)
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 6)
+                        .onChanged { v in
+                            guard !isDragging else { return }
+                            let dx = v.translation.width
+                            let dy = v.translation.height
+
+                            // Lock in direction once 10pt of combined movement is reached.
+                            if lockedHorizontal == nil, abs(dx) + abs(dy) > 10 {
+                                let horiz = abs(dx) > abs(dy) * 1.1
+                                lockedHorizontal = horiz
+                                // Record translation at lock-in so the card starts at 0.
+                                if horiz { gestureOriginX = dx }
+                            }
+
+                            guard lockedHorizontal == true else { return }
+
+                            let adjusted = dx - gestureOriginX
+                            if adjusted > 0 && leadingAction == nil { return }
+                            if adjusted < 0 && trailingAction == nil { return }
+                            offset = dampedOffset(adjusted)
+
+                            let nowPrimed = abs(adjusted) >= threshold
+                            if nowPrimed && !primed {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            }
+                            primed = nowPrimed
+                        }
+                        .onEnded { v in
+                            let wasHorizontal = lockedHorizontal == true
+                            let adjusted = v.translation.width - gestureOriginX
+                            lockedHorizontal = nil
+                            gestureOriginX = 0
+
+                            guard wasHorizontal else {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                                    offset = 0; primed = false
+                                }
+                                return
+                            }
+
+                            if adjusted > threshold, let leading = leadingAction {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { offset = 0 }
+                                primed = false
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { leading.action() }
+                            } else if adjusted < -threshold, let trailing = trailingAction {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { offset = 0 }
+                                primed = false
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { trailing.action() }
+                            } else {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                                    offset = 0; primed = false
+                                }
+                            }
+                        }
+                )
+        }
+        .clipped()
+        .onChange(of: isDragging) { _, dragging in
+            if dragging {
+                lockedHorizontal = nil
+                gestureOriginX = 0
+                withAnimation(.spring(response: 0.3)) { offset = 0; primed = false }
+            }
+        }
+    }
+
+    private func actionSlot(_ a: Action, isLeading: Bool) -> some View {
+        let progress = isLeading
+            ? CGFloat(min(1, max(0, (offset - 8) / (revealWidth - 8))))
+            : CGFloat(min(1, max(0, (-offset - 8) / (revealWidth - 8))))
+        let isActiveSide = isLeading ? offset > 0 : offset < 0
+
+        return Button { a.action() } label: {
+            VStack(spacing: 4) {
+                Image(systemName: a.icon)
+                    .font(.system(size: 14, weight: .semibold))
+                Text(a.label)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(a.color, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .opacity(Double(progress))
+        .scaleEffect(primed && isActiveSide ? 1.1 : 1.0)
+        .animation(.spring(response: 0.22, dampingFraction: 0.7), value: primed)
+    }
+}
+
+private extension Double {
+    func clamped(to range: ClosedRange<Double>) -> Double {
+        min(range.upperBound, max(range.lowerBound, self))
+    }
+}
+
 // MARK: - Highlighted Task Input Field
 
+// UITextView subclass that calls becomeFirstResponder() inside didMoveToWindow so the
+// keyboard starts animating concurrently with the sheet animation instead of after it.
+private final class _TaskTextView: UITextView {
+    var autoFocus = false
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard autoFocus, window != nil, !isFirstResponder else { return }
+        DispatchQueue.main.async { [weak self] in self?.becomeFirstResponder() }
+    }
+
+    override var intrinsicContentSize: CGSize {
+        sizeThatFits(CGSize(width: max(bounds.width, 1), height: .infinity))
+    }
+}
+
+private struct InlineTaskInput: UIViewRepresentable {
+    @Binding var text: String
+    var autoFocus: Bool
+    var focused: Binding<Bool>
+    var fontSize: CGFloat
+    var tintColor: UIColor
+    var onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> _TaskTextView {
+        let tv = _TaskTextView()
+        tv.autoFocus = autoFocus
+        tv.backgroundColor = .clear
+        tv.delegate = context.coordinator
+        tv.font = .systemFont(ofSize: fontSize)
+        tv.textColor = .clear
+        tv.tintColor = tintColor
+        tv.autocorrectionType = .no
+        tv.autocapitalizationType = .sentences
+        tv.returnKeyType = .send
+        tv.textContainerInset = .zero
+        tv.textContainer.lineFragmentPadding = 0
+        tv.isScrollEnabled = false
+        return tv
+    }
+
+    func updateUIView(_ uiView: _TaskTextView, context: Context) {
+        if uiView.text != text { uiView.text = text; uiView.invalidateIntrinsicContentSize() }
+        uiView.tintColor = tintColor
+        context.coordinator.parent = self
+        let want = focused.wrappedValue
+        if want && !uiView.isFirstResponder { uiView.becomeFirstResponder() }
+        else if !want && uiView.isFirstResponder { uiView.resignFirstResponder() }
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: InlineTaskInput
+        init(_ p: InlineTaskInput) { parent = p }
+
+        func textView(_ tv: UITextView, shouldChangeTextIn r: NSRange, replacementText t: String) -> Bool {
+            if t == "\n" { parent.onSubmit(); return false }
+            return true
+        }
+        func textViewDidChange(_ tv: UITextView) { parent.text = tv.text; tv.invalidateIntrinsicContentSize() }
+        func textViewDidBeginEditing(_ tv: UITextView) { parent.focused.wrappedValue = true }
+        func textViewDidEndEditing(_ tv: UITextView) { parent.focused.wrappedValue = false }
+    }
+}
+
 /// TextField wrapper that shows keyword highlighting overlay.
-/// Uses a ZStack with a Text overlay to highlight keywords while maintaining TextField editing.
+/// Uses a ZStack with a UITextView overlay to highlight keywords while maintaining editing.
 struct HighlightedTaskTextField: View {
     let placeholder: String
     @Binding var text: String
     let palette: Palette
     var fontSize: CGFloat = 15
+    var autoFocus: Bool = false
     var onSubmit: () -> Void
-    var focused: FocusState<Bool>.Binding
-    
+    var focused: Binding<Bool>
+
     var body: some View {
         ZStack(alignment: .topLeading) {
-            // Hidden TextField for actual text editing. No placeholder here — the
-            // overlay Text below is the sole placeholder, otherwise the field's own
-            // (UIKit-backed) placeholder renders as a second, out-of-sync label.
-            TextField("", text: $text, axis: .vertical)
-                .font(.system(size: fontSize))
-                .foregroundStyle(.clear) // Make text invisible
-                .tint(palette.primary) // Keep cursor visible
-                .textSelection(.enabled)
-                .lineLimit(1...4)
-                .focused(focused)
-                .onSubmit(onSubmit)
-                .autocorrectionDisabled()
-            
-            // Overlay with highlighted text
+            InlineTaskInput(
+                text: $text,
+                autoFocus: autoFocus,
+                focused: focused,
+                fontSize: fontSize,
+                tintColor: UIColor(palette.primary),
+                onSubmit: onSubmit
+            )
+
             if text.isEmpty {
                 Text(placeholder)
                     .font(.system(size: fontSize))
@@ -309,7 +594,7 @@ struct HighlightedTaskTextField: View {
                     .allowsHitTesting(false)
             } else {
                 Text(attributedTaskInput(text, palette: palette, fontSize: fontSize))
-                    .lineLimit(1...4)
+                    .fixedSize(horizontal: false, vertical: true)
                     .allowsHitTesting(false)
             }
         }

@@ -26,6 +26,8 @@ struct TaskStats {
     let streak: Int
     let longestStreak: Int
     let weekData: [DayCount]
+    let weekDone: Int
+    let monthDone: Int
 }
 
 /// Today view membership: notes always; incomplete tasks due today or
@@ -41,6 +43,19 @@ func computeStats(_ tasks: [TaskItem]) -> TaskStats {
     let completable = tasks.filter { !$0.isNote }
     let todayCompletable = tasks.filter { isTodayTask($0) && !$0.isNote }
 
+    let cal = Calendar.current
+    let now = Date()
+    let weekStart = cal.date(from: cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)) ?? now
+    let monthStart = cal.date(from: cal.dateComponents([.year, .month], from: now)) ?? now
+    let weekDone = completable.filter { t in
+        guard t.completed, let d = t.completedAt else { return false }
+        return d >= weekStart
+    }.count
+    let monthDone = completable.filter { t in
+        guard t.completed, let d = t.completedAt else { return false }
+        return d >= monthStart
+    }.count
+
     return TaskStats(
         todayTotal: todayCompletable.count,
         todayDone: todayCompletable.filter(\.completed).count,
@@ -48,7 +63,9 @@ func computeStats(_ tasks: [TaskItem]) -> TaskStats {
         total: completable.count,
         streak: computeStreak(completable),
         longestStreak: computeLongestStreak(completable),
-        weekData: weekData(completable)
+        weekData: weekData(completable),
+        weekDone: weekDone,
+        monthDone: monthDone
     )
 }
 

@@ -103,6 +103,7 @@ final class TaskItem {
     var tags: [String] = []
     var priorityRaw: String = TaskPriority.normal.rawValue
     var notes: String = ""
+    var location: String = ""
     var isNote: Bool = false
     var pinned: Bool = false
     var completed: Bool = false
@@ -111,6 +112,7 @@ final class TaskItem {
     var deletedAt: Date?
     var recurrenceRaw: String?
     var subtasks: [SubtaskData] = []
+    var sortOrder: Int = 0
     var project: Project?
 
     init(
@@ -119,19 +121,17 @@ final class TaskItem {
         tags: [String] = [],
         priority: TaskPriority = .normal,
         notes: String = "",
+        location: String = "",
         isNote: Bool = false,
         project: Project? = nil
     ) {
-        self.uid = UUID()
         self.title = title
         self.dueDate = dueDate
         self.tags = tags
         self.priorityRaw = priority.rawValue
         self.notes = notes
+        self.location = location
         self.isNote = isNote
-        self.pinned = false
-        self.completed = false
-        self.createdAt = Date()
         self.project = project
     }
 
@@ -158,20 +158,59 @@ final class Project {
     var startDate: Date?
     var dueDate: Date?
     var createdAt: Date = Date()
+    var sortOrder: Int = 0
+    var projectDescription: String = ""
+    var statusRaw: String = ProjectStatus.active.rawValue
+    var icon: String = "folder"
 
     @Relationship(deleteRule: .nullify, inverse: \TaskItem.project)
     var tasks: [TaskItem]? = []
 
     init(name: String, categoryKey: String? = nil, startDate: Date? = nil, dueDate: Date? = nil) {
-        self.uid = UUID()
         self.name = name
         self.categoryKey = categoryKey
         self.startDate = startDate
         self.dueDate = dueDate
-        self.createdAt = Date()
     }
 
     var category: ProjectCategory? { ProjectCategory.byKey(categoryKey) }
+
+    var status: ProjectStatus {
+        get { ProjectStatus(rawValue: statusRaw) ?? .active }
+        set { statusRaw = newValue.rawValue }
+    }
+}
+
+// MARK: - Project status
+
+enum ProjectStatus: String, CaseIterable, Identifiable {
+    case active, onHold, archived
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .active:   "Active"
+        case .onHold:   "On Hold"
+        case .archived: "Archived"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .active:   "bolt.fill"
+        case .onHold:   "pause.fill"
+        case .archived: "archivebox.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .active:   Palette.success
+        case .onHold:   Palette.warning
+        case .archived: .gray
+        }
+    }
 }
 
 // MARK: - Project categories
