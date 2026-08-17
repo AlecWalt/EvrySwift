@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 // MARK: - Animated feature promo
 
@@ -77,7 +78,7 @@ struct MembershipPromoView: View {
                             .foregroundStyle(palette.onPrimary)
                             .frame(maxWidth: .infinity)
                             .frame(height: 54)
-                            .background(palette.primary, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .background(palette.primary, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
                     }
                     .buttonStyle(PressScaleStyle())
 
@@ -111,7 +112,7 @@ struct MembershipPromoView: View {
                 }
             } catch {}
         }
-        .sheet(isPresented: $showPlans) { MembershipPlansView() }
+        .fullScreenCover(isPresented: $showPlans) { MembershipPlansView() }
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
     }
@@ -565,22 +566,32 @@ struct MembershipPlansView: View {
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
+    /// Small sparkles slowly orbiting each corner — premium, playful, and far
+    /// less distracting than a big animated gradient.
+    private var glowBackground: some View {
+        ZStack {
+            palette.bg
+            // Nudged down so the top corners clear the nav bar and read clearly.
+            CornerSparkles(palette: palette)
+                .offset(y: 70)
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+
     private var salePrice: String     { isYearly ? "$5" : "$7" }
     private var regularPrice: String  { isYearly ? "$7" : "$9" }
     private var savingsNote: String   { isYearly ? "Billed $60/yr · Lifetime early adopter price" : "Billed monthly · Lifetime early adopter price" }
 
     private let proFeatures = [
         "Cloud Syncing",
-        "Unlimited Projects",
-        "Expanded Color Schemes",
-        "Calendar Integration",
-        "Detailed Calendar View",
-        "Brain Dump",
-        "AI Task Sorting",
-        "Voice Task Dictation",
-        "Matte Color Schemes",
-        "Task Reminders",
-        "Focus Mode",
+        "Up to 1,000 Notes",
+        "Expanded Color Themes",
+        "Intelligent Calendar",
+        "Unlimited Brain Dump",
+        "Voice Dictation",
+        "Task Reminders and Deadlines",
+        "Unlimited Pomodoros",
     ]
 
     var body: some View {
@@ -590,19 +601,15 @@ struct MembershipPlansView: View {
 
                     // Header
                     VStack(spacing: 6) {
-                        Image("TextLogo")
+                        Image("EvryPro")
                             .resizable()
                             .scaledToFit()
-                            .frame(height: 38)
-                        Text("Evry Pro")
-                            .font(.system(size: 26, weight: .bold))
-                            .foregroundStyle(palette.text)
+                            .frame(height: 76)
                         Text("Everything you need to stay on top of it all.")
                             .font(.system(size: 14))
                             .foregroundStyle(palette.textSec)
                             .multilineTextAlignment(.center)
                     }
-                    .padding(.top, 8)
 
                     // Billing toggle
                     HStack(spacing: 0) {
@@ -687,7 +694,7 @@ struct MembershipPlansView: View {
                             .foregroundStyle(palette.onPrimary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 15)
-                            .background(palette.primary, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .background(palette.primary, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
                     }
                     .buttonStyle(PressScaleStyle())
 
@@ -696,11 +703,10 @@ struct MembershipPlansView: View {
                         .foregroundStyle(palette.textSec)
                         .padding(.bottom, 8)
                 }
-                .padding(20)
+                .padding(.horizontal, 20)
                 .padding(.bottom, 20)
             }
-            .background(palette.bg)
-            .navigationTitle("Pro")
+            .background(glowBackground)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -710,6 +716,82 @@ struct MembershipPlansView: View {
         }
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
+        .onAppear {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        }
+    }
+}
+
+// MARK: - Corner sparkles
+
+/// A cluster of small sparkles orbiting each of the four screen corners, each
+/// corner spinning at its own speed/direction while individual sparkles twinkle.
+private struct CornerSparkles: View {
+    let palette: Palette
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                SparkleCluster(palette: palette, duration: 26, clockwise: true)
+                    .position(x: 8, y: 8)
+                SparkleCluster(palette: palette, duration: 32, clockwise: false)
+                    .position(x: geo.size.width - 8, y: 14)
+                SparkleCluster(palette: palette, duration: 30, clockwise: false)
+                    .position(x: 10, y: geo.size.height - 10)
+                SparkleCluster(palette: palette, duration: 24, clockwise: true)
+                    .position(x: geo.size.width - 10, y: geo.size.height - 6)
+            }
+        }
+    }
+}
+
+private struct SparkleCluster: View {
+    let palette: Palette
+    let duration: Double
+    let clockwise: Bool
+
+    @State private var spin = false
+
+    // (angle in radians, orbit radius, symbol size, twinkle delay)
+    private let sparkles: [(Double, CGFloat, CGFloat, Double)] = [
+        (0.3, 46, 13, 0.0),
+        (1.5, 74, 9,  0.6),
+        (2.6, 40, 16, 1.1),
+        (3.7, 88, 8,  0.3),
+        (4.6, 58, 11, 0.9),
+        (5.6, 96, 10, 0.4),
+    ]
+
+    var body: some View {
+        ZStack {
+            ForEach(Array(sparkles.enumerated()), id: \.offset) { _, s in
+                SparkleDot(palette: palette, angle: s.0, radius: s.1, size: s.2, delay: s.3)
+            }
+        }
+        .rotationEffect(.degrees(spin ? (clockwise ? 360 : -360) : 0))
+        .animation(.linear(duration: duration).repeatForever(autoreverses: false), value: spin)
+        .onAppear { spin = true }
+    }
+}
+
+private struct SparkleDot: View {
+    let palette: Palette
+    let angle: Double
+    let radius: CGFloat
+    let size: CGFloat
+    let delay: Double
+
+    @State private var on = false
+
+    var body: some View {
+        Image(systemName: "sparkle")
+            .font(.system(size: size))
+            .foregroundStyle(palette.primary)
+            .scaleEffect(on ? 1.0 : 0.45)
+            .opacity(on ? 0.85 : 0.2)
+            .offset(x: CGFloat(cos(angle)) * radius, y: CGFloat(sin(angle)) * radius)
+            .animation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true).delay(delay), value: on)
+            .onAppear { on = true }
     }
 }
 

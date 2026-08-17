@@ -32,7 +32,8 @@ struct EvryApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             TaskItem.self,
-            Project.self,
+            Note.self,
+            Folder.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 

@@ -36,24 +36,19 @@ final class TourCoordinator {
             body: "Your daily task list, sorted by date. Overdue items float to the top automatically. Swipe a task right to complete it, or left to delete."
         ),
         TourStep(
-            tab: .focus,
-            title: "Focus",
-            body: "Start a Pomodoro timer for distraction-free work blocks. Your highest-priority tasks show up here so you always know what's next."
-        ),
-        TourStep(
-            tab: .projects,
-            title: "Projects",
-            body: "Group related tasks into a Project. Each card shows a live progress bar. Tap to open, long-press to reorder."
-        ),
-        TourStep(
             tab: .calendar,
             title: "Calendar",
-            body: "See all your tasks plotted by due date. Tap any day to view what's scheduled. Tasks with due dates appear here automatically."
+            body: "See your whole month at a glance. Your connected calendars and any tasks with a due date show up right here — tap a day to see everything scheduled."
+        ),
+        TourStep(
+            tab: .notes,
+            title: "Notes",
+            body: "Capture anything — jot rich notes, organize them into folders, and pin the ones you reach for most. Swipe left to delete, right to pin."
         ),
         TourStep(
             tab: .profile,
             title: "Profile",
-            body: "Track your streaks and completion rate. Use the search icon to find any task or project instantly. Tap the gear to customise the app."
+            body: "Track your streaks and completion rate. Use the search icon to find any task instantly. Tap the gear to customise the app."
         ),
     ]
 
@@ -82,7 +77,7 @@ struct TourOverlayView: View {
     private var step: TourStep { coordinator.steps[coordinator.currentStep] }
 
     // Fixed tab order matching ContentView's TabView declaration.
-    private let tabOrder: [AppTab] = [.inbox, .focus, .projects, .calendar, .profile]
+    private let tabOrder: [AppTab] = [.inbox, .calendar, .notes, .profile]
 
     private var activeTabIndex: Int { tabOrder.firstIndex(of: step.tab) ?? 0 }
 

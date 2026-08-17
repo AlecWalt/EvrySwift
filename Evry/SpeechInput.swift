@@ -8,6 +8,9 @@ final class LiveSpeechInput {
     var transcript = ""
     var isListening = false
     var permissionDenied = false
+    /// Smoothed 0…1 mic amplitude — drives the calm "breathing" listening orb so
+    /// it responds to the voice instead of showing a generic spinner.
+    var level: Double = 0
 
     private var recognizer: SFSpeechRecognizer?
     private var engine = AVAudioEngine()
@@ -33,6 +36,7 @@ final class LiveSpeechInput {
         request?.endAudio()
         task?.cancel()
         task = nil; request = nil; isListening = false
+        DispatchQueue.main.async { self.level = 0 }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -60,6 +64,7 @@ final class LiveSpeechInput {
         let node = engine.inputNode
         node.installTap(onBus: 0, bufferSize: 1024, format: node.outputFormat(forBus: 0)) { [weak self] buf, _ in
             self?.request?.append(buf)
+            self?.updateLevel(buf)
         }
         do { try engine.start() } catch { stop(); return }
         isListening = true
@@ -72,6 +77,23 @@ final class LiveSpeechInput {
             if err != nil || result?.isFinal == true {
                 DispatchQueue.main.async { self.stop() }
             }
+        }
+    }
+
+    /// RMS amplitude of a mic buffer, mapped and smoothed to 0…1. Rises quickly
+    /// and falls gently so the listening orb breathes calmly rather than jittering.
+    private func updateLevel(_ buffer: AVAudioPCMBuffer) {
+        guard let channel = buffer.floatChannelData?[0] else { return }
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return }
+        var sum: Float = 0
+        for i in 0..<frames { let s = channel[i]; sum += s * s }
+        let rms = sqrt(sum / Float(frames))
+        let scaled = min(1, Double(rms) * 12)   // typical speech RMS ~0.02–0.08
+        DispatchQueue.main.async {
+            let prev = self.level
+            let factor = scaled > prev ? 0.6 : 0.2   // attack fast, release slow
+            self.level = prev + (scaled - prev) * factor
         }
     }
 }

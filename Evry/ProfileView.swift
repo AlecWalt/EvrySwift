@@ -40,7 +40,6 @@ struct ProfileView: View {
     var onEnterFocusMode: () -> Void
 
     @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
-    @Query private var projects: [Project]
 
     @Environment(\.requestReview) private var requestReview
     @Environment(TourCoordinator.self) private var tourCoordinator
@@ -69,16 +68,6 @@ struct ProfileView: View {
     }
 
     private var todaySummary: String? { AccomplishmentsStore.summary(for: Date()) }
-
-    private var recentAccomplishments: [(String, String)] {
-        let all = AccomplishmentsStore.load()
-        let todayKey = AccomplishmentsStore.dateKey(Date())
-        return all
-            .filter { $0.key != todayKey }
-            .sorted { $0.key > $1.key }
-            .prefix(3)
-            .map { ($0.key, $0.value) }
-    }
 
     private var initials: String {
         let words = userName.trimmingCharacters(in: .whitespaces).split(separator: " ")
@@ -112,8 +101,7 @@ struct ProfileView: View {
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
-                    .background(palette.hover, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+                    .evryField(palette)
                 }
                 .buttonStyle(.plain)
 
@@ -123,7 +111,6 @@ struct ProfileView: View {
                 }
                 analyticsSection
                 activitySection
-                accomplishmentsSection
                 developerSection
             }
             .padding(20)
@@ -150,7 +137,7 @@ struct ProfileView: View {
         .sheet(isPresented: $showSettings) {
             SettingsSheet()
         }
-        .sheet(isPresented: $showSetupFlow) { SetupFlowView() }
+        .fullScreenCover(isPresented: $showSetupFlow) { SetupFlowView() }
         .sheet(isPresented: $showMembershipPromo) { MembershipPromoView() }
         .sheet(isPresented: $showGlobalSearch) { GlobalSearchSheet() }
         .sheet(isPresented: $showAccomplishments) {
@@ -197,6 +184,18 @@ struct ProfileView: View {
     // MARK: Profile card
 
     private var profileCard: some View {
+        profileCardBody
+            // The accomplishments bubble hangs off the bottom edge, attached to
+            // the card. Reserve room below so it doesn't crowd the next card.
+            .overlay(alignment: .bottom) {
+                accomplishmentsBubble
+                    .offset(y: 16)
+            }
+            .padding(.bottom, 22)
+            .zIndex(1)
+    }
+
+    private var profileCardBody: some View {
         HStack(spacing: 16) {
             PhotosPicker(selection: $selectedPhoto, matching: .images, photoLibrary: .shared()) {
                 ZStack {
@@ -260,10 +259,7 @@ struct ProfileView: View {
             let day = startOfDay(d)
             return day >= today && day <= weekEnd
         }.count
-        let activeProjects = projects.filter { p in
-            let projTasks = (p.tasks ?? []).filter { !$0.isTrashed && !$0.isNote }
-            return projTasks.isEmpty || projTasks.contains { !$0.completed }
-        }.count
+        let activeTasks = tasks.filter { !$0.completed && !$0.isNote }.count
 
         return VStack(alignment: .leading, spacing: 8) {
             Text("ANALYTICS")
@@ -310,7 +306,7 @@ struct ProfileView: View {
                     statsGrid(
                         overdueCount: overdueCount,
                         dueThisWeek: dueThisWeek,
-                        activeProjects: activeProjects
+                        activeTasks: activeTasks
                     )
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
@@ -320,7 +316,7 @@ struct ProfileView: View {
         }
     }
 
-    private func statsGrid(overdueCount: Int, dueThisWeek: Int, activeProjects: Int) -> some View {
+    private func statsGrid(overdueCount: Int, dueThisWeek: Int, activeTasks: Int) -> some View {
         let cells: [(String, String, String, Bool)] = [
             ("\(stats.todayDone)", "/\(stats.todayTotal)", "Today's tasks", false),
             ("\(stats.weekDone)", "", "This week", false),
@@ -330,7 +326,7 @@ struct ProfileView: View {
             ("\(stats.longestStreak)", "", "Best streak", false),
             ("\(overdueCount)", "", "Overdue", overdueCount > 0),
             ("\(dueThisWeek)", "", "Due this week", false),
-            ("\(activeProjects)", "", "Active projects", false),
+            ("\(activeTasks)", "", "Active tasks", false),
         ]
 
         return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 3), spacing: 0) {
@@ -399,83 +395,37 @@ struct ProfileView: View {
 
     // MARK: Accomplishments
 
-    private var accomplishmentsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("ACCOMPLISHMENTS")
-                .font(.system(size: 12, weight: .bold))
-                .tracking(0.9)
-                .foregroundStyle(palette.textSec)
-                .padding(.horizontal, 4)
+    /// Very short line shown in the bubble — the AI one-liner if present,
+    /// otherwise a simple completed-count.
+    private var accomplishmentsBubbleText: String {
+        if let summary = todaySummary, !summary.isEmpty { return summary }
+        let n = todayCompletedTasks.count
+        return "\(n) task\(n == 1 ? "" : "s") done today"
+    }
 
-            Button { showAccomplishments = true } label: {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(palette.primary)
-                            .frame(width: 32, height: 32)
-                            .background(palette.primaryLight, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Today's Accomplishments")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(palette.text)
-                            Group {
-                                if todaySummary != nil {
-                                    Text("AI summary ready · tap to view")
-                                } else {
-                                    Text("\(todayCompletedTasks.count) task\(todayCompletedTasks.count == 1 ? "" : "s") completed today")
-                                }
-                            }
-                            .font(.system(size: 12))
-                            .foregroundStyle(palette.textSec)
-                        }
-
-                        Spacer()
-
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(palette.textSec)
-                    }
-
-                    if let summary = todaySummary {
-                        Text(summary)
-                            .font(.system(size: 13))
-                            .foregroundStyle(palette.textSec)
-                            .lineLimit(2)
-                            .padding(.top, 10)
-                    }
-
-                    let recent = recentAccomplishments
-                    if !recent.isEmpty {
-                        Divider()
-                            .padding(.vertical, 10)
-
-                        VStack(alignment: .leading, spacing: 7) {
-                            ForEach(recent, id: \.0) { dateKey, summary in
-                                HStack(spacing: 8) {
-                                    Circle()
-                                        .fill(Palette.success)
-                                        .frame(width: 5, height: 5)
-                                    Text(dateKey)
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(palette.textSec)
-                                    Text(summary)
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(palette.textPh)
-                                        .lineLimit(1)
-                                        .frame(maxWidth: .infinity, alignment: .trailing)
-                                }
-                            }
-                        }
-                    }
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    /// Small pill hanging off the bottom of the profile card.
+    private var accomplishmentsBubble: some View {
+        Button { showAccomplishments = true } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(palette.primary)
+                Text(accomplishmentsBubbleText)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(palette.text)
+                    .lineLimit(1)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(palette.textSec)
             }
-            .buttonStyle(PressScaleStyle())
-            .evryCard(palette, cornerRadius: 28)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(palette.card, in: Capsule())
+            .overlay(Capsule().strokeBorder(palette.border, lineWidth: 1))
+            .shadow(color: .black.opacity(0.08), radius: 6, y: 3)
         }
+        .buttonStyle(PressScaleStyle())
+        .padding(.horizontal, 20)
     }
 
     // MARK: Developer section
@@ -550,9 +500,8 @@ struct SettingsSheet: View {
     @AppStorage("user_email") private var userEmail = ""
     @AppStorage("membership_plan") private var membershipPlan = ""
     @AppStorage("tab_inbox_visible") private var tabInbox = true
-    @AppStorage("tab_focus_visible") private var tabFocus = true
-    @AppStorage("tab_projects_visible") private var tabProjects = true
     @AppStorage("tab_calendar_visible") private var tabCalendar = true
+    @AppStorage("tab_notes_visible") private var tabNotes = true
     @AppStorage("tab_profile_visible") private var tabProfile = true
     @State private var showMembershipPlans = false
     @State private var showProfile = false
@@ -588,7 +537,7 @@ struct SettingsSheet: View {
     }
 
     private var layoutValueLabel: String {
-        let count = [tabInbox, tabFocus, tabProjects, tabCalendar, tabProfile].filter { $0 }.count
+        let count = [tabInbox, tabCalendar, tabNotes, tabProfile].filter { $0 }.count
         return "\(count) tabs"
     }
 
@@ -642,24 +591,70 @@ struct SettingsSheet: View {
                         label: "Recently Deleted", value: nil
                     ) { showTrash = true }
 
-                    Button { showClearCompletedConfirm = true } label: {
-                        HStack(spacing: 14) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 18, weight: .medium))
-                                .foregroundStyle(Palette.danger)
-                                .frame(width: 30, height: 30)
-                            Text("Clear All Completed")
-                                .font(.system(size: 15))
-                                .foregroundStyle(Palette.danger)
-                            Spacer()
+                    VStack(spacing: 8) {
+                        Button {
+                            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                                showClearCompletedConfirm.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundStyle(Palette.danger)
+                                    .frame(width: 30, height: 30)
+                                Text("Clear All Completed")
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(Palette.danger)
+                                Spacer()
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Palette.danger.opacity(0.6))
+                                    .rotationEffect(.degrees(showClearCompletedConfirm ? 180 : 0))
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 13)
+                            .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 13)
-                        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .buttonStyle(.plain)
+                        .evryField(palette)
+                        .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(Palette.danger.opacity(0.25), lineWidth: 1))
+
+                        // Inline confirmation, right below the button.
+                        if showClearCompletedConfirm {
+                            let count = allTasks.filter { $0.completed && !$0.isTrashed }.count
+                            HStack(spacing: 10) {
+                                Button {
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showClearCompletedConfirm = false }
+                                } label: {
+                                    Text("Cancel")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(palette.text)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
+                                        .evryField(palette)
+                                }
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                    for task in allTasks where task.completed && !task.isTrashed {
+                                        TaskActions.delete(task)
+                                    }
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showClearCompletedConfirm = false }
+                                } label: {
+                                    Text(count > 0 ? "Delete \(count)" : "Delete")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
+                                        .background(Palette.danger, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .evryCard(palette, cornerRadius: 22)
-                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Palette.danger.opacity(0.25), lineWidth: 1))
 
                     // Log Out
                     VStack(spacing: 8) {
@@ -678,7 +673,7 @@ struct SettingsSheet: View {
                             .padding(.vertical, 13)
                         }
                         .buttonStyle(.plain)
-                        .evryCard(palette, cornerRadius: 22)
+                        .evryField(palette)
 
                         if !userEmail.isEmpty {
                             Text(userEmail)
@@ -718,23 +713,12 @@ struct SettingsSheet: View {
                     dismiss()
                 }
             }
-            .confirmationDialog(
-                "Delete all completed tasks? They'll move to Recently Deleted.",
-                isPresented: $showClearCompletedConfirm,
-                titleVisibility: .visible
-            ) {
-                Button("Clear All Completed", role: .destructive) {
-                    for task in allTasks where task.completed && !task.isTrashed {
-                        TaskActions.delete(task)
-                    }
-                }
-            }
         }
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
         .sheet(isPresented: $showProfile)         { ProfileAccountSheet() }
         .sheet(isPresented: $showAppearance)      { AppearanceSettingsView() }
-        .sheet(isPresented: $showMembershipPlans) { MembershipPlansView() }
+        .fullScreenCover(isPresented: $showMembershipPlans) { MembershipPlansView() }
         .sheet(isPresented: $showCalendars)       { CalendarsSettingsView() }
         .sheet(isPresented: $showNotifications)   { NotificationsSettingsView() }
         .sheet(isPresented: $showLayout)          { LayoutSettingsView() }
@@ -783,10 +767,10 @@ struct SettingsSheet: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 13)
-            .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
         }
         .buttonStyle(.plain)
-        .evryCard(palette, cornerRadius: 22)
+        .evryField(palette)
     }
 }
 
@@ -905,8 +889,7 @@ private struct ReportIssueSheet: View {
                                     .padding(.vertical, 8)
                                     .scrollContentBackground(.hidden)
                             }
-                            .background(palette.card, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+                            .evryField(palette)
                         }
 
                         HStack(spacing: 6) {
@@ -934,7 +917,7 @@ private struct ReportIssueSheet: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12)
-                        .background(palette.hover, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                        .evryField(palette)
 
                         if last24hCount >= 3 {
                             Text("Daily limit reached (3/day). Try again tomorrow.")
@@ -955,7 +938,7 @@ private struct ReportIssueSheet: View {
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 16)
                                 .background(canSend ? palette.primary : palette.border,
-                                            in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                                            in: RoundedRectangle(cornerRadius: 26, style: .continuous))
                         }
                         .buttonStyle(PressScaleStyle())
                         .disabled(!canSend)
@@ -1081,7 +1064,7 @@ struct ProfileAccountSheet: View {
                             .font(.system(size: 15))
                             .foregroundStyle(palette.text)
                     }
-                    .evryCard(palette, cornerRadius: 22)
+                    .evryField(palette)
 
                     // Email
                     Button { path.append(.changeEmail) } label: {
@@ -1093,7 +1076,7 @@ struct ProfileAccountSheet: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .evryCard(palette, cornerRadius: 22)
+                    .evryField(palette)
 
                     // Password
                     Button { path.append(.changePassword) } label: {
@@ -1105,7 +1088,7 @@ struct ProfileAccountSheet: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .evryCard(palette, cornerRadius: 22)
+                    .evryField(palette)
 
                     // Two-Factor Authentication
                     Button { path.append(.twoFactor) } label: {
@@ -1127,7 +1110,7 @@ struct ProfileAccountSheet: View {
                         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .evryCard(palette, cornerRadius: 22)
+                    .evryField(palette)
 
                     // Delete account
                     Button { confirmingDelete = true } label: {
@@ -1146,9 +1129,9 @@ struct ProfileAccountSheet: View {
                         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .evryCard(palette, cornerRadius: 22)
+                    .evryField(palette)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        RoundedRectangle(cornerRadius: 26, style: .continuous)
                             .strokeBorder(Palette.danger.opacity(0.25), lineWidth: 1)
                     )
                 }
@@ -1559,16 +1542,15 @@ private struct LayoutSettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @AppStorage("tab_inbox_visible") private var tabInbox = true
-    @AppStorage("tab_focus_visible") private var tabFocus = true
-    @AppStorage("tab_projects_visible") private var tabProjects = true
     @AppStorage("tab_calendar_visible") private var tabCalendar = true
+    @AppStorage("tab_notes_visible") private var tabNotes = true
     @AppStorage("tab_profile_visible") private var tabProfile = true
     @AppStorage("inbox_hide_notes") private var hideNotes = false
     @AppStorage("inbox_hide_reschedule") private var hideReschedule = false
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
     private var enabledCount: Int {
-        [tabInbox, tabFocus, tabProjects, tabCalendar, tabProfile].filter { $0 }.count
+        [tabInbox, tabCalendar, tabNotes, tabProfile].filter { $0 }.count
     }
 
     var body: some View {
@@ -1577,9 +1559,8 @@ private struct LayoutSettingsView: View {
                 VStack(spacing: 16) {
                     sectionLabel("TABS")
                     tabRow("Inbox",    icon: "tray",              isOn: $tabInbox)
-                    tabRow("Focus",    icon: "safari",            isOn: $tabFocus)
-                    tabRow("Projects", icon: "folder",            isOn: $tabProjects)
                     tabRow("Calendar", icon: "calendar",          isOn: $tabCalendar)
+                    tabRow("Notes",    icon: "note.text",         isOn: $tabNotes)
                     tabRow("Profile",  icon: "person",            isOn: $tabProfile)
                     Text("At least one tab must always be enabled.")
                         .font(.system(size: 12))
@@ -1631,7 +1612,7 @@ private struct LayoutSettingsView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
-        .evryCard(palette, cornerRadius: 22)
+        .evryField(palette)
     }
 
     private func inboxRow(_ name: String, icon: String, isOn: Binding<Bool>) -> some View {
@@ -1650,7 +1631,7 @@ private struct LayoutSettingsView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
-        .evryCard(palette, cornerRadius: 22)
+        .evryField(palette)
     }
 
     private func sectionLabel(_ text: String) -> some View {
@@ -1773,7 +1754,7 @@ private struct NotificationsSettingsView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
-        .evryCard(palette, cornerRadius: 22)
+        .evryField(palette)
     }
 
     private func timePickerRow(icon: String, label: String, subtitle: String, selection: Binding<Date>) -> some View {
@@ -2035,7 +2016,6 @@ struct GlobalSearchSheet: View {
     @Environment(ProjectNavigationState.self) private var projectNavState
 
     @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
-    @Query(sort: \Project.name) private var allProjects: [Project]
 
     @State private var searchText = ""
     @FocusState private var focused: Bool
@@ -2050,15 +2030,8 @@ struct GlobalSearchSheet: View {
         return tasks.filter {
             $0.title.lowercased().contains(q) ||
             $0.notes.lowercased().contains(q) ||
-            $0.tags.contains(where: { $0.lowercased().contains(q) }) ||
-            ($0.project?.name.lowercased().contains(q) ?? false)
+            $0.tags.contains(where: { $0.lowercased().contains(q) })
         }
-    }
-
-    private var projectResults: [Project] {
-        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return [] }
-        return allProjects.filter { $0.name.lowercased().contains(q) }
     }
 
     var body: some View {
@@ -2083,8 +2056,7 @@ struct GlobalSearchSheet: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(palette.hover, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+                .evryField(palette)
                 .padding(.horizontal, 16)
                 .padding(.top, 16)
                 .padding(.bottom, 8)
@@ -2107,7 +2079,7 @@ struct GlobalSearchSheet: View {
                                     .multilineTextAlignment(.center)
                             }
                             .padding(.top, 60)
-                        } else if results.isEmpty && projectResults.isEmpty {
+                        } else if results.isEmpty {
                             VStack(spacing: 10) {
                                 Image(systemName: "doc.text.magnifyingglass")
                                     .font(.system(size: 36, weight: .light))
@@ -2119,62 +2091,13 @@ struct GlobalSearchSheet: View {
                             .padding(.top, 60)
                         } else {
                             VStack(alignment: .leading, spacing: 0) {
-                                if !projectResults.isEmpty {
-                                    Text("PROJECTS")
-                                        .font(.system(size: 11, weight: .bold))
-                                        .tracking(0.8)
-                                        .foregroundStyle(palette.textSec)
-                                        .padding(.horizontal, 20)
-                                        .padding(.top, 16)
-                                        .padding(.bottom, 6)
-
-                                    ForEach(projectResults) { project in
-                                        let catColor = project.category?.color ?? palette.primary
-                                        Button {
-                                            projectNavState.requestedProject = project
-                                            projectNavState.requestedTab = .projects
-                                            dismiss()
-                                        } label: {
-                                            HStack(spacing: 12) {
-                                                ZStack {
-                                                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                                                        .fill(catColor.opacity(0.15))
-                                                        .frame(width: 36, height: 36)
-                                                    Image(systemName: project.icon)
-                                                        .font(.system(size: 14, weight: .medium))
-                                                        .foregroundStyle(catColor)
-                                                }
-                                                Text(project.name)
-                                                    .font(.system(size: 15, weight: .medium))
-                                                    .foregroundStyle(palette.text)
-                                                Spacer()
-                                                let doneCount = (project.tasks ?? []).filter { $0.completed && !$0.isTrashed }.count
-                                                let totalCount = (project.tasks ?? []).filter { !$0.isTrashed && !$0.isNote }.count
-                                                Text("\(doneCount)/\(totalCount)")
-                                                    .font(.system(size: 12))
-                                                    .foregroundStyle(palette.textSec)
-                                                Image(systemName: "chevron.right")
-                                                    .font(.system(size: 11, weight: .medium))
-                                                    .foregroundStyle(palette.textPh)
-                                            }
-                                            .padding(.horizontal, 16)
-                                            .padding(.vertical, 10)
-                                            .background(palette.card, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                                            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
-                                        }
-                                        .buttonStyle(.plain)
-                                        .padding(.horizontal, 16)
-                                        .padding(.bottom, 6)
-                                    }
-                                }
-
                                 if !results.isEmpty {
                                     Text("TASKS & NOTES")
                                         .font(.system(size: 11, weight: .bold))
                                         .tracking(0.8)
                                         .foregroundStyle(palette.textSec)
                                         .padding(.horizontal, 20)
-                                        .padding(.top, projectResults.isEmpty ? 16 : 8)
+                                        .padding(.top, 16)
                                         .padding(.bottom, 6)
 
                                     Text("\(results.count) result\(results.count == 1 ? "" : "s")")
@@ -2185,12 +2108,7 @@ struct GlobalSearchSheet: View {
 
                                     ForEach(results) { task in
                                         SearchResultRow(task: task, palette: palette, query: searchText) {
-                                            if let project = task.project {
-                                                projectNavState.requestedProject = project
-                                                projectNavState.requestedTab = .projects
-                                            } else {
-                                                projectNavState.requestedTab = .inbox
-                                            }
+                                            projectNavState.requestedTab = .inbox
                                             dismiss()
                                         }
                                         .padding(.horizontal, 16)
@@ -2252,9 +2170,9 @@ private struct SearchResultRow: View {
             onTap?()
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: task.isNote ? "doc.text.fill" : (task.completed ? "checkmark.circle.fill" : "circle"))
+                Image(systemName: task.completed ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 16))
-                    .foregroundStyle(task.completed ? Palette.success : task.isNote ? palette.textSec : palette.border)
+                    .foregroundStyle(task.completed ? Palette.success : palette.border)
                     .frame(width: 24, height: 24)
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -2265,11 +2183,6 @@ private struct SearchResultRow: View {
                         .lineLimit(1)
 
                     HStack(spacing: 6) {
-                        if let project = task.project {
-                            Label(project.name, systemImage: project.icon)
-                                .font(.system(size: 11))
-                                .foregroundStyle(project.category?.color ?? palette.primary)
-                        }
                         if let due = task.dueDate {
                             Text(due.formatted(.dateTime.month(.abbreviated).day()))
                                 .font(.system(size: 11))
@@ -2289,8 +2202,7 @@ private struct SearchResultRow: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(palette.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+            .evryField(palette)
         }
         .buttonStyle(.plain)
     }

@@ -10,7 +10,7 @@
 import SwiftUI
 
 enum AppTab: String, CaseIterable, Identifiable {
-    case inbox, focus, projects, calendar, profile
+    case inbox, calendar, notes, profile
 
     var id: String { rawValue }
 }

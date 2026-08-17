@@ -21,15 +21,32 @@ struct TaskRowView: View {
     var isSelected: Bool = false
     var onSelect: () -> Void = {}
     var compact: Bool = false
+    /// Hides the due-date chip (used on the Timeline, where every task shown is
+    /// already due that day) while keeping the row's height unchanged.
+    var hideDueDate: Bool = false
+    /// Vertically centers the checkbox and content (like the trailing trash icon)
+    /// instead of top-aligning — used on the Timeline.
+    var centered: Bool = false
+    /// Card corner radius. Defaults to the standard row radius; the Timeline uses
+    /// the roomier folder-card radius.
+    var cornerRadius: CGFloat = 14
+    /// Forwarded to the checkbox — incrementing it (on swipe-to-complete) plays the
+    /// same completion animation + delayed commit as tapping the circle.
+    var completeToken: Int = 0
 
     @State private var subtasksExpanded = true
+    @State private var showDirectionsChooser = false
+
+    private enum MapsProvider { case apple, google }
 
     private var hasMeta: Bool {
-        !task.isNote && (task.dueDate != nil || !task.tags.isEmpty || task.priority != .normal || task.recurrence != nil)
+        guard !task.isNote else { return false }
+        let hasDate = task.dueDate != nil && !hideDueDate
+        return hasDate || !task.tags.isEmpty || task.priority != .normal || task.recurrence != nil
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: centered ? .center : .top, spacing: 12) {
             if isSelecting {
                 Button(action: onSelect) {
                     ZStack {
@@ -43,20 +60,20 @@ struct TaskRowView: View {
                     }
                     .frame(width: 22, height: 22)
                     .animation(.spring(response: 0.25, dampingFraction: 0.65), value: isSelected)
+                    // Match the checkbox's enlarged footprint so the row keeps its
+                    // height in multi-select instead of collapsing (esp. on the
+                    // Timeline, where rows are otherwise anchored by the trash icon).
+                    .frame(width: 38, height: 38, alignment: centered ? .leading : .topLeading)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.top, 2)
-            } else if task.isNote {
-                // A note has nothing to "complete" — same footprint so notes
-                // and tasks still line up in a mixed list.
-                Image(systemName: "doc.text")
-                    .font(.system(size: 13))
-                    .foregroundStyle(palette.textPh)
-                    .frame(width: 22, height: 22)
-                    .padding(.top, 2)
+                .padding(.top, centered ? 0 : 2)
             } else {
-                TaskCheckbox(checked: task.completed, palette: palette, action: onToggle)
-                    .padding(.top, 2)
+                TaskCheckbox(checked: task.completed, palette: palette,
+                             contentAlignment: centered ? .leading : .topLeading,
+                             externalCompleteToken: completeToken,
+                             action: onToggle)
+                    .padding(.top, centered ? 0 : 2)
             }
 
             VStack(alignment: .leading, spacing: 0) {
@@ -75,11 +92,24 @@ struct TaskRowView: View {
 
                 if !task.notes.isEmpty {
                     Text(task.notes)
-                        .font(.system(size: task.isNote ? 13.5 : 12))
-                        .foregroundStyle(task.isNote ? palette.text : palette.textSec)
-                        .lineLimit(task.isNote ? 8 : 2)
+                        .font(.system(size: 12))
+                        .foregroundStyle(palette.textSec)
+                        .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .padding(.top, 3)
+                }
+
+                if !task.location.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "mappin.and.ellipse")
+                            .font(.system(size: 11))
+                            .foregroundStyle(palette.textSec)
+                        Text(task.location)
+                            .font(.system(size: 12))
+                            .foregroundStyle(palette.textSec)
+                            .lineLimit(1)
+                    }
+                    .padding(.top, 3)
                 }
 
                 if hasMeta {
@@ -98,6 +128,24 @@ struct TaskRowView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // In multi-select the trailing reorder handle overlays this edge, so
+            // wrap the text earlier to keep it clear of the handle icon.
+            .padding(.trailing, isSelecting ? 40 : 0)
+
+            if !isSelecting && !task.location.isEmpty {
+                Button {
+                    showDirectionsChooser = true
+                } label: {
+                    Image(systemName: "arrow.turn.up.right")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(palette.primary)
+                        .frame(width: 40, height: 40)
+                        .background(palette.primaryLight, in: Circle())
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Directions")
+            }
 
             if !isSelecting {
                 Button {
@@ -115,15 +163,37 @@ struct TaskRowView: View {
         }
         .padding(.vertical, compact ? 7 : 11)
         .padding(.horizontal, 14)
-        .background(palette.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(palette.card, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .opacity(task.completed ? 0.62 : 1)
         .contentShape(Rectangle())
         .onTapGesture { if isSelecting { onSelect() } else { onEdit() } }
+        .confirmationDialog("Directions to \(task.location)", isPresented: $showDirectionsChooser, titleVisibility: .visible) {
+            Button("Apple Maps") { openDirections(.apple) }
+            Button("Google Maps") { openDirections(.google) }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    private func openDirections(_ provider: MapsProvider) {
+        let query = task.location.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let url: URL?
+        switch provider {
+        case .apple:
+            url = URL(string: "http://maps.apple.com/?daddr=\(query)&dirflg=d")
+        case .google:
+            if let app = URL(string: "comgooglemaps://?daddr=\(query)&directionsmode=driving"),
+               UIApplication.shared.canOpenURL(app) {
+                url = app
+            } else {
+                url = URL(string: "https://www.google.com/maps/dir/?api=1&destination=\(query)")
+            }
+        }
+        if let url { UIApplication.shared.open(url) }
     }
 
     private var metaChips: some View {
         HStack(spacing: 4) {
-            if let due = task.dueDate {
+            if let due = task.dueDate, !hideDueDate {
                 DateChip(date: due, palette: palette)
             }
             if let recurrence = task.recurrence {
@@ -270,6 +340,9 @@ struct ScheduleSwipeCard<Content: View>: View {
     /// commit, then a fresh, empty card slides back up from the bottom — used by
     /// the quick-add sheet so it feels like the sheet itself is sent to the day.
     var sendsAway: Bool = false
+    /// When set, a downward drag flings the card off the bottom and calls this —
+    /// used by the quick-add overlay so a swipe down closes it.
+    var onDismiss: (() -> Void)? = nil
     @ViewBuilder var content: () -> Content
 
     @State private var offset: CGSize = .zero
@@ -316,13 +389,36 @@ struct ScheduleSwipeCard<Content: View>: View {
     private var scheduleDrag: some Gesture {
         DragGesture(minimumDistance: 14)
             .onChanged { value in
-                guard !committing, !isLocked else { return }
-                offset = visualOffset(for: value.translation)
-                updateHint(for: value.translation)
+                guard !committing else { return }
+                let t = value.translation
+                // Downward drag dismisses (works even when scheduling is locked,
+                // e.g. an empty quick-add field).
+                if onDismiss != nil, t.height > 0, abs(t.height) > abs(t.width) {
+                    offset = CGSize(width: 0, height: t.height)
+                    return
+                }
+                guard !isLocked else { return }
+                offset = visualOffset(for: t)
+                updateHint(for: t)
             }
             .onEnded { value in
-                guard !committing, !isLocked else { return }
-                if let dest = destination(value.translation, value.velocity) {
+                guard !committing else { return }
+                let t = value.translation
+                if onDismiss != nil, t.height > 0, abs(t.height) > abs(t.width),
+                   t.height > 110 || value.velocity.height > 700 {
+                    // Close the keyboard right away so it animates down with the card.
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                                    to: nil, from: nil, for: nil)
+                    committing = true
+                    withAnimation(.easeIn(duration: 0.22)) {
+                        offset = CGSize(width: 0, height: cardHeight + 500)
+                        opacity = 0
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { onDismiss?() }
+                    return
+                }
+                guard !isLocked else { reset(); return }
+                if let dest = destination(t, value.velocity) {
                     commit(dest)
                 } else {
                     reset()

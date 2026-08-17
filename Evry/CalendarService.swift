@@ -137,6 +137,27 @@ final class CalendarService {
         }.sorted { $0.startDate < $1.startDate }
     }
 
+    /// The underlying store — needed to host `EKEventEditViewController`.
+    var eventStore: EKEventStore { store }
+
+    /// Fetches the editable `EKEvent` behind a `CalendarEvent`, if it still exists.
+    func ekEvent(withIdentifier id: String) -> EKEvent? {
+        store.event(withIdentifier: id)
+    }
+
+    /// Robustly resolves the `EKEvent` for a tapped item. `event(withIdentifier:)`
+    /// returns nil for some imported/subscribed calendar events, so fall back to
+    /// scanning that day's events and matching the identifier.
+    func editableEvent(id: String, near date: Date) -> EKEvent? {
+        if let e = store.event(withIdentifier: id) { return e }
+        guard isAuthorized else { return nil }
+        let cal = Calendar.current
+        let start = cal.startOfDay(for: date)
+        let end = cal.date(byAdding: .day, value: 1, to: start) ?? date
+        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
+        return store.events(matching: predicate).first { $0.eventIdentifier == id }
+    }
+
     func importEvent(_ event: CalendarEvent, context: ModelContext) {
         guard !importedEventIDs.contains(event.id) else { return }
         let task = TaskItem(title: event.title, dueDate: event.startDate)

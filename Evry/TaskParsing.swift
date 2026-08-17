@@ -93,7 +93,6 @@ struct ParsedTask {
     var date: Date?
     var tags: [String]
     var priority: TaskPriority
-    var isNote: Bool
 }
 
 private struct DatePattern {
@@ -226,7 +225,6 @@ private let timePatterns: [TimePattern] = [
     TimePattern(regex: rx(#"\b(?:at\s+)?midnight\b"#)) { _ in (0, 0) },
 ]
 
-private let notePattern = rx(#"\bnote\b"#)
 private let tagPattern = rx(#"#(\w+)"#)
 
 private let priorityPatterns: [(NSRegularExpression, TaskPriority)] = [
@@ -275,15 +273,6 @@ func resolveDateKeyword(_ keyword: String) -> Date? {
 func parseTaskInput(_ raw: String) -> ParsedTask {
     var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
-    // A note skips date/time/tag/priority parsing entirely.
-    if let noteMatch = notePattern.firstGroups(in: text) {
-        text.removeSubrange(noteMatch.range)
-        return ParsedTask(
-            title: text.split(separator: " ").joined(separator: " "),
-            date: nil, tags: [], priority: .normal, isNote: true
-        )
-    }
-
     var tags: [String] = []
     while let m = tagPattern.firstGroups(in: text) {
         tags.append(m.groups[1].lowercased())
@@ -323,79 +312,56 @@ func parseTaskInput(_ raw: String) -> ParsedTask {
 
     return ParsedTask(
         title: text.split(separator: " ").joined(separator: " "),
-        date: date, tags: tags, priority: priority, isNote: false
+        date: date, tags: tags, priority: priority
     )
 }
 
 // MARK: - Live input highlighting
 
-/// Renders the quick-add input with its recognized keywords color-coded, matching
-/// how `parseTaskInput` interprets the same text: notes, tags, priorities, times,
-/// and dates each get their own accent. Everything else stays in the body color.
-func attributedTaskInput(_ raw: String, palette: Palette, fontSize: CGFloat) -> AttributedString {
-    var attr = AttributedString(raw)
-    attr.font = .system(size: fontSize)
-    attr.foregroundColor = palette.text
+/// Renders the quick-add input's keywords (tags, priorities, times, dates) inline
+/// in the editing text view, so the highlighted text is
+/// rendered by the text view itself (keeping the caret aligned) rather than a
+/// separate overlay.
+func attributedTaskInputNS(_ raw: String, palette: Palette, fontSize: CGFloat) -> NSAttributedString {
+    let base = UIFont.systemFont(ofSize: fontSize)
+    let semibold = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
+    let result = NSMutableAttributedString(
+        string: raw,
+        attributes: [.font: base, .foregroundColor: UIColor(palette.text)]
+    )
 
-    func range(_ swiftRange: Range<String.Index>) -> Range<AttributedString.Index> {
-        let lower = raw.distance(from: raw.startIndex, to: swiftRange.lowerBound)
-        let upper = raw.distance(from: raw.startIndex, to: swiftRange.upperBound)
-        let start = attr.characters.index(attr.startIndex, offsetBy: lower)
-        let end = attr.characters.index(attr.startIndex, offsetBy: upper)
-        return start..<end
+    func apply(_ swiftRange: Range<String.Index>, color: UIColor, background: UIColor? = nil) {
+        let nr = NSRange(swiftRange, in: raw)
+        result.addAttribute(.foregroundColor, value: color, range: nr)
+        result.addAttribute(.font, value: semibold, range: nr)
+        if let background { result.addAttribute(.backgroundColor, value: background, range: nr) }
     }
 
-    func highlight(_ swiftRange: Range<String.Index>, color: Color) {
-        let r = range(swiftRange)
-        attr[r].foregroundColor = color
-        attr[r].font = .system(size: fontSize, weight: .semibold)
-    }
-
-    // Date/time keywords get a filled highlight behind the text in the app's
-    // accent color, rather than just recoloring the glyphs.
-    func highlightBackground(_ swiftRange: Range<String.Index>) {
-        let r = range(swiftRange)
-        attr[r].backgroundColor = palette.primaryLight
-        attr[r].foregroundColor = palette.primary
-        attr[r].font = .system(size: fontSize, weight: .semibold)
-    }
-
-    // A note short-circuits parsing, so highlight only the "note" keyword.
-    if let noteRange = notePattern.allRanges(in: raw).first {
-        highlight(noteRange, color: palette.primary)
-        return attr
-    }
-
-    for range in tagPattern.allRanges(in: raw) {
-        highlight(range, color: palette.primary)
-    }
+    for range in tagPattern.allRanges(in: raw) { apply(range, color: UIColor(palette.primary)) }
 
     for (regex, value) in priorityPatterns {
-        let color: Color
+        let color: UIColor
         switch value {
-        case .high:   color = Palette.danger
-        case .medium: color = Palette.warning
-        case .low:    color = Palette.success
-        case .normal: color = palette.text
+        case .high:   color = UIColor(Palette.danger)
+        case .medium: color = UIColor(Palette.warning)
+        case .low:    color = UIColor(Palette.success)
+        case .normal: color = UIColor(palette.text)
         }
-        for range in regex.allRanges(in: raw) {
-            highlight(range, color: color)
-        }
+        for range in regex.allRanges(in: raw) { apply(range, color: color) }
     }
 
     for pattern in timePatterns {
         if let match = pattern.regex.allRanges(in: raw).first {
-            highlightBackground(match)
+            apply(match, color: UIColor(palette.primary), background: UIColor(palette.primaryLight))
             break
         }
     }
-
     for pattern in datePatterns {
         if let match = pattern.regex.allRanges(in: raw).first {
-            highlightBackground(match)
+            apply(match, color: UIColor(palette.primary), background: UIColor(palette.primaryLight))
             break
         }
     }
 
-    return attr
+    return result
 }

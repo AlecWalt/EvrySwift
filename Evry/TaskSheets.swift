@@ -21,30 +21,47 @@ struct AddTaskSheet: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(Appearance.self) private var appearance
 
-    /// Preselected project when quick-adding from an open project card.
-    var project: Project?
+    /// Presented as a bottom overlay (not a system sheet) so there's no dimming
+    /// layer; this drives its visibility.
+    @Binding var isPresented: Bool
+    /// Seeds the due date when the typed text doesn't specify one — used by the
+    /// Calendar tab to drop a new task onto the selected day.
+    var defaultDate: Date? = nil
 
     @State private var text = ""
     @State private var notes = ""
     @State private var location = ""
     @State private var showNotes = false
-    @State private var showLocationPicker = false
-    @State private var sheetHeight: CGFloat = 86
-    @State private var selectedDetent: PresentationDetent = .height(86)
+    @State private var showLocation = false
+    @State private var locationQuery = ""
+    @State private var locationResults: [MKMapItem] = []
+    @State private var locationSearchTask: Task<Void, Never>? = nil
+    @State private var locationProvider = CurrentLocationProvider()
     @State private var titleFocused: Bool = false
     @FocusState private var notesFocused: Bool
+    @FocusState private var locationFocused: Bool
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
     private var parsed: ParsedTask? { text.trimmingCharacters(in: .whitespaces).isEmpty ? nil : parseTaskInput(text) }
 
     var body: some View {
+        ZStack(alignment: .bottom) {
+            // Transparent tap-catcher — the live app stays visible behind the card.
+            Color.black.opacity(0.001)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { closeSheet() }
+
         // The whole card is the swipeable surface: type into it, then fling it
         // to a day. On commit it's sent off-screen and a fresh card slides up.
         ScheduleSwipeCard(
             palette: palette,
             onSchedule: { date, _ in submit(overrideDate: date) },
-            isLocked: parsed == nil,
-            sendsAway: true
+            // Locked with nothing to schedule, or while picking a location so
+            // scrolling the results doesn't accidentally fling the card.
+            isLocked: parsed == nil || showLocation,
+            sendsAway: true,
+            onDismiss: { closeSheet() }
         ) {
         VStack(spacing: 0) {
             Capsule()
@@ -55,7 +72,7 @@ struct AddTaskSheet: View {
 
             HStack(spacing: 8) {
                 HighlightedTaskTextField(
-                    placeholder: "Add task… tod, #tag, !high, note",
+                    placeholder: "Add task… tod, #tag, !high",
                     text: $text,
                     palette: palette,
                     autoFocus: true,
@@ -86,17 +103,22 @@ struct AddTaskSheet: View {
                     .buttonStyle(PressScaleStyle())
                 }
 
-                Button {
-                    showLocationPicker = true
-                } label: {
-                    Image(systemName: location.isEmpty ? "mappin" : "mappin.circle.fill")
-                        .font(.system(size: 15))
-                        .foregroundStyle(location.isEmpty ? palette.textSec : palette.primary)
-                        .frame(width: 36, height: 36)
-                        .background(location.isEmpty ? palette.hover : palette.primaryLight, in: Circle())
-                        .overlay(Circle().strokeBorder(location.isEmpty ? palette.border : palette.primary.opacity(0.4), lineWidth: 1.5))
+                if !showLocation {
+                    Button {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                            showLocation = true
+                        }
+                        locationQuery = location
+                    } label: {
+                        Image(systemName: location.isEmpty ? "mappin" : "mappin.circle.fill")
+                            .font(.system(size: 15))
+                            .foregroundStyle(location.isEmpty ? palette.textSec : palette.primary)
+                            .frame(width: 36, height: 36)
+                            .background(location.isEmpty ? palette.hover : palette.primaryLight, in: Circle())
+                            .overlay(Circle().strokeBorder(location.isEmpty ? palette.border : palette.primary.opacity(0.4), lineWidth: 1.5))
+                    }
+                    .buttonStyle(PressScaleStyle())
                 }
-                .buttonStyle(PressScaleStyle())
             }
             .animation(.spring(response: 0.25, dampingFraction: 0.8), value: parsed == nil)
             .padding(.horizontal, 14)
@@ -112,25 +134,135 @@ struct AddTaskSheet: View {
             }
 
             if showNotes {
-                TextField("Add notes…", text: $notes, axis: .vertical)
-                    .font(.system(size: 14))
-                    .foregroundStyle(palette.text)
-                    .lineLimit(3...6)
-                    .focused($notesFocused)
+                HStack(alignment: .top, spacing: 8) {
+                    TextField("Add notes…", text: $notes, axis: .vertical)
+                        .font(.system(size: 14))
+                        .foregroundStyle(palette.text)
+                        .lineLimit(3...6)
+                        .focused($notesFocused)
+                    // Collapse arrow, matching the location picker.
+                    Button {
+                        // Move focus back to the title so the keyboard stays up
+                        // instead of dismissing when the notes field is removed.
+                        titleFocused = true
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showNotes = false }
+                    } label: {
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(palette.textSec)
+                            .frame(width: 28, height: 28)
+                            .background(palette.hover, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(palette.hover, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .strokeBorder(notesFocused ? palette.primary : palette.border, lineWidth: 1.5)
+                )
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+                .padding(.bottom, location.isEmpty ? 16 : 0)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+
+            if showLocation {
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "mappin.circle.fill")
+                            .font(.system(size: 15))
+                            .foregroundStyle(palette.primary)
+                        TextField("Search location…", text: $locationQuery)
+                            .font(.system(size: 15))
+                            .foregroundStyle(palette.text)
+                            .focused($locationFocused)
+                            .autocorrectionDisabled()
+                            .submitLabel(.done)
+                        if !locationQuery.isEmpty {
+                            Button {
+                                locationQuery = ""
+                                locationResults = []
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(palette.textPh)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        Button {
+                            // Move focus back to the title so the keyboard stays up
+                            // instead of dismissing when the location field is removed.
+                            titleFocused = true
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showLocation = false }
+                        } label: {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(palette.textSec)
+                                .frame(width: 28, height: 28)
+                                .background(palette.hover, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background(palette.hover, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 24, style: .continuous)
-                            .strokeBorder(notesFocused ? palette.primary : palette.border, lineWidth: 1.5)
+                            .strokeBorder(locationFocused ? palette.primary : palette.border, lineWidth: 1.5)
                     )
-                    .padding(.horizontal, 14)
-                    .padding(.top, 8)
-                    .padding(.bottom, location.isEmpty ? 16 : 0)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+
+                    if !locationResults.isEmpty {
+                        VStack(spacing: 0) {
+                            let shown = Array(locationResults.prefix(5).enumerated())
+                            ForEach(shown, id: \.offset) { i, item in
+                                Button {
+                                    selectLocation(item)
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        ZStack {
+                                            Circle().fill(palette.primaryLight).frame(width: 32, height: 32)
+                                            Image(systemName: "mappin.circle.fill")
+                                                .font(.system(size: 15))
+                                                .foregroundStyle(palette.primary)
+                                        }
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(item.name ?? "Unknown")
+                                                .font(.system(size: 14, weight: .medium))
+                                                .foregroundStyle(palette.text)
+                                                .lineLimit(1)
+                                            let subtitle = mapItemSubtitle(item)
+                                            if !subtitle.isEmpty {
+                                                Text(subtitle)
+                                                    .font(.system(size: 12))
+                                                    .foregroundStyle(palette.textSec)
+                                                    .lineLimit(1)
+                                            }
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 9)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                if i < shown.count - 1 {
+                                    Divider().padding(.leading, 56)
+                                }
+                            }
+                        }
+                        .background(palette.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+                .padding(.bottom, 16)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
-            if !location.isEmpty {
+            if !location.isEmpty && !showLocation {
                 HStack(spacing: 6) {
                     Image(systemName: "mappin.circle.fill")
                         .font(.system(size: 12))
@@ -168,33 +300,75 @@ struct AddTaskSheet: View {
         .padding(.horizontal, 10)
         .padding(.bottom, 10)
         .shadow(color: .black.opacity(0.16), radius: 22, y: 8)
+        // App-colored backing that bleeds straight down behind the keyboard so
+        // that region reads as the normal app background instead of the black
+        // window. Kept inside the swipe surface (with the card) so it travels
+        // with the card during a fling/reentry rather than being left behind.
+        .background(palette.bg.ignoresSafeArea())
         } // ScheduleSwipeCard
-        .sheet(isPresented: $showLocationPicker) {
-            LocationPickerSheet(location: $location)
-                .environment(appearance)
-        }
-        // fixedSize forces the VStack to resolve at its ideal height, escaping the
-        // sheet's proposed-height constraint. onGeometryChange then reads that ideal
-        // height as the view's actual laid-out size and drives the detent.
+        // Resolve the card at its ideal (compact) height so the text view sizes to
+        // its content instead of filling the whole overlay.
         .fixedSize(horizontal: false, vertical: true)
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.height
-        } action: { h in
-            guard h > 0, h != sheetHeight else { return }
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
-                sheetHeight = h
-                selectedDetent = .height(h)
+        } // ZStack
+        .onAppear {
+            // Explicitly claim first responder on every presentation. `autoFocus`
+            // (via didMoveToWindow) can miss when the view is reused across a
+            // quick close/reopen; this guarantees the keyboard comes back up.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                titleFocused = true
             }
         }
-        .presentationDetents([.height(sheetHeight)], selection: $selectedDetent)
-        .presentationBackground(.clear)
-        .presentationDragIndicator(.hidden)
-        .onAppear { }
         .onChange(of: showNotes) { _, newValue in
             if newValue {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     notesFocused = true
                 }
+            }
+        }
+        .onChange(of: showLocation) { _, newValue in
+            if newValue {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    locationFocused = true
+                }
+                if !locationQuery.isEmpty { scheduleLocationSearch(locationQuery) }
+            } else {
+                locationSearchTask?.cancel()
+            }
+        }
+        .onChange(of: locationQuery) { _, q in scheduleLocationSearch(q) }
+    }
+
+    private func selectLocation(_ item: MKMapItem) {
+        location = mapItemLabel(item, fallback: item.name ?? "")
+        locationResults = []
+        locationQuery = ""
+        UISelectionFeedbackGenerator().selectionChanged()
+        // Collapse the dropdown/bubble but keep the keyboard up by moving focus
+        // back to the title field rather than resigning first responder.
+        titleFocused = true
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showLocation = false }
+    }
+
+    /// Debounced MapKit search, biased to the device's region and re-sorted so
+    /// the nearest matches surface first.
+    private func scheduleLocationSearch(_ q: String) {
+        locationSearchTask?.cancel()
+        let trimmed = q.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { locationResults = []; return }
+        locationSearchTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            let request = MKLocalSearch.Request()
+            request.naturalLanguageQuery = trimmed
+            let coord = locationProvider.coordinate
+            if let coord {
+                request.region = MKCoordinateRegion(center: coord, latitudinalMeters: 50_000, longitudinalMeters: 50_000)
+            }
+            guard let response = try? await MKLocalSearch(request: request).start() else { return }
+            let sorted = sortByDistance(response.mapItems, near: coord)
+            await MainActor.run {
+                guard !Task.isCancelled else { return }
+                locationResults = sorted
             }
         }
     }
@@ -222,6 +396,13 @@ struct AddTaskSheet: View {
         .foregroundStyle(color)
     }
 
+    /// Closes the overlay, dismissing the keyboard immediately so it animates
+    /// down in step with the card rather than lagging behind.
+    private func closeSheet() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        isPresented = false
+    }
+
     /// `overrideDate` is supplied by the swipe-to-schedule gesture and wins over
     /// any date parsed from the typed keywords.
     private func submit(overrideDate: Date? = nil) {
@@ -229,13 +410,11 @@ struct AddTaskSheet: View {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         let task = TaskItem(
             title: parsed.title,
-            dueDate: overrideDate ?? parsed.date,
+            dueDate: overrideDate ?? parsed.date ?? defaultDate,
             tags: parsed.tags,
             priority: parsed.priority,
             notes: notes.trimmingCharacters(in: .whitespacesAndNewlines),
-            location: location,
-            isNote: parsed.isNote,
-            project: project
+            location: location
         )
         withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) {
             context.insert(task)
@@ -263,8 +442,6 @@ struct EditTaskSheet: View {
 
     @Bindable var task: TaskItem
     var onDelete: (TaskItem) -> Void
-
-    @Query(sort: \Project.createdAt) private var projects: [Project]
 
     @State private var hasDate: Bool = false
     @State private var newSubtask = ""
@@ -330,16 +507,6 @@ struct EditTaskSheet: View {
                                     .filter { !$0.isEmpty }
                             }
 
-                        Picker("Project", selection: Binding(
-                            get: { task.project?.uid },
-                            set: { uid in task.project = projects.first { $0.uid == uid } }
-                        )) {
-                            Text("None").tag(UUID?.none)
-                            ForEach(projects) { project in
-                                Text(project.name).tag(UUID?.some(project.uid))
-                            }
-                        }
-
                         Toggle("Pinned", isOn: $task.pinned)
                             .tint(palette.primary)
                     }
@@ -398,7 +565,7 @@ struct EditTaskSheet: View {
                     }
                 }
             }
-            .navigationTitle(task.isNote ? "Edit Note" : "Edit Task")
+            .navigationTitle("Edit Task")
             #if !os(macOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -568,31 +735,55 @@ struct LocationPickerSheet: View {
             guard !Task.isCancelled else { return }
             let request = MKLocalSearch.Request()
             request.naturalLanguageQuery = trimmed
-            if let coord = locationProvider.coordinate {
+            let coord = locationProvider.coordinate
+            if let coord {
                 request.region = MKCoordinateRegion(center: coord, latitudinalMeters: 50_000, longitudinalMeters: 50_000)
             }
             if let response = try? await MKLocalSearch(request: request).start() {
-                await MainActor.run { results = response.mapItems }
+                let sorted = sortByDistance(response.mapItems, near: coord)
+                await MainActor.run { results = sorted }
             }
         }
     }
+}
 
-    private func mapItemLabel(_ item: MKMapItem, fallback: String) -> String {
-        let name = item.name ?? fallback
-        let city: String
-        if #available(iOS 26.0, *) {
-            city = item.addressRepresentations?.cityName ?? ""
-        } else {
-            city = item.placemark.locality ?? item.placemark.administrativeArea ?? ""
-        }
-        return city.isEmpty ? name : "\(name), \(city)"
-    }
+// MARK: - Map item helpers (shared by the quick-add bubble and the picker sheet)
 
-    private func mapItemSubtitle(_ item: MKMapItem) -> String {
-        if #available(iOS 26.0, *) {
-            return item.address?.shortAddress ?? item.placemark.title ?? ""
-        } else {
-            return item.placemark.title ?? ""
-        }
+private func mapItemLabel(_ item: MKMapItem, fallback: String) -> String {
+    let name = item.name ?? fallback
+    let city: String
+    if #available(iOS 26.0, *) {
+        city = item.addressRepresentations?.cityName ?? ""
+    } else {
+        city = item.placemark.locality ?? item.placemark.administrativeArea ?? ""
     }
+    return city.isEmpty ? name : "\(name), \(city)"
+}
+
+private func mapItemSubtitle(_ item: MKMapItem) -> String {
+    if #available(iOS 26.0, *) {
+        return item.address?.shortAddress ?? item.placemark.title ?? ""
+    } else {
+        return item.placemark.title ?? ""
+    }
+}
+
+private func mapItemCoordinate(_ item: MKMapItem) -> CLLocationCoordinate2D? {
+    if #available(iOS 26.0, *) {
+        return item.location.coordinate
+    } else {
+        return item.placemark.coordinate
+    }
+}
+
+/// Orders results by straight-line distance from `coord` so the nearest places
+/// appear first. Returns the input unchanged when the device location is unknown.
+private func sortByDistance(_ items: [MKMapItem], near coord: CLLocationCoordinate2D?) -> [MKMapItem] {
+    guard let coord else { return items }
+    let origin = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+    func distance(_ item: MKMapItem) -> CLLocationDistance {
+        guard let c = mapItemCoordinate(item) else { return .greatestFiniteMagnitude }
+        return origin.distance(from: CLLocation(latitude: c.latitude, longitude: c.longitude))
+    }
+    return items.sorted { distance($0) < distance($1) }
 }

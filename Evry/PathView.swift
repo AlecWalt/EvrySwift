@@ -9,6 +9,7 @@
 
 import SwiftUI
 import SwiftData
+import UIKit
 
 struct PathView: View {
     let palette: Palette
@@ -28,6 +29,13 @@ struct PathView: View {
     @State private var skippedOrder: [UUID] = []
     @State private var celebrating = false
     @State private var showPomodoro = false
+    // Drives the Focus Mode entrance — the task screen fades + slides up once
+    // as we drop into Focus Mode after Start is pressed.
+    @State private var contentAppeared = false
+    // Completion animation — matches TaskCheckbox (springy pop + radiating ring).
+    @State private var popScale: CGFloat = 1
+    @State private var burstScale: CGFloat = 0.7
+    @State private var burstOpacity: Double = 0
 
     private var tasks: [TaskItem] { allTasks.filter { !$0.isTrashed } }
     private var candidate: TaskItem? { nextAction(tasks: tasks, skippedOrder: skippedOrder) }
@@ -40,6 +48,7 @@ struct PathView: View {
                     .padding(.top, 16)
             }
 
+            Group {
             if let candidate {
                 VStack(spacing: 16) {
                     Spacer()
@@ -80,10 +89,21 @@ struct PathView: View {
                 .padding(.top, inFocusMode ? 60 : 0)
                 .padding(.bottom, inFocusMode ? 80 : 110)
             }
+            }
+            // Focus Mode entrance: fade + slide up. Outside Focus Mode the
+            // content is always fully shown (no offset).
+            .opacity(inFocusMode ? (contentAppeared ? 1 : 0) : 1)
+            .offset(y: inFocusMode ? (contentAppeared ? 0 : 26) : 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.bg)
-
+        .onAppear {
+            guard inFocusMode else { return }
+            // Let the Pomodoro cover finish dismissing before sliding in.
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.82).delay(0.15)) {
+                contentAppeared = true
+            }
+        }
     }
 
     // MARK: Pomodoro trigger (same card style as the Profile tab's)
@@ -114,26 +134,18 @@ struct PathView: View {
             .evryCard(palette)
         }
         .buttonStyle(.plain)
-        .sheet(isPresented: $showPomodoro) {
-            // Already in Focus Mode — the sheet just controls the timer.
+        .fullScreenCover(isPresented: $showPomodoro) {
+            // Already in Focus Mode — the cover just controls the timer.
             PomodoroView()
         }
     }
 
     private func card(_ task: TaskItem) -> some View {
         VStack(spacing: 10) {
-            // Eyebrow: project name + date chip
-            if task.project != nil || task.dueDate != nil {
+            // Eyebrow: date chip
+            if let due = task.dueDate {
                 HStack(spacing: 8) {
-                    if let project = task.project {
-                        Text(project.name.uppercased())
-                            .font(.system(size: 12.5, weight: .bold))
-                            .tracking(0.6)
-                            .foregroundStyle(project.category?.color ?? palette.primary)
-                    }
-                    if let due = task.dueDate {
-                        DateChip(date: due, palette: palette)
-                    }
+                    DateChip(date: due, palette: palette)
                 }
                 .padding(.top, 6)
             }
@@ -203,6 +215,11 @@ struct PathView: View {
                 complete(task)
             } label: {
                 ZStack {
+                    // Radiating ring that bursts outward on completion.
+                    Circle()
+                        .stroke(Palette.success, lineWidth: 2.5)
+                        .scaleEffect(burstScale)
+                        .opacity(burstOpacity)
                     Circle()
                         .fill(celebrating ? Palette.success : palette.card)
                     Circle()
@@ -212,6 +229,7 @@ struct PathView: View {
                         .foregroundStyle(celebrating ? .white : .clear)
                 }
                 .frame(width: 68, height: 68)
+                .scaleEffect(popScale)
             }
             .buttonStyle(PressScaleStyle(scale: 0.94))
             .disabled(celebrating)
@@ -241,12 +259,26 @@ struct PathView: View {
     private func complete(_ task: TaskItem) {
         guard !celebrating else { return }
         celebrating = true
-        // Let the checkmark/strikethrough beat play before the card swaps.
+        playCompletion()
+        // Let the checkmark/burst beat play before the card swaps.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                 TaskActions.toggle(task, context: context)
             }
             celebrating = false
+        }
+    }
+
+    /// Springy pop + radiating ring — the same completion beat as TaskCheckbox.
+    private func playCompletion() {
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        withAnimation(.spring(response: 0.16, dampingFraction: 0.45)) { popScale = 1.35 }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.55).delay(0.12)) { popScale = 1 }
+        burstScale = 0.85
+        burstOpacity = 0.75
+        withAnimation(.easeOut(duration: 0.45)) {
+            burstScale = 2.2
+            burstOpacity = 0
         }
     }
 }
@@ -260,5 +292,5 @@ struct PathView: View {
     )
     .environment(Appearance())
     .environment(PomodoroModel())
-    .modelContainer(for: [TaskItem.self, Project.self], inMemory: true)
+    .modelContainer(for: [TaskItem.self], inMemory: true)
 }

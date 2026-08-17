@@ -165,22 +165,3 @@ func sortPinnedFirst(_ tasks: [TaskItem]) -> [TaskItem] {
     return tasks.filter(\.pinned) + tasks.filter { !$0.pinned }
 }
 
-// MARK: - Project timeline status (projectsTab.js timelineStatus)
-
-struct TimelineStatus {
-    let text: String
-    var overdue = false
-    var soon = false
-}
-
-func timelineStatus(project: Project, allDone: Bool) -> TimelineStatus? {
-    guard let due = project.dueDate else { return nil }
-    let today = startOfDay(Date())
-    let dueDay = startOfDay(due)
-    let diffDays = Calendar.current.dateComponents([.day], from: today, to: dueDay).day ?? 0
-    if allDone { return TimelineStatus(text: "Complete") }
-    if diffDays < 0 { return TimelineStatus(text: "Overdue \(abs(diffDays))d", overdue: true) }
-    if diffDays == 0 { return TimelineStatus(text: "Due today", soon: true) }
-    if diffDays == 1 { return TimelineStatus(text: "Due tomorrow", soon: true) }
-    return TimelineStatus(text: "\(diffDays)d left")
-}

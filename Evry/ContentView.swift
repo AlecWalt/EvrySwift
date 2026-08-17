@@ -12,14 +12,12 @@ import SwiftUI
 import SwiftData
 import UserNotifications
 import AppIntents
+import UIKit
 
-// Shared observable so ProjectDetailView can tell ContentView which project is open,
-// allowing the swipe-up handle to add tasks to the active project instead of a new project.
+// Shared observable used by GlobalSearchSheet to request a tab switch (e.g.
+// jump to the Inbox when a search result is tapped).
 @Observable
 final class ProjectNavigationState {
-    var activeProject: Project? = nil
-    /// Set by GlobalSearchSheet to request navigation into a specific project.
-    var requestedProject: Project? = nil
     /// Set by GlobalSearchSheet to request a tab switch.
     var requestedTab: AppTab? = nil
 }
@@ -32,22 +30,28 @@ struct ContentView: View {
     @Environment(PomodoroModel.self) private var pomodoro
     @Environment(TourCoordinator.self) private var tourCoordinator
 
-    @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    @Query private var allFolders: [Folder]
+    @AppStorage("membership_plan") private var membershipPlan = ""
 
     @State private var projectNavState = ProjectNavigationState()
+    @State private var notesNavState = NotesNavigationState()
+    @State private var showFolderLimitPromo = false
     @State private var selectedTab: AppTab = .inbox
     @State private var showAddTask = false
-    @State private var showAddProject = false
-    @State private var addTaskForProject: Project? = nil
+    /// Bumped on each open so the add-task overlay is rebuilt with a fresh
+    /// identity — otherwise a quick close/reopen reuses the view and its text
+    /// field never re-focuses (keyboard stays down).
+    @State private var addTaskSession = 0
+    @State private var addingNote: Note?
+    @State private var showNewFolder = false
     @State private var editingTask: TaskItem?
     @State private var toast: ToastData?
     @State private var toastDismissTask: Task<Void, Never>?
 
     // Tab visibility
     @AppStorage("tab_inbox_visible")    private var tabInboxVisible    = true
-    @AppStorage("tab_focus_visible")    private var tabFocusVisible    = true
-    @AppStorage("tab_projects_visible") private var tabProjectsVisible = true
     @AppStorage("tab_calendar_visible") private var tabCalendarVisible = true
+    @AppStorage("tab_notes_visible")    private var tabNotesVisible    = true
     @AppStorage("tab_profile_visible")  private var tabProfileVisible  = true
 
     // Focus Mode
@@ -58,9 +62,9 @@ struct ContentView: View {
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
     /// The swipe-up add bar only shows where adding makes sense — Inbox adds
-    /// a task, Projects adds a project. (Webapp's NO_ADD_TABS.)
+    /// a task, Notes adds a note. (The Calendar tab has its own add button.)
     private var showsAddHandle: Bool {
-        selectedTab == .inbox || selectedTab == .projects
+        selectedTab == .inbox || selectedTab == .notes
     }
 
     var body: some View {
@@ -86,6 +90,7 @@ struct ContentView: View {
             }
         }
         .environment(projectNavState)
+        .environment(notesNavState)
         .preferredColorScheme(appearance.preferredColorScheme)
         .overlay {
             if tourCoordinator.isActive {
@@ -112,17 +117,37 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { processPendingSiriTasks() }
         }
-        .sheet(isPresented: $showAddTask) {
-            AddTaskSheet(project: addTaskForProject)
+        .overlay {
+            if showAddTask {
+                AddTaskSheet(isPresented: $showAddTask)
+                    .id(addTaskSession)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
-        .sheet(isPresented: $showAddProject) {
-            AddProjectSheet()
-        }
+        .animation(.spring(response: 0.4, dampingFraction: 0.86), value: showAddTask)
+        .onChange(of: showAddTask) { _, open in if open { addTaskSession += 1 } }
         .sheet(item: $editingTask) { task in
             EditTaskSheet(task: task, onDelete: deleteTask)
         }
+        .sheet(item: $addingNote) { note in
+            NoteEditorView(note: note)
+                .environment(appearance)
+        }
+        .sheet(isPresented: $showNewFolder) {
+            NewFolderSheet().environment(appearance)
+        }
+        .sheet(isPresented: $showFolderLimitPromo) {
+            MembershipPromoView()
+        }
         .confirmationDialog("Are you sure you want to exit focus mode?", isPresented: $confirmExitFocus, titleVisibility: .visible) {
             Button("Exit Focus Mode") {
+                // Distinct haptics: a warning buzz when a running timer is being
+                // cancelled, a softer tap when simply leaving an idle session.
+                if pomodoro.running {
+                    UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                } else {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
                 pomodoro.reset()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     withAnimation(.easeInOut(duration: 0.3)) {
@@ -151,24 +176,19 @@ struct ContentView: View {
     private var normalShell: some View {
         TabView(selection: $selectedTab) {
             if tabInboxVisible {
-                InboxView(palette: palette, onEdit: { editingTask = $0 }, onDelete: deleteTask)
+                InboxView(palette: palette, onEdit: { editingTask = $0 }, onDelete: deleteTask, onEnterFocusMode: enterFocusMode)
                     .tabItem { Label("Inbox", systemImage: "tray") }
                     .tag(AppTab.inbox)
-            }
-            if tabFocusVisible {
-                FocusTabView(palette: palette, onEnterFocusMode: enterFocusMode)
-                    .tabItem { Label("Focus", systemImage: "safari") }
-                    .tag(AppTab.focus)
-            }
-            if tabProjectsVisible {
-                ProjectsView(palette: palette, onEdit: { editingTask = $0 }, onDelete: deleteTask)
-                    .tabItem { Label("Projects", systemImage: "folder") }
-                    .tag(AppTab.projects)
             }
             if tabCalendarVisible {
                 CalendarTabView(palette: palette, onEdit: { editingTask = $0 }, onDelete: deleteTask)
                     .tabItem { Label("Calendar", systemImage: "calendar") }
                     .tag(AppTab.calendar)
+            }
+            if tabNotesVisible {
+                NotesView(palette: palette)
+                    .tabItem { Label("Notes", systemImage: "note.text") }
+                    .tag(AppTab.notes)
             }
             if tabProfileVisible {
                 ProfileView(palette: palette, onEnterFocusMode: enterFocusMode)
@@ -177,23 +197,32 @@ struct ContentView: View {
             }
         }
         .tint(palette.primary)
+        .onChange(of: selectedTab) { _, _ in
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
         .onChange(of: tabInboxVisible)    { _, v in if !v && selectedTab == .inbox    { jumpToFirstVisible() } }
-        .onChange(of: tabFocusVisible)    { _, v in if !v && selectedTab == .focus    { jumpToFirstVisible() } }
-        .onChange(of: tabProjectsVisible) { _, v in if !v && selectedTab == .projects { jumpToFirstVisible() } }
         .onChange(of: tabCalendarVisible) { _, v in if !v && selectedTab == .calendar { jumpToFirstVisible() } }
+        .onChange(of: tabNotesVisible)    { _, v in if !v && selectedTab == .notes    { jumpToFirstVisible() } }
         .onChange(of: tabProfileVisible)  { _, v in if !v && selectedTab == .profile  { jumpToFirstVisible() } }
         .overlay(alignment: .bottom) {
             if showsAddHandle {
                 SwipeHandle(palette: palette) {
-                    if selectedTab == .projects {
-                        if let active = projectNavState.activeProject {
-                            addTaskForProject = active
-                            showAddTask = true
-                        } else {
-                            showAddProject = true
+                    switch selectedTab {
+                    case .notes:
+                        switch notesNavState.activeScope {
+                        case .none:
+                            // On the Folders screen → create a folder. Free users
+                            // are capped at 3 folders; beyond that, upsell Pro.
+                            if membershipPlan != "pro" && allFolders.count >= 3 {
+                                showFolderLimitPromo = true
+                            } else {
+                                showNewFolder = true
+                            }
+                        case .some(let scope):
+                            // Inside a folder / All Notes → create a note there.
+                            createNoteFromHandle(folder: scope.folder)
                         }
-                    } else {
-                        addTaskForProject = nil
+                    default:
                         showAddTask = true
                     }
                 }
@@ -209,17 +238,12 @@ struct ContentView: View {
     private func insertTourSampleData() {
         let today = startOfDay(Date())
 
-        let project = Project(name: "Website Redesign")
-        project.icon = "safari"
-        modelContext.insert(project)
-
         let tasks: [TaskItem] = [
             TaskItem(title: "Design new homepage layout",
                      dueDate: today,
-                     tags: ["design"], priority: .high, project: project),
+                     tags: ["design"], priority: .high),
             TaskItem(title: "Team standup",
-                     dueDate: today,
-                     project: project),
+                     dueDate: today),
             TaskItem(title: "Write API documentation",
                      dueDate: addDays(today, 3),
                      tags: ["dev"], priority: .medium),
@@ -231,7 +255,7 @@ struct ContentView: View {
         for task in tasks { modelContext.insert(task) }
         try? modelContext.save()
 
-        let ids = ([project.uid] + tasks.map(\.uid)).map(\.uuidString)
+        let ids = tasks.map(\.uid).map(\.uuidString)
         UserDefaults.standard.set(ids, forKey: Self.tourSampleKey)
     }
 
@@ -241,8 +265,6 @@ struct ContentView: View {
         let ids = Set(stored.compactMap(UUID.init(uuidString:)))
         let allTasks = (try? modelContext.fetch(FetchDescriptor<TaskItem>())) ?? []
         for t in allTasks where ids.contains(t.uid) { modelContext.delete(t) }
-        let allProjects = (try? modelContext.fetch(FetchDescriptor<Project>())) ?? []
-        for p in allProjects where ids.contains(p.uid) { modelContext.delete(p) }
         try? modelContext.save()
         UserDefaults.standard.removeObject(forKey: Self.tourSampleKey)
     }
@@ -271,8 +293,8 @@ struct ContentView: View {
     }
 
     private func jumpToFirstVisible() {
-        let order: [AppTab] = [.inbox, .focus, .projects, .calendar, .profile]
-        let flags = [tabInboxVisible, tabFocusVisible, tabProjectsVisible, tabCalendarVisible, tabProfileVisible]
+        let order: [AppTab] = [.inbox, .calendar, .notes, .profile]
+        let flags = [tabInboxVisible, tabCalendarVisible, tabNotesVisible, tabProfileVisible]
         if let idx = flags.firstIndex(of: true) {
             selectedTab = order[idx]
         }
@@ -304,7 +326,7 @@ struct ContentView: View {
                         .shadow(color: .black.opacity(0.06), radius: 5, y: 2)
                 }
                 .buttonStyle(.plain)
-                .sheet(isPresented: $showPomodoro) {
+                .fullScreenCover(isPresented: $showPomodoro) {
                     PomodoroView()
                 }
 
@@ -328,6 +350,15 @@ struct ContentView: View {
     }
 
     // MARK: Shared handlers
+
+    /// Swipe-up / tap inside a notes scope creates a blank note there and opens
+    /// the editor. Blank notes are discarded on dismiss by the editor itself.
+    private func createNoteFromHandle(folder: Folder?) {
+        let note = Note(folder: folder)
+        modelContext.insert(note)
+        try? modelContext.save()
+        addingNote = note
+    }
 
     private func enterFocusMode() {
         // Focus only happens on the clock — entering from anywhere (Profile's
@@ -372,5 +403,5 @@ struct ContentView: View {
         .environment(PomodoroModel())
         .environment(CalendarService())
         .environment(TourCoordinator())
-        .modelContainer(for: [TaskItem.self, Project.self], inMemory: true)
+        .modelContainer(for: [TaskItem.self, Note.self, Folder.self], inMemory: true)
 }

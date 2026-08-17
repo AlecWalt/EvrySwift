@@ -31,8 +31,7 @@ enum TaskActions {
                 tags: task.tags,
                 priority: task.priority,
                 notes: task.notes,
-                isNote: task.isNote,
-                project: task.project
+                isNote: task.isNote
             )
             next.recurrence = recurrence
             next.subtasks = task.subtasks.map { SubtaskData(title: $0.title) }
@@ -78,8 +77,7 @@ enum TaskActions {
             tags: task.tags,
             priority: task.priority,
             notes: task.notes,
-            isNote: task.isNote,
-            project: task.project
+            isNote: task.isNote
         )
         copy.recurrence = task.recurrence
         copy.subtasks = task.subtasks.map { SubtaskData(title: $0.title) }

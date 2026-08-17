@@ -14,7 +14,7 @@ import SwiftData
 
 @Generable(description: "A motivating daily accomplishments summary")
 private struct AccomplishmentResult {
-    @Guide(description: "A warm, encouraging 2-3 sentence summary of what the person accomplished today. Be specific about the tasks. Start with 'Today you…'")
+    @Guide(description: "A short, upbeat one-sentence summary of what the person accomplished today — at most 14 words. Be specific but concise. Start with 'Today you'. No trailing period is required.")
     var summary: String
 
     @Guide(description: "A short theme for the day — 1-4 words (e.g. 'Deep Work Day', 'Creative Sprint', 'Family First')")

@@ -2,17 +2,18 @@
 //  SetupFlowView.swift
 //  Evry
 //
-//  Onboarding / setup flow — ported from authScreen.js. Five stages:
-//  Welcome → Sign In or Registration (3-step carousel) → Color Theme → Location.
+//  Onboarding / setup flow — ported from authScreen.js. Stages:
+//  Welcome → Sign In or Registration (3-step carousel) → Location.
 //
 
 import SwiftUI
 import CoreLocation
+import UIKit
 
 // MARK: - Stage
 
 private enum SetupStage: Hashable {
-    case welcome, signIn, register, colorTheme, location
+    case welcome, signIn, register, location
 }
 
 // MARK: - Location helper
@@ -66,6 +67,8 @@ struct SetupFlowView: View {
     @State private var focusRegConfirm = false
 
     @State private var locationHelper = LocationHelper()
+    @State private var showWelcome = false
+    @State private var welcomeAnim = false
 
     private var slideTransition: AnyTransition {
         .asymmetric(
@@ -96,7 +99,60 @@ struct SetupFlowView: View {
                     .padding(.top, 60)
                     .padding(.trailing, 24)
             }
+
+            if showWelcome {
+                welcomeOverlay
+                    .transition(.opacity)
+                    .zIndex(20)
+            }
         }
+    }
+
+    // MARK: Welcome animation (plays as setup finishes)
+
+    private var welcomeOverlay: some View {
+        ZStack {
+            palette.bg.ignoresSafeArea()
+            VStack(spacing: 18) {
+                ZStack {
+                    ForEach(0..<8, id: \.self) { i in
+                        let angle = Double(i) * 45
+                        Circle()
+                            .fill(palette.primary)
+                            .frame(width: 9, height: 9)
+                            .offset(
+                                x: welcomeAnim ? cos(angle * .pi / 180) * 70 : 0,
+                                y: welcomeAnim ? sin(angle * .pi / 180) * 70 : 0
+                            )
+                            .opacity(welcomeAnim ? 0 : 1)
+                    }
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 72))
+                        .foregroundStyle(palette.primary)
+                        .scaleEffect(welcomeAnim ? 1 : 0.2)
+                        .opacity(welcomeAnim ? 1 : 0)
+                }
+                .frame(width: 160, height: 160)
+
+                Text(savedName.isEmpty ? "Welcome to Evry!" : "Welcome, \(savedName)!")
+                    .font(.system(size: 26, weight: .heavy))
+                    .tracking(-0.5)
+                    .foregroundStyle(palette.text)
+                    .opacity(welcomeAnim ? 1 : 0)
+                Text("Time to get Evrything done!")
+                    .font(.system(size: 15))
+                    .foregroundStyle(palette.textSec)
+                    .opacity(welcomeAnim ? 1 : 0)
+            }
+        }
+    }
+
+    /// Plays the welcome beat, then dismisses into the app.
+    private func finishSetup() {
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        withAnimation(.easeOut(duration: 0.3)) { showWelcome = true }
+        withAnimation(.spring(response: 0.6, dampingFraction: 0.6).delay(0.08)) { welcomeAnim = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { dismiss() }
     }
 
     // MARK: Stage router
@@ -107,7 +163,6 @@ struct SetupFlowView: View {
         case .welcome:    welcomeView
         case .signIn:     signInView
         case .register:   registrationView
-        case .colorTheme: colorThemeView
         case .location:   locationView
         }
     }
@@ -183,13 +238,13 @@ struct SetupFlowView: View {
                                  submitLabel: .go) {
                     guard !signInEmail.isEmpty, !signInPassword.isEmpty else { return }
                     savedEmail = signInEmail
-                    advance(to: .colorTheme)
+                    advance(to: .location)
                 }
 
                 SetupPrimaryButton("Sign in", palette: palette,
                                    disabled: signInEmail.isEmpty || signInPassword.isEmpty) {
                     savedEmail = signInEmail
-                    advance(to: .colorTheme)
+                    advance(to: .location)
                 }
             }
             .padding(.horizontal, 32)
@@ -301,14 +356,15 @@ struct SetupFlowView: View {
                 }
                 SetupSecureField("Confirm password", text: $regConfirm, palette: palette,
                                  shouldFocus: $focusRegConfirm,
-                                 submitLabel: .done) {
+                                 submitLabel: .done,
+                                 matched: isPasswordValid && !regConfirm.isEmpty && regPassword == regConfirm) {
                     guard isPasswordValid, regPassword == regConfirm else {
                         withAnimation { passwordError = true }
                         return
                     }
                     savedName = regName
                     savedEmail = regEmail
-                    advance(to: .colorTheme)
+                    advance(to: .location)
                 }
                 if passwordError {
                     Text("Passwords don't match")
@@ -329,7 +385,7 @@ struct SetupFlowView: View {
                     }
                     savedName = regName
                     savedEmail = regEmail
-                    advance(to: .colorTheme)
+                    advance(to: .location)
                 }
                 SetupBackButton(palette: palette) {
                     passwordError = false
@@ -337,62 +393,6 @@ struct SetupFlowView: View {
                 }
             }
             .padding(.horizontal, 32)
-        }
-    }
-
-    // MARK: Color theme
-
-    private var colorThemeView: some View {
-        VStack(spacing: 0) {
-            Image("Plant")
-                .resizable()
-                .scaledToFit()
-                .frame(maxHeight: 240)
-                .padding(.top, 60)
-
-            Spacer()
-
-            VStack(spacing: 8) {
-                Text("Pick a color theme")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundStyle(palette.text)
-                Text("Tap a color you like. You can change this anytime in settings.")
-                    .font(.system(size: 14))
-                    .foregroundStyle(palette.textSec)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 40)
-            }
-            .padding(.bottom, 32)
-
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 16) {
-                ForEach(AccentColorTheme.all) { accent in
-                    Button { appearance.accentKey = accent.key } label: {
-                        VStack(spacing: 6) {
-                            Circle()
-                                .fill(accent.primary)
-                                .frame(width: 44, height: 44)
-                                .overlay {
-                                    if appearance.accentKey == accent.key {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 14, weight: .bold))
-                                            .foregroundStyle(accent.onPrimary)
-                                    }
-                                }
-                            Text(accent.label)
-                                .font(.system(size: 10))
-                                .foregroundStyle(palette.textSec)
-                        }
-                    }
-                    .buttonStyle(PressScaleStyle())
-                }
-            }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 36)
-
-            SetupPrimaryButton("Continue", palette: palette) { advance(to: .location) }
-                .padding(.horizontal, 32)
-
-            Spacer()
         }
     }
 
@@ -422,7 +422,7 @@ struct SetupFlowView: View {
                     .foregroundStyle(palette.text)
             }
             .onAppear {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { dismiss() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { finishSetup() }
             }
         } else if locationHelper.status == .denied || locationHelper.status == .restricted {
             VStack(spacing: 20) {
@@ -438,7 +438,7 @@ struct SetupFlowView: View {
                     .foregroundStyle(palette.textSec)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 40)
-                SetupPrimaryButton("Continue without location", palette: palette) { dismiss() }
+                SetupPrimaryButton("Continue without location", palette: palette) { finishSetup() }
                     .padding(.horizontal, 32)
             }
         } else {
@@ -461,7 +461,7 @@ struct SetupFlowView: View {
                     SetupPrimaryButton("Enable location", palette: palette) {
                         locationHelper.requestAccess()
                     }
-                    Button("Skip for now") { dismiss() }
+                    Button("Skip for now") { finishSetup() }
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(palette.textSec)
                 }
@@ -561,11 +561,7 @@ private struct SetupTextField: View {
             .focused($isFocused)
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
-            .background(palette.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(palette.border, lineWidth: 1.5)
-            )
+            .evryField(palette)
             .foregroundStyle(palette.text)
             .onAppear {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -582,6 +578,8 @@ private struct SetupSecureField: View {
     var autoFocus: Bool = false
     var shouldFocus: Binding<Bool>? = nil
     var submitLabel: SubmitLabel = .done
+    /// When true, a green checkmark springs in — used to confirm the passwords match.
+    var matched: Bool = false
     var onSubmit: (() -> Void)? = nil
 
     @State private var visible = false
@@ -591,6 +589,7 @@ private struct SetupSecureField: View {
          autoFocus: Bool = false,
          shouldFocus: Binding<Bool>? = nil,
          submitLabel: SubmitLabel = .done,
+         matched: Bool = false,
          onSubmit: (() -> Void)? = nil) {
         self.placeholder = placeholder
         self._text = text
@@ -598,11 +597,12 @@ private struct SetupSecureField: View {
         self.autoFocus = autoFocus
         self.shouldFocus = shouldFocus
         self.submitLabel = submitLabel
+        self.matched = matched
         self.onSubmit = onSubmit
     }
 
     var body: some View {
-        HStack {
+        HStack(spacing: 10) {
             Group {
                 if visible {
                     TextField(placeholder, text: $text)
@@ -615,18 +615,27 @@ private struct SetupSecureField: View {
             .focused($isFocused)
             .foregroundStyle(palette.text)
 
+            if matched {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 18))
+                    .foregroundStyle(Palette.success)
+                    .transition(.scale(scale: 0.3).combined(with: .opacity))
+            }
+
             Button { visible.toggle() } label: {
                 Image(systemName: visible ? "eye.slash" : "eye")
                     .foregroundStyle(palette.textPh)
             }
         }
+        .animation(.spring(response: 0.34, dampingFraction: 0.55), value: matched)
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        .background(palette.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .evryField(palette)
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(palette.border, lineWidth: 1.5)
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(matched ? Palette.success.opacity(0.6) : .clear, lineWidth: 1.5)
         )
+        .animation(.easeInOut(duration: 0.2), value: matched)
         .onAppear {
             if autoFocus {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { isFocused = true }
@@ -662,7 +671,7 @@ private struct SetupPrimaryButton: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 15)
                 .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
                         .fill(disabled ? palette.border : palette.primary)
                 )
         }
