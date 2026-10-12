@@ -93,6 +93,10 @@ struct BrainDumpSheet: View {
     // is the content swap (flipped mid-fade so it happens off-screen).
     @State private var headerVisible = true
     @State private var distillHeader = false
+    // Evry is never in two places at once: every Evry line on this screen
+    // (caption, listening panel, preview, closure) shares one matched avatar,
+    // so a crossfade between lines reads as a single Evry moving.
+    @Namespace private var evryNS
     // Brain Dump is dictation-first. The typing box is a secondary path, revealed
     // only when the user taps "Type instead".
     @State private var typingMode = false
@@ -515,11 +519,15 @@ struct BrainDumpSheet: View {
             return forNote ? "Tell me what’s on your mind. I’ll turn it into a tidy note."
                            : "Tell me what’s on your mind. I’ll turn it into tasks."
         }()
-        return ZStack {
-            if !sub.isEmpty {
-                EvryBubble(text: sub, palette: palette)
-                    .id(sub)                    // cross-fade when the line changes
-                    .transition(.opacity)
+        return HStack(alignment: .bottom, spacing: 8) {
+            // One avatar outside the cross-fade, so only the words change.
+            if !sub.isEmpty { movingEvry() }
+            ZStack {
+                if !sub.isEmpty {
+                    EvryBubble(text: sub, showsAvatar: false, palette: palette)
+                        .id(sub)                    // cross-fade when the line changes
+                        .transition(.opacity)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -739,7 +747,7 @@ struct BrainDumpSheet: View {
                     .padding(.horizontal, 36)
             }
 
-            EvryBubble(text: "I’m listening. Say it however it comes out.", palette: palette)
+            evryLine("I’m listening. Say it however it comes out.")
 
             Button {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
@@ -778,6 +786,22 @@ struct BrainDumpSheet: View {
         return forNote ? "I’m saving your note…" : "I’m building your task list…"
     }
 
+    // MARK: Evry (one at a time)
+
+    /// Evry's bubble avatar, matched across every line on this screen.
+    private func movingEvry() -> some View {
+        EvryMascot(size: 40)
+            .matchedGeometryEffect(id: "evry", in: evryNS)
+    }
+
+    /// An Evry line (the mascot beside an `EvryBubble`) using the shared avatar.
+    private func evryLine(_ text: String) -> some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            movingEvry()
+            EvryBubble(text: text, showsAvatar: false, palette: palette)
+        }
+    }
+
     // MARK: Preview
 
     @ViewBuilder private var previewView: some View {
@@ -788,10 +812,9 @@ struct BrainDumpSheet: View {
                 } else if forNote {
                     notePreview
                 } else {
-                    EvryBubble(text: previewTasks.isEmpty
-                               ? "I didn’t find any tasks in that. Shall we try again?"
-                               : "I found \(previewTasks.count) task\(previewTasks.count == 1 ? "" : "s"). Add \(previewTasks.count == 1 ? "it" : "them") to your list?",
-                               palette: palette)
+                    evryLine(previewTasks.isEmpty
+                             ? "I didn’t find any tasks in that. Shall we try again?"
+                             : "I found \(previewTasks.count) task\(previewTasks.count == 1 ? "" : "s"). Add \(previewTasks.count == 1 ? "it" : "them") to your list?")
                     previewHeader
                     previewTaskList
                     Text("Tap × to remove any you don’t need.")
@@ -826,7 +849,7 @@ struct BrainDumpSheet: View {
 
     private var errorBanner: some View {
         VStack(alignment: .leading, spacing: 16) {
-            EvryBubble(text: errorMessage, palette: palette)
+            evryLine(errorMessage)
             Button {
                 errorMessage = ""
                 withAnimation { phase = .input; distilling = false; collapseHeight = nil; distillHeader = false; headerVisible = true }
@@ -843,7 +866,7 @@ struct BrainDumpSheet: View {
 
     private var notePreview: some View {
         VStack(alignment: .leading, spacing: 12) {
-            EvryBubble(text: "Here’s your note. Change anything you like, then save it?", palette: palette)
+            evryLine("Here’s your note. Change anything you like, then save it?")
             HStack(spacing: 6) {
                 Text("Your note")
                     .font(.evrySmall)
@@ -989,6 +1012,7 @@ struct BrainDumpSheet: View {
         VStack(spacing: 18) {
             Spacer()
             ClosureMascot()
+                .matchedGeometryEffect(id: "evry", in: evryNS)
             VStack(spacing: 6) {
                 Text("Off your mind.")
                     .font(.evryH3)

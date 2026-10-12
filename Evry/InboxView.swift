@@ -22,6 +22,8 @@ struct InboxView: View {
     @Environment(\.modelContext) private var context
     @Environment(Appearance.self) private var appearance
     @Environment(ProjectNavigationState.self) private var projectNavState
+    /// Set by ContentView while the chat (with Evry) is open above this page.
+    @Environment(\.evryAway) private var evryAwayAbove
     @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
     @State private var emptyMessage = emptyMessages.randomElement()!
     // Current timeline day (0 = today). Owned here so the shared header can show
@@ -111,6 +113,9 @@ struct InboxView: View {
         // day's list then scrolls to and highlights it).
         .onChange(of: projectNavState.focusTaskID) { _, id in pageToFocusedTask(id) }
         .onAppear { pageToFocusedTask(projectNavState.focusTaskID) }
+        // The recap sheet brings its own Evry; the header mark peeking out
+        // behind it steps away meanwhile (Evry is never in two places at once).
+        .environment(\.evryAway, evryAwayAbove || showAccomplishments)
         .sheet(isPresented: $showGroupSheet) {
             NewTaskGroupSheet(
                 taskCount: pendingGroupTasks.count,
@@ -127,6 +132,7 @@ struct InboxView: View {
             }
             AccomplishmentsView(completedTasks: completedToday, date: Date())
                 .environment(appearance)
+                .environment(\.evryAway, false)
         }
     }
 
@@ -145,6 +151,8 @@ struct InboxView: View {
                         .resizable()
                         .scaledToFit()
                         .frame(width: 34, height: 34)
+                        // Leaves while the chat is open — Evry is there instead.
+                        .evryPresence()
                         .frame(width: EvrySpace.tap, height: EvrySpace.tap)
                         .contentShape(Rectangle())
                 }
@@ -535,8 +543,10 @@ private struct TimelineDayPage: View {
                 let hasVisible = !activeTasks.isEmpty || (!completedDayTasks.isEmpty && !hideCompleted)
 
                 if !hasVisible {
-                    // Shared empty state (with Evry), matching Habits and Notes.
+                    // Shared empty state, matching Habits and Notes — but no
+                    // mascot: the header's Evry mark is always on screen here.
                     EmptyStateView(
+                        systemImage: "tray",
                         title: "Nothing due this day",
                         text: isToday ? "Swipe up on the handle below to add a task." : "Enjoy the free day.",
                         palette: palette

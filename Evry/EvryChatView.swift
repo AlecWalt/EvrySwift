@@ -104,6 +104,8 @@ struct EvryChatOverlay: View {
     /// The welcome greeting fades in a beat after the card arrives.
     @State private var greetingShown = false
     @State private var thinkingSpin = false
+    /// Evry messages that have finished typing (their options show after).
+    @State private var typed: Set<UUID> = []
     @Namespace private var mascotSpace
     @AppStorage("user_name") private var userName = ""
     @FocusState private var composerFocused: Bool
@@ -243,7 +245,7 @@ struct EvryChatOverlay: View {
                 .animation(EvryMotion.settle, value: composerFocused)
 
             if greetingShown {
-                Text(greetingLine)
+                TypewriterText(text: greetingLine)
                     .font(.nunito(size: 28, weight: .heavy))
                     .tracking(-0.4)
                     .foregroundStyle(palette.text)
@@ -344,6 +346,8 @@ struct EvryChatOverlay: View {
             .onAppear { scrollToEnd(proxy) }
             .onChange(of: messages.count) { _, _ in scrollToEnd(proxy) }
             .onChange(of: thinking) { _, _ in scrollToEnd(proxy) }
+            // Options appear when a line finishes typing — keep them in view.
+            .onChange(of: typed.count) { _, _ in scrollToEnd(proxy) }
             // The keyboard shrinks the list; follow the conversation once it's up.
             .onChange(of: composerFocused) { _, focused in
                 guard focused else { return }
@@ -379,14 +383,17 @@ struct EvryChatOverlay: View {
             .accessibilityLabel("You: \(message.text)")
         case .evry:
             VStack(alignment: .leading, spacing: 12) {
-                Text(message.text)
+                TypewriterText(text: message.text) {
+                    withAnimation(EvryMotion.settle) { _ = typed.insert(message.id) }
+                }
                     .font(.nunito(size: 17))
                     .lineSpacing(5)
                     .foregroundStyle(palette.text)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel("Evry says: \(message.text)")
 
-                if let attachment = message.attachment {
+                // Options arrive once Evry has finished "typing" the line.
+                if let attachment = message.attachment, typed.contains(message.id) {
                     let done = resolved.contains(message.id)
                     switch attachment {
                     case .suggestions:

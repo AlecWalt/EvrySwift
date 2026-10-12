@@ -106,6 +106,8 @@ Icons are inline SVG line glyphs on a 24×24 grid (some utilities on 20 or 16), 
 
 Evry is a soft, slightly lopsided white star with two big navy eyes and a sky offset shadow. The mascot is the brand's main image: use it wherever a page needs warmth (hero, CTA band, empty and success states, the featured plan).
 
+> **Rule — never broken: Evry is never visible in two places at once.** Evry is one character, not a pattern. On any screen, including whatever shows through behind an overlay, sheet or scrim, at most one Evry may be visible: the mascot, its avatar beside a speech bubble, or the star mark (`evry-plain-mark.png`) used as Evry. When Evry appears somewhere new (e.g. a chat opening from the header mark), it leaves the old place, ideally by moving there. Lists of Evry's messages show the avatar once, not per bubble. The small star *glyph* (`evry.svg`) in buttons and the wordmark text are not the character and don't count.
+
 - Use `evry.png` (transparent cutout, 960×923). Never redraw, recolour, stretch or crop it.
 - On sky backgrounds, sit Evry on a white disc so the sky shadow stays visible.
 - The header and footer use the plain outline mark (`evry-plain-mark.png`) next to the wordmark.

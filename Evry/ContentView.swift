@@ -139,11 +139,15 @@ struct ContentView: View {
         }
         .environment(projectNavState)
         .environment(notesNavState)
+        // Pays out XP the moment a daily task or habit goal is completed.
+        .background(DailyGoalXPWatcher())
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
         .overlay {
             if tourCoordinator.isActive {
+                // The tour's Evry is the one on screen while it runs.
                 TourOverlayView()
+                    .environment(\.evryAway, false)
             }
         }
         .onChange(of: tourCoordinator.currentStep) { _, _ in
@@ -208,6 +212,7 @@ struct ContentView: View {
         .sheet(isPresented: $showDailyRecap) {
             DailyRecapView(date: recapDate, tasksCompleted: recapTasks, focusMinutes: recapFocus,
                            taskGoal: max(1, recapTaskGoal), focusGoal: dailyPomoGoal)
+                .environment(\.evryAway, false)
         }
         .overlay {
             if showAddTask {
@@ -237,10 +242,15 @@ struct ContentView: View {
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.86), value: showNewFolder)
+        // Evry is never in two places at once: while Evry is in the chat, the
+        // guided tour or the daily recap sheet, every Evry on the page
+        // underneath steps away (each of those resets it for its own Evry).
+        .environment(\.evryAway, showChat || tourCoordinator.isActive || showDailyRecap)
         // The chat with Evry — rises from the bottom over the current page.
         .overlay {
             if showChat {
                 EvryChatOverlay(isPresented: $showChat, onEnterFocusMode: enterFocusMode)
+                    .environment(\.evryAway, false)
             }
         }
         .sheet(item: $editingTask) { task in
@@ -255,7 +265,7 @@ struct ContentView: View {
         .fullScreenCover(isPresented: $router.showPlans) {
             MembershipPlansView()
         }
-        // Hard wall: once the free month is over (and not subscribed), the app is
+        // Hard wall: once the free trial is over (and not subscribed), the app is
         // blocked behind an undismissable paywall until the user subscribes.
         .fullScreenCover(isPresented: $showTrialWall) {
             MembershipPromoView(isHardWall: true)
@@ -560,13 +570,13 @@ struct ContentView: View {
         addingNote = note
     }
 
-    /// Shows the hard wall when the free month has ended and the user hasn't
+    /// Shows the hard wall when the free trial has ended and the user hasn't
     /// subscribed; hides it the moment access is (re)granted.
     private func evaluateAccess() {
         showTrialWall = !MembershipAccess.hasAccess()
     }
 
-    // Countdown surfaces only in the last stretch of the free month.
+    // Countdown surfaces only in the last stretch of the free trial.
     private var trialDaysLeft: Int { MembershipAccess.daysRemaining() }
     private var showCountdown: Bool { MembershipAccess.inTrial() && trialDaysLeft <= 7 }
 
@@ -633,7 +643,7 @@ struct ContentView: View {
     }
 }
 
-/// Slim tappable bar reminding the user their free month is nearly up. Slides +
+/// Slim tappable bar reminding the user their free trial is nearly up. Slides +
 /// fades in shortly after the app opens rather than popping in.
 private struct TrialCountdownBar: View {
     let daysLeft: Int
@@ -648,7 +658,7 @@ private struct TrialCountdownBar: View {
                 Image(systemName: "clock")
                     .font(.nunito(size: 12, weight: .bold))
                     .accessibilityHidden(true)
-                Text("\(daysLeft) day\(daysLeft == 1 ? "" : "s") left in your free month")
+                Text("\(daysLeft) day\(daysLeft == 1 ? "" : "s") left in your free trial")
                     .font(.nunito(size: 13, weight: .semibold))
                 Text("See plans")
                     .font(.nunito(size: 13, weight: .bold))

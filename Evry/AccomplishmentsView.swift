@@ -361,7 +361,8 @@ struct DailyRecapView: View {
                 .opacity(appeared ? 1 : 0)
                 .animation(EvryMotion.settle.delay(0.2), value: appeared)
 
-                EvryBubble(text: goalLine, palette: palette)
+                // No avatar: the hero above is already Evry.
+                EvryBubble(text: goalLine, showsAvatar: false, palette: palette)
                     .padding(.horizontal, EvrySpace.grid)
                     .padding(.top, 18)
                     .opacity(appeared ? 1 : 0)

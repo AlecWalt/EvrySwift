@@ -584,6 +584,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Evry reads your calendars to show events alongside your tasks and lets you import them with one tap.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Evry uses your location to show nearby places when you add a location, and to estimate driving times for you.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Evry uses the microphone so you can describe a project by voice.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Evry transcribes your voice so you can describe a project and have AI generate a task list for you.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -633,6 +634,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Evry reads your calendars to show events alongside your tasks and lets you import them with one tap.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Evry uses your location to show nearby places when you add a location, and to estimate driving times for you.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Evry uses the microphone so you can describe a project by voice.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Evry transcribes your voice so you can describe a project and have AI generate a task list for you.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;

@@ -19,7 +19,7 @@ import UIKit
 /// is blocked until the user subscribes. `hasAccess` gates the whole app (there is
 /// no per-feature free tier anymore).
 enum MembershipAccess {
-    static let trialDays = 30
+    static let trialDays = 15
 
     /// ISO8601 timestamp of first launch, used as the trial clock. Stored under
     /// "app_first_used"; self-heals (stamps now) if missing so the trial always
@@ -40,7 +40,7 @@ enum MembershipAccess {
         UserDefaults.standard.string(forKey: "membership_plan") == "pro"
     }
 
-    /// Whole days left in the free month (0 once expired). Uses calendar-day
+    /// Whole days left in the free trial (0 once expired). Uses calendar-day
     /// boundaries so "N days left" reads naturally.
     static func daysRemaining(_ now: Date = Date()) -> Int {
         let cal = Calendar.current
@@ -49,12 +49,12 @@ enum MembershipAccess {
         return max(0, days)
     }
 
-    /// True while the free month is still running and the user hasn't subscribed.
+    /// True while the free trial is still running and the user hasn't subscribed.
     static func inTrial(_ now: Date = Date()) -> Bool {
         !isSubscribed() && daysRemaining(now) > 0
     }
 
-    /// The global gate: unlocked while subscribed or still within the free month.
+    /// The global gate: unlocked while subscribed or still within the free trial.
     static func hasAccess(_ now: Date = Date()) -> Bool {
         isSubscribed() || daysRemaining(now) > 0
     }
@@ -87,6 +87,8 @@ struct MembershipPromoView: View {
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
     private let pageCount = 7
+    /// The page whose art features Evry (the mascot), not just the mark.
+    private static let distillPage = 2
     private var lastIndex: Int { pageCount - 1 }
 
     private var finalCTA: String { isHardWall ? "Choose your plan" : "See plans" }
@@ -109,6 +111,9 @@ struct MembershipPromoView: View {
                 EvryLogo(palette: palette)
                     .scaleEffect(isHardWall ? 1.5 : 1.3)
                     .matchedGeometryEffect(id: "paywallLogo", in: logoNS, isSource: introLanded || !isHardWall)
+                    // The Distill page's art brings Evry in, so the mark steps
+                    // away there (Evry is never in two places at once).
+                    .environment(\.evryAway, currentPage == Self.distillPage)
                     .padding(.top, 44)
                     .padding(.bottom, 8)
 
@@ -132,7 +137,10 @@ struct MembershipPromoView: View {
                               benefits: ["Talk or type everything on your mind, unfiltered",
                                          "Distill turns the jumble into clear, dated tasks"]) {
                         PromoBrainDumpArt(palette: palette)
-                    }.tag(2)
+                    }
+                    .tag(Self.distillPage)
+                    // …and its Evry only shows while it's the current page.
+                    .environment(\.evryAway, currentPage != Self.distillPage)
                     PromoPage(palette: palette,
                               title: "Deep focus, on the clock",
                               benefits: ["Calm Pomo sessions with gentle break reminders",
@@ -875,8 +883,8 @@ private struct PromoKeepPage: View {
 
     private var message: String {
         isHardWall
-            ? "Your free month has ended. Subscribe to pick up right where you left off — nothing you’ve built is lost."
-            : "Your free month includes everything. After it ends, Evry needs a membership to keep going."
+            ? "Your free trial has ended. Subscribe to pick up right where you left off — nothing you’ve built is lost."
+            : "Your \(MembershipAccess.trialDays) free days include everything. After that, Evry needs a membership to keep going."
     }
 
     var body: some View {
@@ -1010,7 +1018,9 @@ struct MembershipPlansView: View {
 
                     // SectionHeading: eyebrow, h2 and a lead in textSec.
                     VStack(spacing: 16) {
-                        EvryLogo(palette: palette)
+                        // The wordmark alone: Evry itself perches on the plan
+                        // card (or sits in the status row) below.
+                        MembershipWordmark(palette: palette)
                         EyebrowPill(text: isPro ? "Your membership" : "Evry membership", palette: palette)
                         Text(isPro ? "You’re all set" : "Everything, together")
                             .font(.evryH2)
@@ -1281,6 +1291,8 @@ struct ProWelcomeView: View {
 
     @State private var stage = 0          // 0 = celebration, 1 = setup
     @State private var celebrate = false
+    /// The celebration's Evry glides into the setup bubble — one Evry, moving.
+    @Namespace private var evryNS
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
     private var calendarConnected: Bool { calendarService.isAuthorized }
@@ -1321,6 +1333,7 @@ struct ProWelcomeView: View {
                     }
                 }
                 EvryMascot(size: 140, float: true, shadow: true)
+                    .matchedGeometryEffect(id: "evry", in: evryNS)
                     .scaleEffect(celebrate || reduceMotion ? 1 : 0.4)
                     .animation(EvryMotion.spring, value: celebrate)
             }
@@ -1363,7 +1376,7 @@ struct ProWelcomeView: View {
                     .foregroundStyle(palette.text)
                     .frame(maxWidth: .infinity, alignment: .center)
                 WelcomeBubble(text: "I’ll help you get set up in a few quick steps. Shall we start with your calendar?",
-                              palette: palette)
+                              palette: palette, evryNS: evryNS)
             }
             .padding(.horizontal, EvrySpace.grid)
             .padding(.top, 44)
@@ -1442,6 +1455,23 @@ struct ProWelcomeView: View {
     }
 }
 
+// MARK: - Wordmark
+
+/// The "Evry" wordmark alone (24pt, 800, +0.03em) — `EvryLogo` without its star
+/// mark, for screens where the mascot is already present.
+private struct MembershipWordmark: View {
+    let palette: Palette
+
+    var body: some View {
+        Text("Evry")
+            .font(.evryWordmark)
+            .tracking(EvryTracking.wordmark)
+            .foregroundStyle(palette.text)
+            .frame(minHeight: EvrySpace.tap)
+            .accessibilityLabel("Evry")
+    }
+}
+
 // MARK: - Welcome bubble
 
 /// Evry's line in the Pro welcome: the mascot beside a sky-soft bubble (1pt sky
@@ -1451,6 +1481,8 @@ struct ProWelcomeView: View {
 private struct WelcomeBubble: View {
     let text: String
     let palette: Palette
+    /// Shared with the celebration's mascot so Evry moves rather than doubles.
+    let evryNS: Namespace.ID
 
     private var shape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(topLeadingRadius: EvryRadius.field, bottomLeadingRadius: EvryRadius.tail,
@@ -1461,6 +1493,7 @@ private struct WelcomeBubble: View {
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
             EvryMascot(size: 40)
+                .matchedGeometryEffect(id: "evry", in: evryNS)
             Text(text)
                 .font(.evryBubble)
                 .lineSpacing(5)

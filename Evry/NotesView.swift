@@ -71,10 +71,15 @@ struct NotesView: View {
 
     @Environment(\.modelContext) private var context
     @Environment(Appearance.self) private var appearance
+    @Environment(\.evryAway) private var evryAway
     @Query(sort: \Folder.sortOrder) private var folders: [Folder]
     @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
 
     @State private var navPath = NavigationPath()
+    /// True while a notes list is on top, and for the length of the pop
+    /// transition after it leaves — so this screen's Evry only returns once the
+    /// list's Evry has gone (never two at once).
+    @State private var listOnTop = false
     @State private var editingFolder: Folder?
 
     private var liveNotes: [Note] { allNotes.filter { !$0.isTrashed } }
@@ -96,7 +101,6 @@ struct NotesView: View {
             ScrollView {
                 VStack(spacing: 12) {
                     HStack(alignment: .center, spacing: 14) {
-                        ToolIcon(tool: .notes, tile: 48, palette: palette)
                         PageTitle(
                             title: "Notes",
                             subtitle: "\(total) note\(total == 1 ? "" : "s")",
@@ -145,9 +149,24 @@ struct NotesView: View {
                     .padding(.horizontal, EvrySpace.gutter)
                 }
                 .padding(.bottom, 130)
+                // Evry is never in two places at once: while a notes list is
+                // pushed on top (it may show its own empty-state Evry, and both
+                // screens are on-screen mid-transition), this screen's Evry
+                // steps away.
+                .environment(\.evryAway, evryAway || listOnTop)
             }
             .scrollDismissesKeyboard(.immediately)
             .background(palette.bg)
+            .onChange(of: navPath.isEmpty) { _, isEmpty in
+                if !isEmpty {
+                    listOnTop = true
+                } else {
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(450))
+                        if navPath.isEmpty { listOnTop = false }
+                    }
+                }
+            }
             .navigationDestination(for: NoteScope.self) { scope in
                 NotesListView(scope: scope, palette: palette)
             }
@@ -163,36 +182,38 @@ struct NotesView: View {
     private func folderCard(title: String, icon: String, tile: Color, ink: Color,
                             count: Int, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 14) {
+            // Mirrors the Inbox's task-folder header: 38pt shade tile, label
+            // title, 13pt count, flat white card + hairline (no shadow).
+            HStack(spacing: 12) {
                 // The folder's shade fills an icon tile (shades differ by
                 // strength, never hue); the glyph ink flips to stay readable.
                 Image(systemName: icon)
-                    .font(.nunito(size: 18, weight: .semibold))
+                    .font(.nunito(size: 18))
                     .foregroundStyle(ink)
-                    .frame(width: 40, height: 40)
+                    .frame(width: 38, height: 38)
                     .background(tile, in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
                     .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                        .font(.evryTitle)
+                        .font(.evryLabel)
                         .foregroundStyle(palette.text)
                         .lineLimit(1)
                     Text("\(count) note\(count == 1 ? "" : "s")")
-                        .font(.nunito(size: 14))
-                        .foregroundStyle(palette.textMuted)
+                        .font(.nunito(size: 13))
+                        .foregroundStyle(palette.textSec)
                 }
 
                 Spacer()
 
                 Image(systemName: "chevron.right")
-                    .font(.nunito(size: 13, weight: .bold))
-                    .foregroundStyle(palette.textMuted)
+                    .font(.nunito(size: 12, weight: .bold))
+                    .foregroundStyle(palette.textSec)
+                    .accessibilityHidden(true)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .frame(minHeight: EvrySpace.storeHeight)
-            .evryCard(palette)
+            .padding(.horizontal, EvrySpace.gutter)
+            .padding(.vertical, 12)
+            .evryField(palette)
             .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
         }
         .buttonStyle(PressScaleStyle(scale: 0.98))
@@ -216,6 +237,7 @@ struct NotesListView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(Appearance.self) private var appearance
     @Environment(NotesNavigationState.self) private var notesNav
+    @Environment(\.evryAway) private var evryAway
     @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
 
     @State private var searchText = ""
@@ -350,6 +372,9 @@ struct NotesListView: View {
                         }
                 )
         }
+        // Brain Dump opens with its own Evry; the list's empty-state Evry steps
+        // away while it's up (applied before the cover so the cover keeps its own).
+        .environment(\.evryAway, evryAway || showBrainDump)
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         .sheet(item: $sheet) { which in
@@ -519,51 +544,56 @@ struct NoteRowView: View {
     var showFolder: Bool = true
 
     var body: some View {
+        // Mirrors `TaskRowView`'s card: 17pt title, 13pt secondary text,
+        // 12pt vertical / gutter horizontal padding, flat white + hairline.
         HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
                     if note.pinned {
                         Image(systemName: "bookmark.fill")
-                            .font(.nunito(size: 12, weight: .bold))
+                            .font(.nunito(size: 12, weight: .semibold))
                             .foregroundStyle(palette.primary)
                             .accessibilityLabel("Pinned")
                     }
                     Text(note.title.isEmpty ? "Untitled" : note.title)
-                        .font(.nunito(size: 17, weight: .bold))
-                        .foregroundStyle(note.title.isEmpty ? palette.textMuted : palette.text)
+                        .font(.nunito(size: 17))
+                        .foregroundStyle(note.title.isEmpty ? palette.textSec : palette.text)
                         .lineLimit(1)
                 }
 
                 if !note.preview.isEmpty {
                     Text(note.preview)
-                        .font(.nunito(size: 14))
+                        .font(.nunito(size: 13))
                         .foregroundStyle(palette.textSec)
                         .lineLimit(1)
+                        .padding(.top, 4)
                 }
             }
 
             Spacer(minLength: 8)
 
-            // Folder chip sits on the trailing edge (not below the text) so every
-            // row keeps the same standardized height as a task card.
+            // Folder chip sits on the trailing edge (not below the text) so the
+            // row stays as compact as a task card.
             if showFolder, let folder = note.folder {
                 // Folder chip: the folder's shade as a small dot (never as text
                 // colour — the lighter shades aren't readable), name in ink.
+                // Sized like the task row's meta chips (13pt medium, 2×8).
                 HStack(spacing: 5) {
                     Circle().fill(folder.tint(palette)).frame(width: 8, height: 8)
                     Text(folder.name)
-                        .font(.evryCaption)
+                        .font(.nunito(size: 13, weight: .medium))
                         .foregroundStyle(palette.text)
                         .lineLimit(1)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
                 .background(palette.skySoft, in: Capsule())
             }
         }
-        .padding(.horizontal, 16)
-        .frame(height: 68)
+        .padding(.vertical, 12)
+        .padding(.horizontal, EvrySpace.gutter)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Flat at rest like the task rows: white fill + hairline, no shadow.
         // Tint the card with the note's chosen background (matching the
         // editor), falling back to the normal card when unset.
         .background {
@@ -576,7 +606,6 @@ struct NoteRowView: View {
         }
         .overlay(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous)
             .strokeBorder(palette.hairline, lineWidth: 1))
-        .evryShadowSoft(palette)
     }
 }
 

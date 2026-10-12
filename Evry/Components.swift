@@ -301,21 +301,23 @@ struct PressScaleStyle: ButtonStyle {
 struct CardBackground: ViewModifier {
     let palette: Palette
     var cornerRadius: CGFloat = EvryRadius.card
+    /// Flat cards (the app's list rows and Profile) keep the hairline only.
+    var shadow = true
 
     func body(content: Content) -> some View {
-        content
+        let card = content
             .background(palette.card, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(palette.hairline, lineWidth: 1)
             )
-            .evryShadowSoft(palette)
+        if shadow { card.evryShadowSoft(palette) } else { card }
     }
 }
 
 extension View {
-    func evryCard(_ palette: Palette, cornerRadius: CGFloat = EvryRadius.card) -> some View {
-        modifier(CardBackground(palette: palette, cornerRadius: cornerRadius))
+    func evryCard(_ palette: Palette, cornerRadius: CGFloat = EvryRadius.card, shadow: Bool = true) -> some View {
+        modifier(CardBackground(palette: palette, cornerRadius: cornerRadius, shadow: shadow))
     }
 
     /// The design system's *secondary* button face: white fill, navy label and
@@ -1482,6 +1484,32 @@ struct EvryBullet: View {
 
 // MARK: Mascot & Logo
 
+// Design rule (never broken): Evry is never visible in two places at once.
+// Overlays that bring Evry in (e.g. the chat) set `evryAway` on the content
+// underneath, and every Evry there — mascot, bubble avatar, star mark — fades
+// out, so Evry reads as having moved into the overlay.
+extension EnvironmentValues {
+    /// True while Evry is "away" in an overlay above this content.
+    @Entry var evryAway: Bool = false
+}
+
+extension View {
+    /// Hides an Evry (mascot or star mark) while Evry is away in an overlay.
+    func evryPresence() -> some View { modifier(EvryPresence()) }
+}
+
+private struct EvryPresence: ViewModifier {
+    @Environment(\.evryAway) private var away
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(away ? 0 : 1)
+            .scaleEffect(away ? 0.8 : 1)
+            .animation(EvryMotion.settle, value: away)
+            .accessibilityHidden(away)
+    }
+}
+
 /// Evry, the white star. Optional gentle float (6s bob) and a white disc behind
 /// (required on sky so the star's sky shadow stays visible). All motion stops
 /// under Reduce Motion. Never cropped, recoloured or stretched.
@@ -1516,6 +1544,7 @@ struct EvryMascot: View {
             .accessibilityElement()
             .accessibilityLabel(accessibilityText ?? "")
             .accessibilityHidden(accessibilityText == nil)
+            .evryPresence()
     }
 }
 
@@ -1524,16 +1553,19 @@ struct EvryLogo: View {
     let palette: Palette
     var onNavy = false
     var markWidth: CGFloat = 36
+    /// The wordmark's size (text-wordmark is 24); tracking stays +0.03em.
+    var wordmarkSize: CGFloat = 24
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 10 * wordmarkSize / 24) {
             Image("EvryPlainMark")
                 .resizable()
                 .scaledToFit()
                 .frame(width: markWidth)
+                .evryPresence()
             Text("Evry")
-                .font(.evryWordmark)
-                .tracking(EvryTracking.wordmark)
+                .font(.nunito(size: wordmarkSize, weight: .heavy))
+                .tracking(wordmarkSize * 0.03)
                 .foregroundStyle(onNavy ? Color.evryWhite : palette.text)
         }
         .frame(minHeight: EvrySpace.tap)
@@ -1902,5 +1934,62 @@ struct QuickAddIconRow: View {
             .padding(.vertical, 2)
         }
         .scrollIndicators(.hidden)
+    }
+}
+
+// MARK: Typewriter text
+
+/// Evry's lines "typed" out a character at a time, with small pauses at
+/// punctuation so it reads like someone writing. The full text reserves its
+/// layout from the start (untyped characters are just clear), so bubbles never
+/// grow or reflow while typing. Restarts whenever `text` changes; instant under
+/// Reduce Motion. `onFinished` fires once the whole line is shown.
+struct TypewriterText: View {
+    let text: String
+    /// Seconds per character (shortened for long lines so typing stays brisk).
+    var speed: Double = 0.03
+    var onFinished: (() -> Void)? = nil
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shown = 0
+
+    var body: some View {
+        Text(typed)
+            // A new line replaces the old one outright (it then types in) —
+            // no cross-fade, which would spill the old text past its bubble.
+            .contentTransition(.identity)
+            .accessibilityLabel(text)
+            .task(id: text) { await type() }
+    }
+
+    /// The text with everything past the cursor made clear.
+    private var typed: AttributedString {
+        var out = AttributedString(text)
+        let count = out.characters.count
+        guard shown < count else { return out }
+        let cut = out.characters.index(out.startIndex, offsetBy: shown)
+        out[cut..<out.endIndex].foregroundColor = .clear
+        return out
+    }
+
+    private func type() async {
+        let characters = Array(text)
+        guard !reduceMotion, !characters.isEmpty else {
+            shown = characters.count
+            onFinished?()
+            return
+        }
+        shown = 0
+        // Long lines speed up so a full line never takes much over ~1.6s.
+        let step = min(speed, 1.6 / Double(characters.count))
+        for i in characters.indices {
+            // Linger just after punctuation, like a breath between phrases.
+            let prev: Character = i > 0 ? characters[i - 1] : " "
+            let pause: Double = ".!?".contains(prev) ? 6 : (",—:;".contains(prev) ? 3 : 1)
+            try? await Task.sleep(for: .seconds(step * pause))
+            if Task.isCancelled { return }
+            shown = i + 1
+        }
+        onFinished?()
     }
 }
