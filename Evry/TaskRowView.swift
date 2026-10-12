@@ -2,9 +2,10 @@
 //  TaskRowView.swift
 //  Evry
 //
-//  The task card — port of the webapp's TaskItem row: rounded card, circle
-//  checkbox, strikethrough title, notes preview, colored meta chips,
-//  embedded subtasks, trailing trash button.
+//  The task card — port of the webapp's TaskItem row: a flat Evry card (white,
+//  navy hairline, no resting shadow), circle checkbox, strikethrough title,
+//  notes preview, sky/navy meta chips, embedded subtasks, trailing trash button.
+//  Priority and urgency are carried by glyphs and words, never by hue.
 //
 
 import SwiftUI
@@ -20,6 +21,11 @@ struct TaskRowView: View {
     var isSelecting: Bool = false
     var isSelected: Bool = false
     var onSelect: () -> Void = {}
+    /// Drag-to-select: while multi-selecting, pressing the select circle and
+    /// sliding reports the finger location (in the "dragSelect" coordinate
+    /// space) so the container can select rows the finger passes over.
+    var onDragSelect: ((CGPoint) -> Void)? = nil
+    var onDragSelectEnd: (() -> Void)? = nil
     var compact: Bool = false
     /// Hides the due-date chip (used on the Timeline, where every task shown is
     /// already due that day) while keeping the row's height unchanged.
@@ -27,25 +33,77 @@ struct TaskRowView: View {
     /// Vertically centers the checkbox and content (like the trailing trash icon)
     /// instead of top-aligning — used on the Timeline.
     var centered: Bool = false
-    /// Card corner radius. Defaults to the standard row radius; the Timeline uses
-    /// the roomier folder-card radius.
-    var cornerRadius: CGFloat = 14
+    /// Card corner radius. Defaults to radius-card, the design system's row/card
+    /// radius (matches `SwipeActionRow`'s revealed actions).
+    var cornerRadius: CGFloat = EvryRadius.card
     /// Forwarded to the checkbox — incrementing it (on swipe-to-complete) plays the
     /// same completion animation + delayed commit as tapping the circle.
     var completeToken: Int = 0
 
-    @State private var subtasksExpanded = true
+    // Collapsed by default so the subtask container doesn't spring back open when
+    // the row is rebuilt (e.g. swiping to another day on the Timeline).
+    @State private var subtasksExpanded = false
     @State private var showDirectionsChooser = false
+    // Measured card width so the subtask container can sit at ~90% of it.
+    @State private var cardW: CGFloat = 0
 
     private enum MapsProvider { case apple, google }
 
     private var hasMeta: Bool {
         guard !task.isNote else { return false }
         let hasDate = task.dueDate != nil && !hideDueDate
-        return hasDate || !task.tags.isEmpty || task.priority != .normal || task.recurrence != nil
+        // Priority isn't a chip anymore (it's a mark beside the title).
+        return hasDate || !task.tags.isEmpty || task.recurrence != nil
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            taskCard
+                .zIndex(1)
+                .background(
+                    GeometryReader { g in
+                        Color.clear
+                            .onAppear { cardW = g.size.width }
+                            .onChange(of: g.size.width) { _, w in cardW = w }
+                    }
+                )
+
+            // A separate container that slides out from under the card, revealing
+            // the subtasks. It sits behind the card (zIndex 0) with its top tucked
+            // under, so the card hides its top edge and the two read as merged.
+            if !task.subtasks.isEmpty && subtasksExpanded {
+                subtaskContainer
+                    .zIndex(0)
+                    // Symmetric transition drives both the slide-out (open) and the
+                    // retract-under-the-card (close).
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        // Report this row's vertical bounds (in the list's "dragSelect" space) so
+        // a drag-select can map the finger position to a row.
+        .background {
+            if isSelecting && onDragSelect != nil {
+                GeometryReader { g in
+                    Color.clear.preference(
+                        key: SelectRowFrameKey.self,
+                        value: [task.uid: g.frame(in: .named("dragSelect"))]
+                    )
+                }
+            }
+        }
+        // Bringing a task back from the completed section clears its subtasks too,
+        // so they don't stay ticked (they were auto-completed with the task).
+        .onChange(of: task.completed) { _, done in
+            guard !done, !task.subtasks.isEmpty else { return }
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                for i in task.subtasks.indices where task.subtasks[i].completed {
+                    task.subtasks[i].completed = false
+                }
+            }
+        }
+    }
+
+    private var taskCard: some View {
         HStack(alignment: centered ? .center : .top, spacing: 12) {
             if isSelecting {
                 Button(action: onSelect) {
@@ -54,8 +112,8 @@ struct TaskRowView: View {
                         Circle().strokeBorder(isSelected ? palette.primary : palette.border, lineWidth: 2)
                         if isSelected {
                             Image(systemName: "checkmark")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.white)
+                                .font(.nunito(size: 10, weight: .bold))
+                                .foregroundStyle(palette.onPrimary)
                         }
                     }
                     .frame(width: 22, height: 22)
@@ -67,64 +125,98 @@ struct TaskRowView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(isSelected ? "Selected" : "Not selected")
+                // Press the circle and slide to select rows the finger passes
+                // over. A plain tap (no movement) still falls through to the
+                // Button's single-toggle.
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 8, coordinateSpace: .named("dragSelect"))
+                        .onChanged { onDragSelect?($0.location) }
+                        .onEnded { _ in onDragSelectEnd?() },
+                    including: onDragSelect == nil ? .subviews : .all
+                )
                 .padding(.top, centered ? 0 : 2)
             } else {
                 TaskCheckbox(checked: task.completed, palette: palette,
                              contentAlignment: centered ? .leading : .topLeading,
                              externalCompleteToken: completeToken,
+                             // The instant the task starts completing, mark its
+                             // subtasks done. Visible subtask checkboxes animate via
+                             // their own onChange (same pop + ring, in sync); a
+                             // collapsed container stays consistent too.
+                             onBeginComplete: {
+                                 guard !task.subtasks.isEmpty else { return }
+                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.55)) {
+                                     for i in task.subtasks.indices where !task.subtasks[i].completed {
+                                         task.subtasks[i].completed = true
+                                     }
+                                 }
+                             },
                              action: onToggle)
                     .padding(.top, centered ? 0 : 2)
             }
 
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    // Pinned: a small navy bookmark (the same pin glyph Notes use).
                     if task.pinned {
                         Image(systemName: "bookmark.fill")
-                            .font(.system(size: 11))
+                            .font(.nunito(size: 12, weight: .semibold))
                             .foregroundStyle(palette.primary)
+                            .accessibilityLabel("Pinned")
+                    }
+                    // Priority: a navy glyph leading the title, in line with it
+                    // (rather than a chip underneath). The glyph's shape carries
+                    // the level ("!!" high, "!" medium, "↓" low) — no colour coding.
+                    if let mark = task.priority.symbol, !task.completed {
+                        Image(systemName: mark)
+                            .font(.nunito(size: 14, weight: .heavy))
+                            .foregroundStyle(task.priority == .low ? palette.textSec : palette.text)
+                            .accessibilityLabel("\(task.priority.label) priority")
                     }
                     Text(task.title)
-                        .font(.system(size: 16.5))
+                        .font(.nunito(size: 17))
                         .foregroundStyle(task.completed ? palette.textSec : palette.text)
                         .strikethrough(task.completed, color: palette.textPh)
                         .multilineTextAlignment(.leading)
+                    // Assigned-time bubble ("at 3:00 PM") — a quiet sky-soft chip so
+                    // the time reads as metadata, not an accent.
+                    if let time = dueTimeLabel {
+                        metaChip(time, foreground: palette.textSec, background: palette.hover)
+                            .fixedSize()
+                    }
+                    // Subtask disclosure sits to the right of the title.
+                    if !task.subtasks.isEmpty {
+                        Spacer(minLength: 8)
+                        subtaskToggle
+                    }
                 }
 
                 if !task.notes.isEmpty {
                     Text(task.notes)
-                        .font(.system(size: 12))
+                        .font(.nunito(size: 13))
                         .foregroundStyle(palette.textSec)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
-                        .padding(.top, 3)
+                        .padding(.top, 4)
                 }
 
                 if !task.location.isEmpty {
                     HStack(spacing: 4) {
                         Image(systemName: "mappin.and.ellipse")
-                            .font(.system(size: 11))
+                            .font(.nunito(size: 12))
                             .foregroundStyle(palette.textSec)
                         Text(task.location)
-                            .font(.system(size: 12))
+                            .font(.nunito(size: 13))
                             .foregroundStyle(palette.textSec)
                             .lineLimit(1)
                     }
-                    .padding(.top, 3)
+                    .padding(.top, 4)
                 }
 
                 if hasMeta {
                     metaChips
-                        .padding(.top, 5)
-                }
-
-                if !task.subtasks.isEmpty {
-                    subtaskToggle
                         .padding(.top, 6)
-                    if subtasksExpanded {
-                        subtaskList
-                            .padding(.top, 4)
-                            .padding(.leading, 10)
-                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -137,10 +229,9 @@ struct TaskRowView: View {
                     showDirectionsChooser = true
                 } label: {
                     Image(systemName: "arrow.turn.up.right")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(palette.primary)
+                        .font(.nunito(size: 14, weight: .semibold))
                         .frame(width: 40, height: 40)
-                        .background(palette.primaryLight, in: Circle())
+                        .evryButtonFace(palette, in: Circle())
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -148,22 +239,14 @@ struct TaskRowView: View {
             }
 
             if !isSelecting {
-                Button {
-                    onDelete()
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 13))
-                        .foregroundStyle(palette.textSec)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .opacity(0.3)
+                TrashBurstButton(palette: palette, action: onDelete)
             }
         }
-        .padding(.vertical, compact ? 7 : 11)
-        .padding(.horizontal, 14)
-        .background(palette.card, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .padding(.vertical, compact ? 8 : 12)
+        .padding(.horizontal, EvrySpace.gutter)
+        // Flat at rest: white fill + the card hairline, no shadow. (The Inbox
+        // adds a light lift only while a row is being dragged.)
+        .evryField(palette, cornerRadius: cornerRadius)
         .opacity(task.completed ? 0.62 : 1)
         .contentShape(Rectangle())
         .onTapGesture { if isSelecting { onSelect() } else { onEdit() } }
@@ -191,64 +274,88 @@ struct TaskRowView: View {
         if let url { UIApplication.shared.open(url) }
     }
 
+    /// "at 3:00 PM" when the task's due date carries an explicit (non-midnight)
+    /// time; nil for date-only or undated tasks. Midnight is treated as "no time"
+    /// to match the app's date/time convention.
+    private var dueTimeLabel: String? {
+        guard let due = task.dueDate else { return nil }
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: due)
+        guard (comps.hour ?? 0) != 0 || (comps.minute ?? 0) != 0 else { return nil }
+        return "at \(due.formatted(date: .omitted, time: .shortened))"
+    }
+
     private var metaChips: some View {
         HStack(spacing: 4) {
             if let due = task.dueDate, !hideDueDate {
                 DateChip(date: due, palette: palette)
             }
             if let recurrence = task.recurrence {
-                ChipView(text: "🔁 \(recurrence.label)", foreground: palette.primary, background: palette.primaryLight)
-            }
-            if let priorityLabel = task.priority.chipLabel {
-                ChipView(
-                    text: priorityLabel,
-                    foreground: priorityColor,
-                    background: priorityBackground
-                )
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.nunito(size: 11, weight: .bold))
+                        .accessibilityHidden(true)
+                    Text(recurrence.label)
+                        .font(.nunito(size: 13, weight: .medium))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(palette.text)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(palette.skySoft, in: Capsule())
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Repeats \(recurrence.label.lowercased())")
             }
             ForEach(task.tags, id: \.self) { tag in
-                ChipView(text: "#\(tag)", foreground: palette.textSec, background: palette.hover)
+                metaChip("#\(tag)", foreground: palette.textSec, background: palette.hover)
             }
         }
     }
 
-    private var priorityColor: Color {
-        switch task.priority {
-        case .high: Palette.danger
-        case .medium: Palette.warning
-        case .low: Palette.success
-        case .normal: palette.textSec
-        }
-    }
-
-    private var priorityBackground: Color {
-        switch task.priority {
-        case .high: palette.dangerLight
-        case .medium: palette.warningLight
-        case .low: palette.successLight
-        case .normal: palette.hover
-        }
+    /// A metadata pill sized for the row's 17pt title (13pt medium, 2×8 padding)
+    /// — the shared `ChipView` pill, one step up.
+    private func metaChip(_ text: String, foreground: Color, background: Color) -> some View {
+        Text(text)
+            .font(.nunito(size: 13, weight: .medium))
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+            .foregroundStyle(foreground)
+            .background(background, in: Capsule())
     }
 
     private var subtaskToggle: some View {
-        let done = task.subtasks.filter(\.completed).count
-        let total = task.subtasks.count
-        return Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+        // Explicit animation so both the slide-out (open) and retract (close) play,
+        // along with the chevron rotation.
+        Button {
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
                 subtasksExpanded.toggle()
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(palette.textPh)
-                    .rotationEffect(.degrees(subtasksExpanded ? 0 : -90))
-                Text("\(done)/\(total) subtasks")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(palette.textSec)
-            }
+            Image(systemName: "chevron.down")
+                .font(.nunito(size: 13, weight: .semibold))
+                .foregroundStyle(palette.textSec)
+                .rotationEffect(.degrees(subtasksExpanded ? 0 : -90))
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(subtasksExpanded ? "Hide subtasks" : "Show subtasks")
+    }
+
+    /// The slide-out subtask container: ~90% of the card width, tucked under the
+    /// card (top edge hidden so they merge), adapting to the subtasks' height.
+    private var subtaskContainer: some View {
+        subtaskList
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            // Top inset clears the slice tucked behind the card.
+            .padding(.top, cornerRadius + 16)
+            .padding(.bottom, 13)
+            .evryField(palette, cornerRadius: cornerRadius)
+            .frame(width: cardW > 0 ? cardW * 0.9 : nil)
+            // Pull the top up under the card so its top edge/border is hidden.
+            .padding(.top, -(cornerRadius + 10))
+            .opacity(task.completed ? 0.62 : 1)
     }
 
     private var subtaskList: some View {
@@ -256,24 +363,19 @@ struct TaskRowView: View {
             ForEach(task.subtasks) { subtask in
                 HStack(spacing: 8) {
                     if !task.isNote {
-                        Button {
-                            onToggleSubtask(subtask)
-                        } label: {
-                            ZStack {
-                                Circle().fill(subtask.completed ? Palette.success : .clear)
-                                Circle().strokeBorder(subtask.completed ? Palette.success : palette.border, lineWidth: 1.5)
-                                if subtask.completed {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 7, weight: .bold))
-                                        .foregroundStyle(.white)
-                                }
-                            }
-                            .frame(width: 16, height: 16)
-                        }
-                        .buttonStyle(.plain)
+                        // Same checkbox as the main task — pop + radiating ring on
+                        // complete. `subtaskCompleteToken` fires them all together
+                        // when the parent task is completed.
+                        TaskCheckbox(
+                            checked: subtask.completed,
+                            palette: palette,
+                            size: 16,
+                            contentAlignment: .center,
+                            action: { onToggleSubtask(subtask) }
+                        )
                     }
                     Text(subtask.title)
-                        .font(.system(size: 13))
+                        .font(.nunito(size: 14))
                         .foregroundStyle(subtask.completed ? palette.textSec : palette.text)
                         .strikethrough(subtask.completed, color: palette.textPh)
                 }
@@ -302,7 +404,7 @@ enum ScheduleDestination {
         switch self {
         case .today:       "Today"
         case .tomorrow:    "Tomorrow"
-        case .nextWeekend: "Next Weekend"
+        case .nextWeekend: "Next weekend"
         }
     }
 
@@ -314,11 +416,22 @@ enum ScheduleDestination {
         }
     }
 
+    /// Hint-badge fill. The three directions differ by strength of the brand
+    /// tones (navy → sky → sky-soft) plus their arrow and label, never by hue.
     func color(_ palette: Palette) -> Color {
         switch self {
         case .today:       palette.primary
-        case .tomorrow:    Palette.success
-        case .nextWeekend: Color(hex: 0x8B5CF6)
+        case .tomorrow:    Palette.doneFill
+        case .nextWeekend: palette.skySoft
+        }
+    }
+
+    /// Label/icon ink on `color(_:)`.
+    func ink(_ palette: Palette) -> Color {
+        switch self {
+        case .today:       palette.onPrimary
+        case .tomorrow:    palette.onSky
+        case .nextWeekend: palette.text
         }
     }
 }
@@ -546,10 +659,20 @@ struct ScheduleSwipeCard<Content: View>: View {
     /// Drops a fresh, empty card in from below and springs it up — the "next
     /// sheet pops up" beat after the previous one is sent away.
     private func reenter() {
-        offset = CGSize(width: 0, height: reentryDistance)
-        opacity = 1
-        withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) {
-            offset = .zero
+        // Jump below the screen with animations explicitly off, then rise on
+        // the next frame. In one update, the jump could be swept into other
+        // in-flight animations and UIKit-backed content (the text field) would
+        // glide over from the card's old spot off the top of the screen.
+        var jump = Transaction()
+        jump.disablesAnimations = true
+        withTransaction(jump) {
+            offset = CGSize(width: 0, height: reentryDistance)
+            opacity = 1
+        }
+        DispatchQueue.main.async {
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) {
+                offset = .zero
+            }
         }
         finishCommit()
     }
@@ -584,14 +707,16 @@ struct ScheduleSwipeCard<Content: View>: View {
             let progress = min(1, hintProgress)
             HStack(spacing: 5) {
                 Image(systemName: dest.icon)
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.nunito(size: 11, weight: .bold))
                 Text(dest.label)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.nunito(size: 12, weight: .bold))
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(dest.ink(palette))
             .padding(.horizontal, 11)
             .padding(.vertical, 6)
             .background(dest.color(palette), in: Capsule())
+            .overlay(Capsule().strokeBorder(dest == .nextWeekend ? Color.evrySky : .clear, lineWidth: 1))
+            .evryShadowLift(palette)
             .scaleEffect(armed ? 1.0 : 0.9)
             .opacity(0.35 + progress * 0.65)
             .padding(8)
@@ -604,5 +729,60 @@ struct ScheduleSwipeCard<Content: View>: View {
     private var hintProgress: CGFloat {
         let magnitude = abs(offset.width) > abs(offset.height) ? abs(offset.width) : abs(offset.height)
         return max(0, min(1, magnitude / distanceThreshold))
+    }
+}
+
+// MARK: - Drag-to-select support
+
+/// Collects each visible row's frame (keyed by task id) in the list's
+/// "dragSelect" coordinate space, so a drag can map the finger's Y to a row.
+struct SelectRowFrameKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+/// Range-selection state for tap-and-drag multi-select. Holds the anchor row
+/// (where the drag began) and the selection that existed before the drag, then
+/// on each move selects everything between the anchor and the finger's row.
+struct DragSelector {
+    var anchor: UUID?
+    private var baseline: Set<UUID> = []
+    var frames: [UUID: CGRect] = [:]
+
+    var isActive: Bool { anchor != nil }
+
+    /// Returns the selection for the finger at `location`, given the ordered rows
+    /// and the current selection (captured as the baseline on the first call).
+    mutating func selection(anchor a: TaskItem, location: CGPoint,
+                            ordered: [TaskItem], current: Set<UUID>) -> Set<UUID> {
+        if anchor == nil {
+            anchor = a.uid
+            baseline = current
+        }
+        guard let ai = ordered.firstIndex(where: { $0.uid == a.uid }) else { return current }
+        let ci = closestIndex(to: location.y, ordered: ordered) ?? ai
+        let lo = min(ai, ci), hi = max(ai, ci)
+        var result = baseline
+        for i in lo...hi { result.insert(ordered[i].uid) }
+        return result
+    }
+
+    mutating func end() {
+        anchor = nil
+        baseline = []
+    }
+
+    /// The row whose center is nearest the given Y (handles gaps and past-the-ends).
+    private func closestIndex(to y: CGFloat, ordered: [TaskItem]) -> Int? {
+        var best: Int?
+        var bestDist = CGFloat.infinity
+        for (i, task) in ordered.enumerated() {
+            guard let f = frames[task.uid] else { continue }
+            let d = abs(f.midY - y)
+            if d < bestDist { bestDist = d; best = i }
+        }
+        return best
     }
 }

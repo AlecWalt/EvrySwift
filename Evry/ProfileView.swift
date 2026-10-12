@@ -22,10 +22,21 @@ private let narrowDateFormatter: DateFormatter = {
     return f
 }()
 
+/// Avatar fills: sky strength steps only (no new hues). Initials sit on them in
+/// navy, which reads at ≥ 8:1 on every step.
 private let avatarColors: [Color] = [
-    Color(hex: 0x6366F1), Color(hex: 0x8B5CF6), Color(hex: 0xEC4899),
-    Color(hex: 0xF97316), Color(hex: 0x22C55E), Color(hex: 0x0EA5E9),
+    Color.evrySky,
+    Color.evrySky.mix(with: .evryWhite, by: 0.35),
+    Color.evrySky.mix(with: .evryNavy, by: 0.12),
+    Color.evrySkySoft,
+    Color.evrySky.mix(with: .evryWhite, by: 0.6),
+    Color.evrySky.mix(with: .evryNavy, by: 0.2),
 ]
+
+/// A 1pt divider in the palette's border tone.
+private func paletteDivider(_ palette: Palette) -> some View {
+    Rectangle().fill(palette.border).frame(height: 1)
+}
 
 private func avatarColor(for name: String) -> Color {
     var hash = 0
@@ -40,18 +51,24 @@ struct ProfileView: View {
     var onEnterFocusMode: () -> Void
 
     @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    @Query private var habits: [Habit]
 
     @Environment(\.requestReview) private var requestReview
     @Environment(TourCoordinator.self) private var tourCoordinator
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @AppStorage("user_name") private var userName = ""
     @AppStorage("app_first_used") private var firstUsed = ""
     @AppStorage("membership_plan") private var membershipPlan = ""
+    @AppStorage("daily_goal") private var dailyGoal = 5
+    @AppStorage("daily_pomo_goal") private var dailyPomoGoal = 60
     @State private var selectedPhoto: PhotosPickerItem? = nil
     @State private var profileImageData: Data? = nil
+    @State private var cropItem: CropImage? = nil
     @State private var analyticsOpen = false
     @State private var showSettings = false
     @State private var showSetupFlow = false
+    @State private var showDevRecap = false
     @State private var showMembershipPromo = false
     @State private var showGlobalSearch = false
     @State private var showAccomplishments = false
@@ -83,29 +100,30 @@ struct ProfileView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
-                Image("TextLogo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(height: 40)
+                EvryLogo(palette: palette)
 
                 // Global search bar
                 Button { showGlobalSearch = true } label: {
                     HStack(spacing: 10) {
                         Image(systemName: "magnifyingglass")
-                            .font(.system(size: 14, weight: .medium))
+                            .font(.nunito(size: 15, weight: .semibold))
                             .foregroundStyle(palette.textSec)
-                        Text("Search all tasks, notes, projects…")
-                            .font(.system(size: 15))
+                        Text("Search tasks, notes and projects…")
+                            .font(.evryBody)
                             .foregroundStyle(palette.textPh)
                         Spacer()
                     }
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 16)
                     .padding(.vertical, 12)
-                    .evryField(palette)
+                    .frame(minHeight: EvrySpace.buttonHeight)
+                    .evryField(palette, cornerRadius: EvryRadius.field)
+                    .contentShape(RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Search tasks, notes and projects")
 
                 profileCard
+                dailyGoalSection
                 if membershipPlan != "pro" {
                     upgradeCard
                 }
@@ -113,7 +131,8 @@ struct ProfileView: View {
                 activitySection
                 developerSection
             }
-            .padding(20)
+            .padding(.horizontal, EvrySpace.gutter)
+            .padding(.vertical, 20)
             .padding(.bottom, 110)
         }
         .background(palette.bg)
@@ -124,20 +143,38 @@ struct ProfileView: View {
             }
         }
         .onChange(of: selectedPhoto) { _, item in
+            // Load the full image, then let the user crop/zoom before saving.
             Task {
                 if let data = try? await item?.loadTransferable(type: Data.self),
-                   let img = UIImage(data: data),
-                   let thumb = img.preparingThumbnail(of: CGSize(width: 300, height: 300)),
-                   let jpeg = thumb.jpegData(compressionQuality: 0.8) {
-                    profileImageData = jpeg
-                    UserDefaults.standard.set(jpeg, forKey: "profile_image_data")
+                   let img = UIImage(data: data) {
+                    await MainActor.run { cropItem = CropImage(image: img); selectedPhoto = nil }
                 }
+            }
+        }
+        .fullScreenCover(item: $cropItem) { c in
+            ProfilePhotoCropper(image: c.image, palette: palette) { jpeg in
+                profileImageData = jpeg
+                UserDefaults.standard.set(jpeg, forKey: "profile_image_data")
             }
         }
         .sheet(isPresented: $showSettings) {
             SettingsSheet()
         }
         .fullScreenCover(isPresented: $showSetupFlow) { SetupFlowView() }
+        .sheet(isPresented: $showDevRecap) {
+            // DEV: preview the daily recap with today's data — falls back to sample
+            // numbers when there's no activity yet, so the UI is always exercised.
+            let tasks = todayCompletedTasks.count
+            let focus = FocusLog.minutes(on: Date())
+            let hasData = tasks > 0 || focus > 0
+            DailyRecapView(
+                date: Date(),
+                tasksCompleted: hasData ? tasks : 4,
+                focusMinutes: hasData ? focus : 75,
+                taskGoal: dailyGoal,
+                focusGoal: dailyPomoGoal
+            )
+        }
         .sheet(isPresented: $showMembershipPromo) { MembershipPromoView() }
         .sheet(isPresented: $showGlobalSearch) { GlobalSearchSheet() }
         .sheet(isPresented: $showAccomplishments) {
@@ -147,38 +184,133 @@ struct ProfileView: View {
 
     // MARK: Upgrade card
 
+    /// Trial-aware subtitle for the upgrade card.
+    private var trialSubtitle: String {
+        let days = MembershipAccess.daysRemaining()
+        if days > 0 {
+            return "\(days) day\(days == 1 ? "" : "s") left in your free month"
+        }
+        return "Your free month has ended. Keep everything with a membership."
+    }
+
     private var upgradeCard: some View {
         Button { showMembershipPromo = true } label: {
             HStack(spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(palette.primaryLight)
-                        .frame(width: 46, height: 46)
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundStyle(palette.primary)
-                }
+                EvryMascot(size: 44)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Upgrade to Pro")
-                        .font(.system(size: 16, weight: .semibold))
+                    Text("Start your membership")
+                        .font(.evryLabel)
                         .foregroundStyle(palette.text)
-                    Text("Timeline, Calendar, Cloud Sync & more")
-                        .font(.system(size: 12))
+                    Text(trialSubtitle)
+                        .font(.nunito(size: 14))
                         .foregroundStyle(palette.textSec)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
+                Spacer(minLength: 8)
+                Image(systemName: "arrow.right")
+                    .font(.nunito(size: 15, weight: .bold))
                     .foregroundStyle(palette.primary)
             }
-            .padding(16)
-            .background(palette.card, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .strokeBorder(palette.primary.opacity(0.35), lineWidth: 1.5)
-            )
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .evryCard(palette)
+            .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
         }
         .buttonStyle(PressScaleStyle())
+    }
+
+    // MARK: Daily goals
+
+    /// Per-day targets — a completed-task goal and today's habits. Each trophy
+    /// is "earned" (turns gold + fills in) the moment its goal is reached.
+    private var dailyGoalSection: some View {
+        // Tasks: the goal is simply every task due today; done = those completed.
+        let today = Calendar.current.startOfDay(for: Date())
+        let dueTasks = tasks.filter { t in
+            !t.isNote && (t.dueDate.map { Calendar.current.isDate($0, inSameDayAs: today) } ?? false)
+        }
+        let tasksDone = dueTasks.filter(\.completed).count
+        // Habits due today (built habits are records, so they don't count).
+        let dueHabits = habits.filter { !$0.isFormed && $0.isScheduled(on: today) }
+        let habitsDone = dueHabits.filter { HabitStats(habit: $0).todayDone }.count
+
+        return VStack(alignment: .leading, spacing: 4) {
+            SectionLabel(text: "Daily goals", palette: palette)
+                .padding(.horizontal, 4)
+
+            // Both targets follow the day itself — no editing.
+            VStack(spacing: 20) {
+                goalCard(
+                    title: "Daily tasks",
+                    detail: "\(tasksDone) of \(dueTasks.count) task\(dueTasks.count == 1 ? "" : "s") done",
+                    done: tasksDone, goal: dueTasks.count,
+                    restTitle: "A calm day",
+                    restDetail: "Nothing’s due today"
+                )
+
+                paletteDivider(palette)
+
+                goalCard(
+                    title: "Daily habits",
+                    detail: "\(habitsDone) of \(dueHabits.count) habit\(dueHabits.count == 1 ? "" : "s") done",
+                    done: habitsDone, goal: dueHabits.count,
+                    restTitle: "Daily habits",
+                    restDetail: "No habits due today"
+                )
+            }
+            .padding(EvrySpace.grid)
+            .evryCard(palette)
+        }
+    }
+
+    /// One daily-goal card: trophy + progress toward the day's target. With
+    /// nothing due (`goal == 0`) it shows the rest title instead of a goal.
+    private func goalCard(
+        title: String,
+        detail: String,
+        done: Int,
+        goal: Int,
+        restTitle: String,
+        restDetail: String
+    ) -> some View {
+        let resting = goal == 0
+        let reached = !resting && done >= goal
+        let fraction = resting ? 0 : min(1, Double(done) / Double(goal))
+
+        return VStack(spacing: 16) {
+            HStack(spacing: 14) {
+                ZStack {
+                    // Reached: the sky "done" disc with navy ink; otherwise a
+                    // quiet sky-soft tile.
+                    RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous)
+                        .fill(reached ? Palette.doneFill : palette.skySoft)
+                    Image(systemName: resting ? "cup.and.saucer" : (reached ? "trophy.fill" : "trophy"))
+                        .font(.nunito(size: 20, weight: .semibold))
+                        .foregroundStyle(reached ? palette.onSky : palette.textSec)
+                        .contentTransition(.symbolEffect(.replace))
+                        .symbolEffect(.bounce, value: reduceMotion ? false : reached)
+                }
+                .frame(width: 48, height: 48)
+                .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(resting ? restTitle : (reached ? "Goal reached" : title))
+                        .font(.evryLabel)
+                        .foregroundStyle(palette.text)
+                    Text(resting ? restDetail : detail)
+                        .font(.nunito(size: 14))
+                        .foregroundStyle(palette.textSec)
+                        .contentTransition(.numericText())
+                }
+
+                Spacer()
+            }
+
+            ProgressBarView(fraction: fraction, palette: palette)
+                .frame(height: 8)
+                .animation(EvryMotion.settle, value: fraction)
+        }
+        .animation(EvryMotion.settle, value: reached)
     }
 
     // MARK: Profile card
@@ -189,9 +321,9 @@ struct ProfileView: View {
             // the card. Reserve room below so it doesn't crowd the next card.
             .overlay(alignment: .bottom) {
                 accomplishmentsBubble
-                    .offset(y: 16)
+                    .offset(y: 20)
             }
-            .padding(.bottom, 22)
+            .padding(.bottom, 26)
             .zIndex(1)
     }
 
@@ -200,7 +332,7 @@ struct ProfileView: View {
             PhotosPicker(selection: $selectedPhoto, matching: .images, photoLibrary: .shared()) {
                 ZStack {
                     Circle()
-                        .fill(profileImageData != nil ? Color.clear : (userName.isEmpty ? palette.border : avatarColor(for: userName)))
+                        .fill(profileImageData != nil ? Color.clear : (userName.isEmpty ? palette.skySoft : avatarColor(for: userName)))
                     if let data = profileImageData, let img = UIImage(data: data) {
                         Image(uiImage: img)
                             .resizable()
@@ -208,149 +340,163 @@ struct ProfileView: View {
                             .clipShape(Circle())
                     } else {
                         Text(initials)
-                            .font(.system(size: 22, weight: .bold))
-                            .foregroundStyle(.white)
+                            .font(.nunito(size: 22, weight: .heavy))
+                            .foregroundStyle(userName.isEmpty ? palette.text : Color.evryNavy)
                     }
                     Circle()
-                        .fill(palette.primary)
-                        .frame(width: 20, height: 20)
+                        .fill(palette.card)
+                        .frame(width: 24, height: 24)
+                        .overlay(Circle().strokeBorder(palette.hairline, lineWidth: 1))
+                        .evryShadowSoft(palette)
                         .overlay(
                             Image(systemName: "camera.fill")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(palette.onPrimary)
+                                .font(.nunito(size: 11, weight: .semibold))
+                                .foregroundStyle(palette.primary)
                         )
-                        .offset(x: 20, y: 20)
+                        .offset(x: 22, y: 22)
                 }
-                .frame(width: 60, height: 60)
+                .frame(width: 64, height: 64)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Change profile photo")
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(userName.isEmpty ? "Your name" : userName)
-                    .font(.system(size: 20, weight: .bold))
+                    .font(.evryH3)
                     .foregroundStyle(palette.text)
                     .lineLimit(1)
-                Text(stats.streak > 0 ? "🔥 \(stats.streak)-day streak" : "Complete a task to start a streak!")
-                    .font(.system(size: 12))
+                Text("\(stats.totalDone) task\(stats.totalDone == 1 ? "" : "s") done")
+                    .font(.nunito(size: 14))
                     .foregroundStyle(palette.textSec)
                 Text("Member since \(joinedLabel)")
-                    .font(.system(size: 11))
-                    .foregroundStyle(palette.textPh)
+                    .font(.nunito(size: 13))
+                    .foregroundStyle(palette.textMuted)
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
             RoundIconButton(systemName: "gearshape", palette: palette) {
                 showSettings = true
             }
+            .accessibilityLabel("Open settings")
         }
-        .padding(18)
-        .evryCard(palette, cornerRadius: 28)
+        .padding(20)
+        .evryCard(palette)
     }
 
     // MARK: Analytics
 
     private var analyticsSection: some View {
         let overdueCount = tasks.filter { !$0.completed && isOverdueDate($0.dueDate) }.count
-        let today = startOfDay(Date())
-        let weekEnd = addDays(Date(), 7)
-        let dueThisWeek = tasks.filter { t in
-            guard !t.completed, let d = t.dueDate else { return false }
-            let day = startOfDay(d)
-            return day >= today && day <= weekEnd
-        }.count
         let activeTasks = tasks.filter { !$0.completed && !$0.isNote }.count
+        let headerSub = stats.todayTotal > 0
+            ? "\(stats.todayDone) of \(stats.todayTotal) done today"
+            : "Tap to see your stats"
 
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("ANALYTICS")
-                .font(.system(size: 12, weight: .bold))
-                .tracking(0.9)
-                .foregroundStyle(palette.textSec)
+        return VStack(alignment: .leading, spacing: 4) {
+            SectionLabel(text: "Your stats", palette: palette)
                 .padding(.horizontal, 4)
 
             VStack(spacing: 0) {
                 Button {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    withAnimation(EvryMotion.settle) {
                         analyticsOpen.toggle()
                     }
                 } label: {
                     HStack(spacing: 12) {
                         Image(systemName: "chart.bar.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(palette.primary)
-                            .frame(width: 32, height: 32)
-                            .background(palette.primaryLight, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .font(.nunito(size: 15, weight: .semibold))
+                            .foregroundStyle(palette.onSky)
+                            .frame(width: 36, height: 36)
+                            .background(palette.sky, in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("\(stats.totalDone) tasks completed")
-                                .font(.system(size: 14, weight: .semibold))
+                            Text("\(stats.totalDone) task\(stats.totalDone == 1 ? "" : "s") done")
+                                .font(.evryLabel)
                                 .foregroundStyle(palette.text)
-                            Text(stats.streak > 0 ? "\(stats.streak)-day streak 🔥" : "Tap to see your stats")
-                                .font(.system(size: 12))
+                            Text(headerSub)
+                                .font(.nunito(size: 14))
                                 .foregroundStyle(palette.textSec)
                         }
                         Spacer()
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.nunito(size: 13, weight: .bold))
                             .foregroundStyle(palette.textSec)
                             .rotationEffect(.degrees(analyticsOpen ? 180 : 0))
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .frame(minHeight: EvrySpace.storeHeight)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityHint(analyticsOpen ? "Hides your stats" : "Shows your stats")
 
                 if analyticsOpen {
-                    Divider()
-                        .background(palette.border)
-                    statsGrid(
-                        overdueCount: overdueCount,
-                        dueThisWeek: dueThisWeek,
-                        activeTasks: activeTasks
-                    )
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    // Fade the tiles in a beat after the card has finished
+                    // expanding (and out quickly on close) so they never clip
+                    // against the card's rounded edge mid-animation.
+                    statsGrid(overdueCount: overdueCount, activeTasks: activeTasks)
+                        .transition(.asymmetric(
+                            insertion: .opacity.animation(EvryMotion.reveal.delay(0.18)),
+                            removal: .opacity.animation(.easeOut(duration: 0.12))
+                        ))
                 }
             }
-            .evryCard(palette, cornerRadius: 28)
-            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            // Clip first, then apply the card, so the shadow isn't clipped away.
+            .clipShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
+            .evryCard(palette)
         }
     }
 
-    private func statsGrid(overdueCount: Int, dueThisWeek: Int, activeTasks: Int) -> some View {
-        let cells: [(String, String, String, Bool)] = [
-            ("\(stats.todayDone)", "/\(stats.todayTotal)", "Today's tasks", false),
+    private func statsGrid(overdueCount: Int, activeTasks: Int) -> some View {
+        // Six task-focused metrics (streaks retired) as spaced rounded tiles.
+        let cells: [(value: String, sub: String, label: String, danger: Bool)] = [
+            ("\(stats.todayDone)", "/\(stats.todayTotal)", "Today", false),
             ("\(stats.weekDone)", "", "This week", false),
             ("\(stats.monthDone)", "", "This month", false),
-            ("\(stats.totalDone)", "", "All-time done", false),
-            ("\(stats.streak)", "", "Day streak 🔥", false),
-            ("\(stats.longestStreak)", "", "Best streak", false),
+            ("\(activeTasks)", "", "Active", false),
             ("\(overdueCount)", "", "Overdue", overdueCount > 0),
-            ("\(dueThisWeek)", "", "Due this week", false),
-            ("\(activeTasks)", "", "Active tasks", false),
+            ("\(stats.totalDone)", "", "All-time", false),
         ]
 
-        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 3), spacing: 0) {
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
             ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
-                VStack(spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: 0) {
-                        Text(cell.0)
-                            .font(.system(size: 19, weight: .bold))
-                            .foregroundStyle(cell.3 ? Palette.danger : palette.text)
-                        if !cell.1.isEmpty {
-                            Text(cell.1)
-                                .font(.system(size: 12))
-                                .foregroundStyle(palette.textSec)
-                        }
-                    }
-                    Text(cell.2)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(palette.textSec)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
-                .overlay(Rectangle().strokeBorder(palette.border.opacity(0.6), lineWidth: 0.5))
+                statTile(value: cell.value, sub: cell.sub, label: cell.label, danger: cell.danger)
             }
         }
+        .padding([.horizontal, .bottom], 16)
+    }
+
+    private func statTile(value: String, sub: String, label: String, danger: Bool) -> some View {
+        VStack(spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 1) {
+                Text(value)
+                    .font(.nunito(size: 24, weight: .heavy))
+                    .foregroundStyle(danger ? Palette.danger : palette.text)
+                if !sub.isEmpty {
+                    Text(sub)
+                        .font(.nunito(size: 13, weight: .semibold))
+                        .foregroundStyle(palette.textMuted)
+                }
+            }
+            // Urgency is carried by the alert glyph and weight, not hue.
+            HStack(spacing: 4) {
+                if danger {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.nunito(size: 12, weight: .bold))
+                        .accessibilityHidden(true)
+                }
+                Text(label)
+                    .font(.nunito(size: 13, weight: danger ? .bold : .regular))
+            }
+            .foregroundStyle(danger ? palette.text : palette.textSec)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+        .background(palette.dark ? palette.hover : palette.skyMist,
+                    in: RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: Activity (week chart)
@@ -358,45 +504,46 @@ struct ProfileView: View {
     private var activitySection: some View {
         let maxCount = max(1, stats.weekData.map(\.count).max() ?? 1)
 
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("ACTIVITY")
-                .font(.system(size: 12, weight: .bold))
-                .tracking(0.9)
-                .foregroundStyle(palette.textSec)
+        return VStack(alignment: .leading, spacing: 4) {
+            SectionLabel(text: "Activity", palette: palette)
                 .padding(.horizontal, 4)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("LAST 7 DAYS")
-                    .font(.system(size: 11, weight: .bold))
-                    .tracking(0.8)
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Last 7 days")
+                    .font(.evrySmall)
                     .foregroundStyle(palette.textSec)
 
-                HStack(alignment: .bottom, spacing: 6) {
+                HStack(alignment: .bottom, spacing: 8) {
                     ForEach(stats.weekData) { day in
-                        VStack(spacing: 5) {
+                        VStack(spacing: 6) {
                             Spacer(minLength: 0)
-                            UnevenRoundedRectangle(topLeadingRadius: 4, topTrailingRadius: 4)
-                                .fill(day.isToday ? palette.primary : palette.border)
-                                .frame(height: max(2, CGFloat(day.count) / CGFloat(maxCount) * 52 + (day.count > 0 ? 4 : 0)))
+                            // Today is the strong ink; other days are sky fill
+                            // (dimmed in dark mode, where the ink is sky too).
+                            UnevenRoundedRectangle(topLeadingRadius: EvryRadius.tail, topTrailingRadius: EvryRadius.tail,
+                                                   style: .continuous)
+                                .fill(day.isToday ? palette.primary : Color.evrySky.opacity(palette.dark ? 0.35 : 1))
+                                .frame(height: max(3, CGFloat(day.count) / CGFloat(maxCount) * 52 + (day.count > 0 ? 4 : 0)))
                             Text(narrowDateFormatter.string(from: day.date))
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(palette.textSec)
+                                .font(.nunito(size: 12, weight: day.isToday ? .bold : .semibold))
+                                .foregroundStyle(day.isToday ? palette.text : palette.textMuted)
                         }
                         .frame(maxWidth: .infinity)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("\(day.date.formatted(.dateTime.weekday(.wide))): \(day.count) done")
                     }
                 }
-                .frame(height: 80)
+                .frame(height: 84)
             }
-            .padding(16)
+            .padding(EvrySpace.grid)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .evryCard(palette, cornerRadius: 28)
+            .evryCard(palette)
         }
     }
 
     // MARK: Accomplishments
 
-    /// Very short line shown in the bubble — the AI one-liner if present,
-    /// otherwise a simple completed-count.
+    /// Very short line shown in the bubble — Evry's one-line summary if
+    /// present, otherwise a simple completed-count.
     private var accomplishmentsBubbleText: String {
         if let summary = todaySummary, !summary.isEmpty { return summary }
         let n = todayCompletedTasks.count
@@ -407,23 +554,31 @@ struct ProfileView: View {
     private var accomplishmentsBubble: some View {
         Button { showAccomplishments = true } label: {
             HStack(spacing: 8) {
-                Image(systemName: "star.fill")
-                    .font(.system(size: 11, weight: .semibold))
+                // The star stands for Evry, the assistant, in small UI.
+                Image("EvryIconStar")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 16, height: 16)
                     .foregroundStyle(palette.primary)
+                    .accessibilityHidden(true)
                 Text(accomplishmentsBubbleText)
-                    .font(.system(size: 12.5, weight: .medium))
+                    .font(.nunito(size: 14, weight: .semibold))
                     .foregroundStyle(palette.text)
                     .lineLimit(1)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.nunito(size: 11, weight: .bold))
                     .foregroundStyle(palette.textSec)
+                    .accessibilityHidden(true)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .background(palette.card, in: Capsule())
-            .overlay(Capsule().strokeBorder(palette.border, lineWidth: 1))
-            .shadow(color: .black.opacity(0.08), radius: 6, y: 3)
+            .padding(.horizontal, 16)
+            .frame(minHeight: EvrySpace.tap)
+            .background(palette.skySoft, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.evrySky, lineWidth: 1))
+            .evryShadowSoft(palette)
+            .contentShape(Capsule())
         }
+        .accessibilityHint("Shows what you got done today")
         .buttonStyle(PressScaleStyle())
         .padding(.horizontal, 20)
     }
@@ -431,37 +586,42 @@ struct ProfileView: View {
     // MARK: Developer section
 
     private var developerSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("DEVELOPER")
-                .font(.system(size: 12, weight: .bold))
-                .tracking(0.9)
-                .foregroundStyle(palette.textSec)
+        VStack(alignment: .leading, spacing: 4) {
+            SectionLabel(text: "Developer", palette: palette)
                 .padding(.horizontal, 4)
 
             VStack(spacing: 0) {
-                devButton("Report an Issue") {
-                    if let url = URL(string: "mailto:EvryToDo@gmail.com?subject=Evry%20Issue%20Report") {
-                        UIApplication.shared.open(url)
-                    }
-                }
-                Divider().background(palette.border)
                 devButton("Preview setup flow") {
                     showSetupFlow = true
                 }
-                Divider().background(palette.border)
-                devButton("Test notification (fires in 5 s)") {
-                    NotificationService.scheduleTest()
-                }
-                Divider().background(palette.border)
-                devButton("Preview membership promo") {
-                    showMembershipPromo = true
-                }
-                Divider().background(palette.border)
+                paletteDivider(palette).padding(.leading, 16)
                 devButton("Preview review popup") {
                     requestReview()
                 }
+                paletteDivider(palette).padding(.leading, 16)
+                devButton("Preview daily recap") {
+                    showDevRecap = true
+                }
+                paletteDivider(palette).padding(.leading, 16)
+                devButton("Trial: reset to 30 days") {
+                    membershipPlan = ""
+                    firstUsed = ISO8601DateFormatter().string(from: Date())
+                }
+                paletteDivider(palette).padding(.leading, 16)
+                devButton("Trial: 3 days left") {
+                    membershipPlan = ""
+                    let d = Calendar.current.date(byAdding: .day, value: -27, to: Date()) ?? Date()
+                    firstUsed = ISO8601DateFormatter().string(from: d)
+                }
+                paletteDivider(palette).padding(.leading, 16)
+                devButton("Trial: expire now (show wall)") {
+                    membershipPlan = ""
+                    let d = Calendar.current.date(byAdding: .day, value: -40, to: Date()) ?? Date()
+                    firstUsed = ISO8601DateFormatter().string(from: d)
+                }
             }
-            .evryCard(palette, cornerRadius: 24)
+            .clipShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
+            .evryField(palette)
         }
     }
 
@@ -469,15 +629,17 @@ struct ProfileView: View {
         Button(action: action) {
             HStack {
                 Text(label)
-                    .font(.system(size: 14))
+                    .font(.evryBody)
                     .foregroundStyle(palette.text)
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(palette.textPh)
+                    .font(.nunito(size: 12, weight: .bold))
+                    .foregroundStyle(palette.textMuted)
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 13)
+            .padding(.vertical, 12)
+            .frame(minHeight: EvrySpace.buttonHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -499,10 +661,11 @@ struct SettingsSheet: View {
     @AppStorage("user_name") private var userName = ""
     @AppStorage("user_email") private var userEmail = ""
     @AppStorage("membership_plan") private var membershipPlan = ""
+    @AppStorage("pro_welcomed") private var proWelcomed = false
     @AppStorage("tab_inbox_visible") private var tabInbox = true
-    @AppStorage("tab_calendar_visible") private var tabCalendar = true
+    @AppStorage("tab_habits_visible") private var tabHabits = true
+    @AppStorage("tab_calendar_visible") private var tabCalendar = false
     @AppStorage("tab_notes_visible") private var tabNotes = true
-    @AppStorage("tab_profile_visible") private var tabProfile = true
     @State private var showMembershipPlans = false
     @State private var showProfile = false
     @State private var showAppearance = false
@@ -512,6 +675,7 @@ struct SettingsSheet: View {
     @State private var showLogoutConfirm = false
     @State private var showTrash = false
     @State private var showClearCompletedConfirm = false
+    @State private var showClearCompletedFinalConfirm = false
     @State private var showReportIssue = false
 
     private var appVersion: String {
@@ -523,11 +687,9 @@ struct SettingsSheet: View {
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
     private var currentPlanLabel: String {
-        switch membershipPlan {
-        case "lite": return "Lite"
-        case "pro":  return "Pro"
-        default:     return "Free"
-        }
+        if membershipPlan == "pro" { return "Member" }
+        let days = MembershipAccess.daysRemaining()
+        return days > 0 ? "Trial · \(days)d left" : "Trial ended"
     }
 
     private var calendarValueLabel: String {
@@ -536,36 +698,41 @@ struct SettingsSheet: View {
         return n == 1 ? "1 calendar" : "\(n) calendars"
     }
 
+    private var clearCompletedCount: Int {
+        allTasks.filter { $0.completed && !$0.isTrashed }.count
+    }
+
     private var layoutValueLabel: String {
-        let count = [tabInbox, tabCalendar, tabNotes, tabProfile].filter { $0 }.count
+        // Profile is always shown; count it alongside the toggleable tabs.
+        let count = [tabInbox, tabHabits, tabCalendar, tabNotes].filter { $0 }.count + 1
         return "\(count) tabs"
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
-                    sectionLabel("ACCOUNT")
+                VStack(spacing: 12) {
+                    sectionLabel("Account")
 
                     settingsNavRow(
-                        icon: "person.fill",
+                        icon: "person",
                         label: "Profile", value: userName.isEmpty ? nil : userName
                     ) { showProfile = true }
 
-                    sectionLabel("SETTINGS")
+                    sectionLabel("Settings")
 
                     settingsNavRow(
-                        icon: "paintbrush.pointed.fill",
+                        icon: "paintbrush.pointed",
                         label: "Appearance", value: appearance.themeMode.label
                     ) { showAppearance = true }
 
                     settingsNavRow(
-                        icon: "star.fill",
+                        icon: "star",
                         label: "Membership", value: currentPlanLabel
                     ) { showMembershipPlans = true }
 
                     settingsNavRow(
-                        icon: "bell.fill",
+                        icon: "bell",
                         label: "Notifications", value: nil
                     ) { showNotifications = true }
 
@@ -575,120 +742,118 @@ struct SettingsSheet: View {
                     ) { showCalendars = true }
 
                     settingsNavRow(
-                        icon: "square.grid.2x2.fill",
+                        icon: "square.grid.2x2",
                         label: "Layout", value: layoutValueLabel
                     ) { showLayout = true }
 
                     settingsNavRow(
-                        icon: "exclamationmark.bubble.fill",
-                        label: "Report an Issue", value: nil
+                        icon: "exclamationmark.bubble",
+                        label: "Report an issue", value: nil
                     ) { showReportIssue = true }
 
-                    sectionLabel("DATA")
+                    sectionLabel("Data")
 
                     settingsNavRow(
-                        icon: "trash.fill",
-                        label: "Recently Deleted", value: nil
+                        icon: "trash",
+                        label: "Recently deleted", value: nil
                     ) { showTrash = true }
 
                     VStack(spacing: 8) {
                         Button {
                             UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                            withAnimation(EvryMotion.settle) {
                                 showClearCompletedConfirm.toggle()
                             }
                         } label: {
                             HStack(spacing: 14) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .font(.system(size: 18, weight: .medium))
+                                Image(systemName: "checkmark.circle")
+                                    .font(.nunito(size: 18, weight: .semibold))
                                     .foregroundStyle(Palette.danger)
                                     .frame(width: 30, height: 30)
-                                Text("Clear All Completed")
-                                    .font(.system(size: 15))
+                                    .accessibilityHidden(true)
+                                Text("Clear all completed")
+                                    .font(.evryBody)
                                     .foregroundStyle(Palette.danger)
                                 Spacer()
                                 Image(systemName: "chevron.down")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(Palette.danger.opacity(0.6))
+                                    .font(.nunito(size: 12, weight: .bold))
+                                    .foregroundStyle(palette.textMuted)
                                     .rotationEffect(.degrees(showClearCompletedConfirm ? 180 : 0))
+                                    .accessibilityHidden(true)
                             }
                             .padding(.horizontal, 16)
-                            .padding(.vertical, 13)
-                            .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                            .padding(.vertical, 12)
+                            .frame(minHeight: EvrySpace.storeHeight)
+                            .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
                         }
                         .buttonStyle(.plain)
                         .evryField(palette)
-                        .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(Palette.danger.opacity(0.25), lineWidth: 1))
 
                         // Inline confirmation, right below the button.
                         if showClearCompletedConfirm {
                             let count = allTasks.filter { $0.completed && !$0.isTrashed }.count
                             HStack(spacing: 10) {
-                                Button {
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showClearCompletedConfirm = false }
-                                } label: {
-                                    Text("Cancel")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundStyle(palette.text)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 12)
-                                        .evryField(palette)
+                                Button("Cancel") {
+                                    withAnimation(EvryMotion.settle) { showClearCompletedConfirm = false }
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(EvrySecondaryButtonStyle(palette: palette, fullWidth: true))
 
                                 Button {
-                                    UINotificationFeedbackGenerator().notificationOccurred(.success)
-                                    for task in allTasks where task.completed && !task.isTrashed {
-                                        TaskActions.delete(task)
-                                    }
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showClearCompletedConfirm = false }
+                                    UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                                    // Second, deliberate confirmation — this can't be undone.
+                                    showClearCompletedFinalConfirm = true
                                 } label: {
-                                    Text(count > 0 ? "Delete \(count)" : "Delete")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundStyle(.white)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 12)
-                                        .background(Palette.danger, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+                                    Label(count > 0 ? "Delete \(count)" : "Delete", systemImage: "trash")
+                                        .font(.evryLabel)
+                                        .foregroundStyle(Palette.onSignal)
+                                        .frame(maxWidth: .infinity, minHeight: EvrySpace.buttonHeight)
+                                        .background(Palette.danger, in: Capsule())
+                                        .evryShadowButton(palette)
+                                        .contentShape(Capsule())
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(PressScaleStyle(scale: 0.98))
                             }
                             .transition(.opacity.combined(with: .move(edge: .top)))
                         }
                     }
 
-                    // Log Out
+                    // Log out
                     VStack(spacing: 8) {
                         Button { showLogoutConfirm = true } label: {
                             HStack(spacing: 14) {
                                 Image(systemName: "rectangle.portrait.and.arrow.right")
-                                    .font(.system(size: 18, weight: .medium))
+                                    .font(.nunito(size: 18, weight: .semibold))
                                     .foregroundStyle(palette.primary)
                                     .frame(width: 30, height: 30)
-                                Text("Log Out")
-                                    .font(.system(size: 15))
+                                    .accessibilityHidden(true)
+                                Text("Log out")
+                                    .font(.evryBody)
                                     .foregroundStyle(palette.text)
                                 Spacer()
                             }
                             .padding(.horizontal, 16)
-                            .padding(.vertical, 13)
+                            .padding(.vertical, 12)
+                            .frame(minHeight: EvrySpace.storeHeight)
+                            .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
                         }
                         .buttonStyle(.plain)
                         .evryField(palette)
 
                         if !userEmail.isEmpty {
                             Text(userEmail)
-                                .font(.system(size: 12))
+                                .font(.nunito(size: 14))
                                 .foregroundStyle(palette.textSec)
                         }
                     }
-                    .padding(.top, 4)
+                    .padding(.top, 12)
 
                     Text(appVersion)
-                        .font(.system(size: 12))
-                        .foregroundStyle(palette.textPh)
+                        .font(.nunito(size: 13))
+                        .foregroundStyle(palette.textMuted)
                         .padding(.top, 8)
                 }
-                .padding(20)
+                .padding(.horizontal, EvrySpace.gutter)
+                .padding(.vertical, 20)
                 .padding(.bottom, 20)
             }
             .background(palette.bg)
@@ -702,23 +867,40 @@ struct SettingsSheet: View {
                         .fontWeight(.semibold)
                 }
             }
-            .confirmationDialog(
-                "Log out of your account?",
-                isPresented: $showLogoutConfirm,
-                titleVisibility: .visible
-            ) {
-                Button("Log Out", role: .destructive) {
-                    userName = ""
-                    userEmail = ""
-                    dismiss()
-                }
-            }
         }
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
+        // Themed confirmations (same card as the Focus Mode exit prompt), over
+        // the whole sheet.
+        .evryConfirm(
+            isPresented: $showClearCompletedFinalConfirm,
+            title: "Delete \(clearCompletedCount) completed task\(clearCompletedCount == 1 ? "" : "s")?",
+            message: "This permanently removes them and can’t be undone.",
+            confirmTitle: "Delete \(clearCompletedCount)"
+        ) {
+            for task in allTasks where task.completed && !task.isTrashed {
+                TaskActions.delete(task)
+            }
+            withAnimation(EvryMotion.settle) { showClearCompletedConfirm = false }
+        }
+        .evryConfirm(
+            isPresented: $showLogoutConfirm,
+            title: "Log out?",
+            message: "You’ll be signed out of your account on this device.",
+            confirmTitle: "Log out"
+        ) {
+            userName = ""
+            userEmail = ""
+            dismiss()
+        }
         .sheet(isPresented: $showProfile)         { ProfileAccountSheet() }
         .sheet(isPresented: $showAppearance)      { AppearanceSettingsView() }
-        .fullScreenCover(isPresented: $showMembershipPlans) { MembershipPlansView() }
+        .fullScreenCover(isPresented: $showMembershipPlans, onDismiss: {
+            // If the user just upgraded here, close Settings too so the root can
+            // present the Pro welcome — a fullScreenCover can't layer over this
+            // still-open sheet, which is why the celebration didn't play.
+            if membershipPlan == "pro" && !proWelcomed { dismiss() }
+        }) { MembershipPlansView() }
         .sheet(isPresented: $showCalendars)       { CalendarsSettingsView() }
         .sheet(isPresented: $showNotifications)   { NotificationsSettingsView() }
         .sheet(isPresented: $showLayout)          { LayoutSettingsView() }
@@ -731,11 +913,7 @@ struct SettingsSheet: View {
     // MARK: Row helpers
 
     private func sectionLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 12, weight: .bold))
-            .tracking(0.9)
-            .foregroundStyle(palette.textSec)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        SectionLabel(text: text, palette: palette)
             .padding(.horizontal, 4)
     }
 
@@ -748,29 +926,44 @@ struct SettingsSheet: View {
         Button(action: action) {
             HStack(spacing: 14) {
                 Image(systemName: icon)
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.nunito(size: 18, weight: .semibold))
                     .foregroundStyle(palette.primary)
                     .frame(width: 30, height: 30)
+                    .accessibilityHidden(true)
                 Text(label)
-                    .font(.system(size: 15))
+                    .font(.evryBody)
                     .foregroundStyle(palette.text)
                 Spacer()
                 if let value {
                     Text(value)
-                        .font(.system(size: 13))
+                        .font(.nunito(size: 14))
                         .foregroundStyle(palette.textSec)
                         .lineLimit(1)
                 }
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(palette.textPh)
+                    .font(.nunito(size: 12, weight: .bold))
+                    .foregroundStyle(palette.textMuted)
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 13)
-            .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .padding(.vertical, 12)
+            .frame(minHeight: EvrySpace.storeHeight)
+            .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
         }
         .buttonStyle(.plain)
         .evryField(palette)
+    }
+}
+
+// MARK: - Form styling (shared by the account sub-screens)
+
+private extension View {
+    /// Puts a system `Form` on the Evry page tone with Nunito text.
+    func evryFormStyle(_ palette: Palette) -> some View {
+        self
+            .font(.evryBody)
+            .scrollContentBackground(.hidden)
+            .background(palette.bg)
     }
 }
 
@@ -818,6 +1011,7 @@ private struct ReportIssueSheet: View {
     @State private var showMailCompose = false
     @State private var showNoMailAlert = false
     @State private var submitted = false
+    @FocusState private var editorFocused: Bool
 
     @AppStorage("feedback_send_log") private var sendLog = ""
 
@@ -850,15 +1044,14 @@ private struct ReportIssueSheet: View {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 20) {
                     if submitted {
-                        VStack(spacing: 16) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 52))
-                                .foregroundStyle(Palette.success)
-                            Text("Report Sent")
-                                .font(.system(size: 22, weight: .bold))
+                        VStack(spacing: 12) {
+                            EvryMascot(size: 96, float: true)
+                                .padding(.bottom, 4)
+                            Text("Report sent")
+                                .font(.evryH3)
                                 .foregroundStyle(palette.text)
-                            Text("Thanks for the feedback. We'll look into it.")
-                                .font(.system(size: 14))
+                            Text("Thanks for telling us. We’ll look into it.")
+                                .font(.evryBody)
                                 .foregroundStyle(palette.textSec)
                                 .multilineTextAlignment(.center)
                         }
@@ -866,88 +1059,77 @@ private struct ReportIssueSheet: View {
                         .padding(.top, 40)
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("DESCRIBE THE ISSUE")
-                                .font(.system(size: 11, weight: .bold))
-                                .tracking(0.8)
-                                .foregroundStyle(palette.textSec)
+                            Text("Describe the issue")
+                                .font(.evryLabel)
+                                .foregroundStyle(palette.text)
                                 .padding(.horizontal, 4)
 
                             ZStack(alignment: .topLeading) {
                                 if messageText.isEmpty {
-                                    Text("Tell us what went wrong or what you'd like to see improved…")
-                                        .font(.system(size: 15))
+                                    Text("For example, what went wrong, or what you’d like to see improved…")
+                                        .font(.evryBody)
                                         .foregroundStyle(palette.textPh)
-                                        .padding(.top, 14)
-                                        .padding(.horizontal, 14)
+                                        .padding(.top, 8)
+                                        .padding(.leading, 5)
                                         .allowsHitTesting(false)
+                                        .accessibilityHidden(true)
                                 }
                                 TextEditor(text: $messageText)
-                                    .font(.system(size: 15))
+                                    .font(.evryBody)
                                     .foregroundStyle(palette.text)
                                     .frame(minHeight: 140)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 8)
                                     .scrollContentBackground(.hidden)
+                                    .focused($editorFocused)
+                                    .accessibilityLabel("Describe the issue")
                             }
-                            .evryField(palette)
+                            .evryTextField(palette, focused: editorFocused)
                         }
 
                         HStack(spacing: 6) {
                             Image(systemName: "clock")
-                                .font(.system(size: 12))
-                                .foregroundStyle(palette.textSec)
+                                .font(.nunito(size: 13, weight: .semibold))
+                                .accessibilityHidden(true)
                             let remaining = max(0, 3 - last24hCount)
-                            Text("\(remaining) report\(remaining == 1 ? "" : "s") remaining today")
-                                .font(.system(size: 12))
-                                .foregroundStyle(palette.textSec)
+                            Text("\(remaining) report\(remaining == 1 ? "" : "s") left today")
+                                .font(.nunito(size: 14))
                         }
+                        .foregroundStyle(palette.textSec)
 
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("INCLUDED WITH REPORT")
-                                .font(.system(size: 10, weight: .bold))
-                                .tracking(0.6)
-                                .foregroundStyle(palette.textPh)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Sent with your report")
+                                .font(.evryCaption)
+                                .foregroundStyle(palette.textMuted)
                             HStack(spacing: 6) {
                                 Text(userName.isEmpty ? "Anonymous" : userName)
                                 Text("·")
                                 Text(appVersion)
                             }
-                            .font(.system(size: 12))
+                            .font(.nunito(size: 14))
                             .foregroundStyle(palette.textSec)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .evryField(palette)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .background(palette.skyMist, in: RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
 
                         if last24hCount >= 3 {
-                            Text("Daily limit reached (3/day). Try again tomorrow.")
-                                .font(.system(size: 12))
-                                .foregroundStyle(Palette.danger)
-                                .multilineTextAlignment(.center)
+                            FieldError(message: "You’ve sent 3 reports today. Please try again tomorrow.", palette: palette)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         } else if last30dCount >= 10 {
-                            Text("Monthly limit reached (10/month).")
-                                .font(.system(size: 12))
-                                .foregroundStyle(Palette.danger)
-                                .multilineTextAlignment(.center)
+                            FieldError(message: "You’ve sent 10 reports this month. Please try again later.", palette: palette)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
 
-                        Button { sendReport() } label: {
-                            Text("Send Report")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 16)
-                                .background(canSend ? palette.primary : palette.border,
-                                            in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-                        }
-                        .buttonStyle(PressScaleStyle())
-                        .disabled(!canSend)
+                        Button("Send report") { sendReport() }
+                            .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
+                            .disabled(!canSend)
                     }
                 }
-                .padding(20)
+                .padding(.horizontal, EvrySpace.gutter)
+                .padding(.vertical, 20)
             }
             .background(palette.bg)
-            .navigationTitle("Report an Issue")
+            .navigationTitle("Report an issue")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -958,20 +1140,20 @@ private struct ReportIssueSheet: View {
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
         .sheet(isPresented: $showMailCompose) {
-            MailComposeView(subject: "Evry App Feedback", body: emailBody) { result in
+            MailComposeView(subject: "Evry app feedback", body: emailBody) { result in
                 showMailCompose = false
                 if result == .sent {
                     recordSend()
-                    withAnimation { submitted = true }
+                    withAnimation(EvryMotion.settle) { submitted = true }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { dismiss() }
                 }
             }
             .ignoresSafeArea()
         }
-        .alert("Mail Not Available", isPresented: $showNoMailAlert) {
+        .alert("Mail isn’t set up", isPresented: $showNoMailAlert) {
             Button("OK") {}
         } message: {
-            Text("Please set up a Mail account in Settings, or contact us at feedback@evry.app")
+            Text("Please add a Mail account in Settings, or email us at feedback@evry.app.")
         }
     }
 
@@ -1010,6 +1192,7 @@ struct ProfileAccountSheet: View {
 
     @State private var profileImageData: Data? = nil
     @State private var selectedPhoto: PhotosPickerItem? = nil
+    @State private var cropItem: CropImage? = nil
     @State private var confirmingDelete = false
     @State private var path: [AccountScreen] = []
 
@@ -1030,9 +1213,9 @@ struct ProfileAccountSheet: View {
                         ZStack(alignment: .bottomTrailing) {
                             Circle()
                                 .fill(profileImageData != nil ? Color.clear
-                                      : userName.isEmpty ? palette.border
+                                      : userName.isEmpty ? palette.skySoft
                                       : avatarColor(for: userName))
-                                .frame(width: 90, height: 90)
+                                .frame(width: 96, height: 96)
                                 .overlay {
                                     if let data = profileImageData, let img = UIImage(data: data) {
                                         Image(uiImage: img)
@@ -1041,29 +1224,33 @@ struct ProfileAccountSheet: View {
                                             .clipShape(Circle())
                                     } else {
                                         Text(initials)
-                                            .font(.system(size: 32, weight: .bold))
-                                            .foregroundStyle(.white)
+                                            .font(.nunito(size: 32, weight: .heavy))
+                                            .foregroundStyle(userName.isEmpty ? palette.text : Color.evryNavy)
                                     }
                                 }
                             Circle()
-                                .fill(palette.primary)
-                                .frame(width: 26, height: 26)
+                                .fill(palette.card)
+                                .frame(width: 30, height: 30)
+                                .overlay(Circle().strokeBorder(palette.hairline, lineWidth: 1))
+                                .evryShadowSoft(palette)
                                 .overlay(
                                     Image(systemName: "camera.fill")
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(palette.onPrimary)
+                                        .font(.nunito(size: 13, weight: .semibold))
+                                        .foregroundStyle(palette.primary)
                                 )
                         }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Change profile photo")
                     .padding(.top, 12)
 
                     // Name field
                     accountRow(icon: "person.fill", iconBg: palette.primaryLight) {
                         TextField("Full name", text: $userName)
-                            .font(.system(size: 15))
+                            .font(.evryBody)
                             .foregroundStyle(palette.text)
                     }
+                    .frame(minHeight: EvrySpace.storeHeight)
                     .evryField(palette)
 
                     // Email
@@ -1090,24 +1277,26 @@ struct ProfileAccountSheet: View {
                     .buttonStyle(.plain)
                     .evryField(palette)
 
-                    // Two-Factor Authentication
+                    // Two-factor authentication
                     Button { path.append(.twoFactor) } label: {
                         HStack(spacing: 14) {
                             iconBadge("shield.lefthalf.filled", bg: palette.primaryLight)
-                            Text("Two-Factor Authentication")
-                                .font(.system(size: 15))
+                            Text("Two-factor authentication")
+                                .font(.evryBody)
                                 .foregroundStyle(palette.text)
                             Spacer()
                             Text(twoFactorEnabled ? "On" : "Off")
-                                .font(.system(size: 13))
-                                .foregroundStyle(twoFactorEnabled ? Palette.success : palette.textSec)
+                                .font(.nunito(size: 14, weight: twoFactorEnabled ? .bold : .regular))
+                                .foregroundStyle(twoFactorEnabled ? palette.text : palette.textSec)
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(palette.textPh)
+                                .font(.nunito(size: 12, weight: .bold))
+                                .foregroundStyle(palette.textMuted)
+                                .accessibilityHidden(true)
                         }
                         .padding(.horizontal, 16)
-                        .padding(.vertical, 13)
-                        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .padding(.vertical, 12)
+                        .frame(minHeight: EvrySpace.storeHeight)
+                        .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .evryField(palette)
@@ -1115,27 +1304,27 @@ struct ProfileAccountSheet: View {
                     // Delete account
                     Button { confirmingDelete = true } label: {
                         HStack(spacing: 14) {
-                            iconBadge("trash.fill", bg: Palette.danger.opacity(0.15), fg: Palette.danger)
-                            Text("Delete Account")
-                                .font(.system(size: 15))
+                            iconBadge("trash.fill", bg: palette.skySoft, fg: Palette.danger)
+                            Text("Delete account")
+                                .font(.evryBody)
                                 .foregroundStyle(Palette.danger)
                             Spacer()
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(palette.textPh)
+                                .font(.nunito(size: 12, weight: .bold))
+                                .foregroundStyle(palette.textMuted)
+                                .accessibilityHidden(true)
                         }
                         .padding(.horizontal, 16)
-                        .padding(.vertical, 13)
-                        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .padding(.vertical, 12)
+                        .frame(minHeight: EvrySpace.storeHeight)
+                        .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .evryField(palette)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 26, style: .continuous)
-                            .strokeBorder(Palette.danger.opacity(0.25), lineWidth: 1)
-                    )
+                    .padding(.top, 12)
                 }
-                .padding(20)
+                .padding(.horizontal, EvrySpace.gutter)
+                .padding(.vertical, 20)
             }
             .background(palette.bg)
             .navigationTitle("Profile")
@@ -1164,24 +1353,26 @@ struct ProfileAccountSheet: View {
         .onChange(of: selectedPhoto) { _, item in
             Task {
                 if let data = try? await item?.loadTransferable(type: Data.self),
-                   let img = UIImage(data: data),
-                   let thumb = img.preparingThumbnail(of: CGSize(width: 300, height: 300)),
-                   let jpeg = thumb.jpegData(compressionQuality: 0.8) {
-                    profileImageData = jpeg
-                    UserDefaults.standard.set(jpeg, forKey: "profile_image_data")
+                   let img = UIImage(data: data) {
+                    await MainActor.run { cropItem = CropImage(image: img); selectedPhoto = nil }
                 }
             }
         }
-        .confirmationDialog(
-            "Delete your account? This cannot be undone.",
-            isPresented: $confirmingDelete,
-            titleVisibility: .visible
-        ) {
-            Button("Delete Account", role: .destructive) {
-                userName = ""
-                userEmail = ""
-                dismiss()
+        .fullScreenCover(item: $cropItem) { c in
+            ProfilePhotoCropper(image: c.image, palette: palette) { jpeg in
+                profileImageData = jpeg
+                UserDefaults.standard.set(jpeg, forKey: "profile_image_data")
             }
+        }
+        .evryConfirm(
+            isPresented: $confirmingDelete,
+            title: "Delete your account?",
+            message: "This can’t be undone.",
+            confirmTitle: "Delete"
+        ) {
+            userName = ""
+            userEmail = ""
+            dismiss()
         }
     }
 
@@ -1197,7 +1388,7 @@ struct ProfileAccountSheet: View {
             content()
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 13)
+        .padding(.vertical, 12)
     }
 
     private func accountNavRow(icon: String, label: String, value: String, action: String) -> some View {
@@ -1205,31 +1396,34 @@ struct ProfileAccountSheet: View {
             iconBadge(icon, bg: palette.primaryLight)
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
-                    .font(.system(size: 12))
-                    .foregroundStyle(palette.textSec)
+                    .font(.nunito(size: 13, weight: .semibold))
+                    .foregroundStyle(palette.textMuted)
                 Text(value)
-                    .font(.system(size: 15))
+                    .font(.evryBody)
                     .foregroundStyle(palette.text)
                     .lineLimit(1)
             }
             Spacer()
             Text(action)
-                .font(.system(size: 13, weight: .medium))
+                .font(.evrySmall)
                 .foregroundStyle(palette.primary)
             Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(palette.textPh)
+                .font(.nunito(size: 12, weight: .bold))
+                .foregroundStyle(palette.textMuted)
+                .accessibilityHidden(true)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 13)
-        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .padding(.vertical, 12)
+        .frame(minHeight: EvrySpace.storeHeight)
+        .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
     }
 
     private func iconBadge(_ name: String, bg: Color, fg: Color? = nil) -> some View {
         Image(systemName: name)
-            .font(.system(size: 18, weight: .medium))
+            .font(.nunito(size: 18, weight: .semibold))
             .foregroundStyle(fg ?? palette.primary)
             .frame(width: 30, height: 30)
+            .accessibilityHidden(true)
     }
 }
 
@@ -1254,7 +1448,7 @@ private struct ChangeEmailView: View {
     var body: some View {
         ZStack {
             Form {
-                Section("New Email Address") {
+                Section("New email address") {
                     TextField("New email", text: $newEmail)
                         .keyboardType(.emailAddress)
                         .autocorrectionDisabled()
@@ -1264,25 +1458,31 @@ private struct ChangeEmailView: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                 }
+                .listRowBackground(palette.card)
 
-                Section("Verify Identity") {
+                Section("Confirm it’s you") {
                     SecureField("Current password", text: $password)
                 }
+                .listRowBackground(palette.card)
 
                 if !errorMessage.isEmpty {
                     Section {
-                        Label(errorMessage, systemImage: "exclamationmark.circle")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Palette.danger)
+                        Label(errorMessage, systemImage: "exclamationmark.circle.fill")
+                            .font(.evrySmall)
+                            .foregroundStyle(palette.text)
                     }
+                    .listRowBackground(palette.card)
                 }
 
                 Section {
                     Button("Forgot password?") { path.append(.forgotPassword) }
+                        .font(.evryLabel)
                         .foregroundStyle(palette.primary)
                 }
+                .listRowBackground(palette.card)
             }
-            .navigationTitle("Change Email")
+            .evryFormStyle(palette)
+            .navigationTitle("Change email")
             #if !os(macOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -1295,20 +1495,20 @@ private struct ChangeEmailView: View {
             }
 
             if success {
-                successOverlay("Email updated!", palette: palette)
+                successOverlay("Email updated", palette: palette)
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: success)
+        .animation(EvryMotion.settle, value: success)
     }
 
     private func save() {
         errorMessage = ""
         guard newEmail.lowercased() == confirmEmail.lowercased() else {
-            errorMessage = "Email addresses don't match. Please re-enter them."
+            errorMessage = "Those email addresses don’t match. Please enter them again."
             return
         }
         guard newEmail.contains("@"), newEmail.contains(".") else {
-            errorMessage = "Please enter a valid email address."
+            errorMessage = "That email doesn’t look quite right. Please check it and try again."
             return
         }
         userEmail = newEmail.lowercased().trimmingCharacters(in: .whitespaces)
@@ -1339,29 +1539,35 @@ private struct ChangePasswordView: View {
     var body: some View {
         ZStack {
             Form {
-                Section("Current Password") {
+                Section("Current password") {
                     SecureField("Current password", text: $currentPassword)
                 }
+                .listRowBackground(palette.card)
 
-                Section("New Password") {
+                Section("New password") {
                     SecureField("New password", text: $newPassword)
                     SecureField("Confirm new password", text: $confirmPassword)
                 }
+                .listRowBackground(palette.card)
 
                 if !errorMessage.isEmpty {
                     Section {
-                        Label(errorMessage, systemImage: "exclamationmark.circle")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Palette.danger)
+                        Label(errorMessage, systemImage: "exclamationmark.circle.fill")
+                            .font(.evrySmall)
+                            .foregroundStyle(palette.text)
                     }
+                    .listRowBackground(palette.card)
                 }
 
                 Section {
                     Button("Forgot password?") { path.append(.forgotPassword) }
+                        .font(.evryLabel)
                         .foregroundStyle(palette.primary)
                 }
+                .listRowBackground(palette.card)
             }
-            .navigationTitle("Change Password")
+            .evryFormStyle(palette)
+            .navigationTitle("Change password")
             #if !os(macOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -1374,20 +1580,20 @@ private struct ChangePasswordView: View {
             }
 
             if success {
-                successOverlay("Password updated!", palette: palette)
+                successOverlay("Password updated", palette: palette)
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: success)
+        .animation(EvryMotion.settle, value: success)
     }
 
     private func save() {
         errorMessage = ""
         guard newPassword == confirmPassword else {
-            errorMessage = "New passwords don't match."
+            errorMessage = "Those new passwords don’t match. Please enter them again."
             return
         }
         guard newPassword.count >= 8 else {
-            errorMessage = "Password must be at least 8 characters."
+            errorMessage = "Please use at least 8 characters for your new password."
             return
         }
         success = true
@@ -1414,15 +1620,13 @@ private struct ForgotPasswordView: View {
             if sent {
                 VStack(spacing: 20) {
                     Spacer()
-                    Image(systemName: "envelope.badge.fill")
-                        .font(.system(size: 64, weight: .light))
-                        .foregroundStyle(palette.primary)
+                    EvryMascot(size: 96, float: true)
                     VStack(spacing: 8) {
                         Text("Check your inbox")
-                            .font(.system(size: 24, weight: .bold))
+                            .font(.evryH3)
                             .foregroundStyle(palette.text)
-                        Text("We sent a password reset link to:\n\(email)")
-                            .font(.system(size: 15))
+                        Text("We sent a link to reset your password to:\n\(email)")
+                            .font(.evryBody)
                             .foregroundStyle(palette.textSec)
                             .multilineTextAlignment(.center)
                     }
@@ -1434,28 +1638,31 @@ private struct ForgotPasswordView: View {
             } else {
                 Form {
                     Section {
-                        Text("Enter the email address associated with your account and we'll send you a link to reset your password.")
-                            .font(.system(size: 14))
+                        Text("Enter the email address on your account and we’ll send you a link to reset your password.")
+                            .font(.evryBody)
                             .foregroundStyle(palette.textSec)
                     }
-                    Section("Email Address") {
+                    .listRowBackground(palette.card)
+                    Section("Email address") {
                         TextField("Email", text: $email)
                             .keyboardType(.emailAddress)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                     }
+                    .listRowBackground(palette.card)
                 }
+                .evryFormStyle(palette)
                 .onAppear { if email.isEmpty { email = userEmail } }
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Send Link") { sent = true }
+                        Button("Send link") { sent = true }
                             .fontWeight(.semibold)
                             .disabled(email.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
                 }
             }
         }
-        .navigationTitle("Forgot Password")
+        .navigationTitle("Forgot password")
         #if !os(macOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -1477,39 +1684,44 @@ private struct TwoFactorView: View {
             Section {
                 HStack(spacing: 14) {
                     Image(systemName: isEnabled ? "shield.lefthalf.filled.badge.checkmark" : "shield.lefthalf.filled")
-                        .font(.system(size: 32))
+                        .font(.nunito(size: 32))
                         .foregroundStyle(isEnabled ? Palette.success : palette.textSec)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(isEnabled ? "Enabled" : "Disabled")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(isEnabled ? Palette.success : palette.text)
+                        Text(isEnabled ? "Two-factor is on" : "Two-factor is off")
+                            .font(.evryLabel)
+                            .foregroundStyle(palette.text)
                         Text(isEnabled
                              ? "Your account has an extra layer of protection."
-                             : "Enable to require a verification code at sign-in.")
-                            .font(.system(size: 13))
+                             : "Turn it on to ask for a verification code when you sign in.")
+                            .font(.nunito(size: 14))
                             .foregroundStyle(palette.textSec)
                     }
                 }
                 .padding(.vertical, 6)
             }
+            .listRowBackground(palette.card)
 
             Section {
-                Toggle("Enable Two-Factor Auth", isOn: $isEnabled)
+                Toggle("Use two-factor authentication", isOn: $isEnabled)
                     .tint(palette.primary)
             }
+            .listRowBackground(palette.card)
 
             if isEnabled {
                 Section("Recovery") {
                     Label(
-                        "Save your recovery codes in a secure location in case you lose access to your authenticator app.",
+                        "Keep your recovery codes somewhere safe, in case you lose access to your authenticator app.",
                         systemImage: "key.fill"
                     )
-                    .font(.system(size: 13))
+                    .font(.nunito(size: 14))
                     .foregroundStyle(palette.textSec)
                 }
+                .listRowBackground(palette.card)
             }
         }
-        .navigationTitle("Two-Factor Auth")
+        .evryFormStyle(palette)
+        .navigationTitle("Two-factor authentication")
         #if !os(macOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -1523,12 +1735,13 @@ private func successOverlay(_ message: String, palette: Palette) -> some View {
     ZStack {
         palette.bg.ignoresSafeArea()
         VStack(spacing: 16) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 62))
-                .foregroundStyle(Palette.success)
-            Text(message)
-                .font(.system(size: 22, weight: .bold))
-                .foregroundStyle(palette.text)
+            EvryMascot(size: 96, float: true)
+            HStack(spacing: 8) {
+                EvryCheck(size: 24)
+                Text(message)
+                    .font(.evryH3)
+                    .foregroundStyle(palette.text)
+            }
         }
     }
     .transition(.opacity)
@@ -1542,38 +1755,43 @@ private struct LayoutSettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @AppStorage("tab_inbox_visible") private var tabInbox = true
-    @AppStorage("tab_calendar_visible") private var tabCalendar = true
+    @AppStorage("tab_habits_visible") private var tabHabits = true
+    @AppStorage("tab_calendar_visible") private var tabCalendar = false
     @AppStorage("tab_notes_visible") private var tabNotes = true
-    @AppStorage("tab_profile_visible") private var tabProfile = true
+    @AppStorage("inbox_hide_completed") private var hideCompleted = false
     @AppStorage("inbox_hide_notes") private var hideNotes = false
     @AppStorage("inbox_hide_reschedule") private var hideReschedule = false
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
+    // Profile is always present, so only the toggleable tabs count toward the
+    // "at least one must stay enabled" rule.
     private var enabledCount: Int {
-        [tabInbox, tabCalendar, tabNotes, tabProfile].filter { $0 }.count
+        [tabInbox, tabHabits, tabCalendar, tabNotes].filter { $0 }.count
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
-                    sectionLabel("TABS")
-                    tabRow("Inbox",    icon: "tray",              isOn: $tabInbox)
-                    tabRow("Calendar", icon: "calendar",          isOn: $tabCalendar)
-                    tabRow("Notes",    icon: "note.text",         isOn: $tabNotes)
-                    tabRow("Profile",  icon: "person",            isOn: $tabProfile)
-                    Text("At least one tab must always be enabled.")
-                        .font(.system(size: 12))
+                VStack(spacing: 12) {
+                    sectionLabel("Tabs")
+                    tabRow("Inbox",    tool: .tasks,    isOn: $tabInbox)
+                    tabRow("Habits",   tool: .habits,   isOn: $tabHabits)
+                    tabRow("Calendar", tool: .calendar, isOn: $tabCalendar)
+                    tabRow("Notes",    tool: .notes,    isOn: $tabNotes)
+                    Text("Keep at least one tab on. Profile is always here.")
+                        .font(.nunito(size: 14))
                         .foregroundStyle(palette.textSec)
                         .multilineTextAlignment(.center)
                         .padding(.top, 4)
 
-                    sectionLabel("INBOX")
+                    sectionLabel("Inbox")
                         .padding(.top, 8)
-                    inboxRow("Hide Notes", icon: "note.text.badge.plus", isOn: $hideNotes)
-                    inboxRow("Hide Reschedule Button", icon: "calendar.badge.minus", isOn: $hideReschedule)
+                    inboxRow("Hide completed tasks", icon: "eye.slash", isOn: $hideCompleted)
+                    inboxRow("Hide notes", icon: "note.text.badge.plus", isOn: $hideNotes)
+                    inboxRow("Hide reschedule button", icon: "calendar.badge.minus", isOn: $hideReschedule)
                 }
-                .padding(20)
+                .padding(.horizontal, EvrySpace.gutter)
+                .padding(.vertical, 20)
             }
             .background(palette.bg)
             .navigationTitle("Layout")
@@ -1590,14 +1808,11 @@ private struct LayoutSettingsView: View {
         .preferredColorScheme(appearance.preferredColorScheme)
     }
 
-    private func tabRow(_ name: String, icon: String, isOn: Binding<Bool>) -> some View {
+    private func tabRow(_ name: String, tool: EvryTool, isOn: Binding<Bool>) -> some View {
         HStack(spacing: 14) {
-            Image(systemName: icon)
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(isOn.wrappedValue ? palette.primary : palette.textSec)
-                .frame(width: 30, height: 30)
+            ToolIcon(tool: tool, tile: 32, palette: palette)
             Text(name)
-                .font(.system(size: 15))
+                .font(.evryBody)
                 .foregroundStyle(palette.text)
             Spacer()
             Toggle("", isOn: Binding(
@@ -1609,37 +1824,38 @@ private struct LayoutSettingsView: View {
             ))
             .labelsHidden()
             .tint(palette.primary)
+            .accessibilityLabel(name)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 13)
+        .padding(.vertical, 12)
+        .frame(minHeight: EvrySpace.storeHeight)
         .evryField(palette)
     }
 
     private func inboxRow(_ name: String, icon: String, isOn: Binding<Bool>) -> some View {
         HStack(spacing: 14) {
             Image(systemName: icon)
-                .font(.system(size: 18, weight: .medium))
+                .font(.nunito(size: 18, weight: .semibold))
                 .foregroundStyle(isOn.wrappedValue ? palette.primary : palette.textSec)
-                .frame(width: 30, height: 30)
+                .frame(width: 32, height: 32)
+                .accessibilityHidden(true)
             Text(name)
-                .font(.system(size: 15))
+                .font(.evryBody)
                 .foregroundStyle(palette.text)
             Spacer()
             Toggle("", isOn: isOn)
                 .labelsHidden()
                 .tint(palette.primary)
+                .accessibilityLabel(name)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 13)
+        .padding(.vertical, 12)
+        .frame(minHeight: EvrySpace.storeHeight)
         .evryField(palette)
     }
 
     private func sectionLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 12, weight: .bold))
-            .tracking(0.9)
-            .foregroundStyle(palette.textSec)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        SectionLabel(text: text, palette: palette)
             .padding(.horizontal, 4)
     }
 }
@@ -1686,11 +1902,11 @@ private struct NotificationsSettingsView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
-                    sectionLabel("NOTIFICATIONS")
+                VStack(spacing: 12) {
+                    sectionLabel("Reminders")
 
-                    notifRow("Task Reminders", icon: "bell.fill",
-                             subtitle: "Get notified before tasks are due", isOn: $taskReminders)
+                    notifRow("Task reminders", icon: "bell.fill",
+                             subtitle: "A kind nudge before tasks are due", isOn: $taskReminders)
 
                     if taskReminders {
                         timePickerRow(
@@ -1701,8 +1917,8 @@ private struct NotificationsSettingsView: View {
                         )
                     }
 
-                    notifRow("Daily Digest", icon: "sun.max.fill",
-                             subtitle: "Morning summary of your day's tasks", isOn: $dailyDigest)
+                    notifRow("Daily digest", icon: "sun.max.fill",
+                             subtitle: "A morning look at your day’s tasks", isOn: $dailyDigest)
 
                     if dailyDigest {
                         timePickerRow(
@@ -1713,10 +1929,13 @@ private struct NotificationsSettingsView: View {
                         )
                     }
 
-                    notifRow("Weekly Summary", icon: "chart.bar.fill",
-                             subtitle: "Weekly overview of your progress", isOn: $weeklySummary)
+                    notifRow("Weekly summary", icon: "chart.bar.fill",
+                             subtitle: "A look back at your week", isOn: $weeklySummary)
                 }
-                .padding(20)
+                .padding(.horizontal, EvrySpace.gutter)
+                .padding(.vertical, 20)
+                .animation(EvryMotion.settle, value: taskReminders)
+                .animation(EvryMotion.settle, value: dailyDigest)
             }
             .background(palette.bg)
             .navigationTitle("Notifications")
@@ -1736,58 +1955,61 @@ private struct NotificationsSettingsView: View {
     private func notifRow(_ name: String, icon: String, subtitle: String, isOn: Binding<Bool>) -> some View {
         HStack(spacing: 14) {
             Image(systemName: icon)
-                .font(.system(size: 18, weight: .medium))
+                .font(.nunito(size: 18, weight: .semibold))
                 .foregroundStyle(isOn.wrappedValue ? palette.primary : palette.textSec)
                 .frame(width: 30, height: 30)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
-                    .font(.system(size: 15))
+                    .font(.evryBody)
                     .foregroundStyle(palette.text)
                 Text(subtitle)
-                    .font(.system(size: 12))
+                    .font(.nunito(size: 14))
                     .foregroundStyle(palette.textSec)
             }
             Spacer()
             Toggle("", isOn: isOn)
                 .labelsHidden()
                 .tint(palette.primary)
+                .accessibilityLabel(name)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 13)
+        .padding(.vertical, 12)
+        .frame(minHeight: EvrySpace.storeHeight)
         .evryField(palette)
     }
 
     private func timePickerRow(icon: String, label: String, subtitle: String, selection: Binding<Date>) -> some View {
         HStack(spacing: 14) {
             Image(systemName: icon)
-                .font(.system(size: 18, weight: .medium))
+                .font(.nunito(size: 18, weight: .semibold))
                 .foregroundStyle(palette.primary)
                 .frame(width: 30, height: 30)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
-                    .font(.system(size: 15))
+                    .font(.evryBody)
                     .foregroundStyle(palette.text)
                 Text(subtitle)
-                    .font(.system(size: 12))
+                    .font(.nunito(size: 14))
                     .foregroundStyle(palette.textSec)
             }
             Spacer()
-            DatePicker("", selection: selection, displayedComponents: .hourAndMinute)
+            DatePicker(label, selection: selection, displayedComponents: .hourAndMinute)
                 .labelsHidden()
                 .tint(palette.primary)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .evryCard(palette, cornerRadius: 22)
+        .frame(minHeight: EvrySpace.storeHeight)
+        .background(palette.skyMist, in: RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous)
+            .strokeBorder(palette.hairline, lineWidth: 1))
         .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     private func sectionLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 12, weight: .bold))
-            .tracking(0.9)
-            .foregroundStyle(palette.textSec)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        SectionLabel(text: text, palette: palette)
             .padding(.horizontal, 4)
     }
 }
@@ -1798,8 +2020,6 @@ private struct AppearanceSettingsView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(Appearance.self) private var appearance
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("membership_plan") private var membershipPlan = ""
-    @State private var showAccentUpgrade = false
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
@@ -1807,8 +2027,8 @@ private struct AppearanceSettingsView: View {
         @Bindable var appearance = appearance
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
-                    sectionLabel("THEME")
+                VStack(spacing: 12) {
+                    sectionLabel("Theme")
 
                     Picker("Theme", selection: $appearance.themeMode) {
                         ForEach(ThemeMode.allCases) { mode in
@@ -1817,46 +2037,11 @@ private struct AppearanceSettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .evryCard(palette, cornerRadius: 24)
-
-                    sectionLabel("ACCENT COLOR")
-
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 14) {
-                        ForEach(AccentColorTheme.all) { accent in
-                            let isFree = accent.key == "default" || accent.key == "ink"
-                            let isLocked = !isFree && membershipPlan != "lite" && membershipPlan != "pro"
-                            Button {
-                                if isLocked { showAccentUpgrade = true }
-                                else { appearance.accentKey = accent.key }
-                            } label: {
-                                VStack(spacing: 5) {
-                                    ZStack {
-                                        Circle()
-                                            .fill(accent.primary.opacity(isLocked ? 0.38 : 1))
-                                            .frame(width: 34, height: 34)
-                                        if appearance.accentKey == accent.key {
-                                            Image(systemName: "checkmark")
-                                                .font(.system(size: 13, weight: .bold))
-                                                .foregroundStyle(accent.onPrimary)
-                                        } else if isLocked {
-                                            Image(systemName: "lock.fill")
-                                                .font(.system(size: 10, weight: .semibold))
-                                                .foregroundStyle(.white.opacity(0.9))
-                                        }
-                                    }
-                                    Text(accent.label)
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(isLocked ? palette.textPh : palette.textSec)
-                                }
-                            }
-                            .buttonStyle(PressScaleStyle())
-                        }
-                    }
-                    .padding(16)
-                    .evryCard(palette, cornerRadius: 24)
+                    .padding(.vertical, 16)
+                    .evryCard(palette)
                 }
-                .padding(20)
+                .padding(.horizontal, EvrySpace.gutter)
+                .padding(.vertical, 20)
             }
             .background(palette.bg)
             .navigationTitle("Appearance")
@@ -1871,15 +2056,10 @@ private struct AppearanceSettingsView: View {
         }
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
-        .sheet(isPresented: $showAccentUpgrade) { MembershipPromoView() }
     }
 
     private func sectionLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 12, weight: .bold))
-            .tracking(0.9)
-            .foregroundStyle(palette.textSec)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        SectionLabel(text: text, palette: palette)
             .padding(.horizontal, 4)
     }
 }
@@ -1900,12 +2080,10 @@ private struct CalendarsSettingsView: View {
                 VStack(spacing: 16) {
                     if !calendarService.isAuthorized {
                         VStack(spacing: 20) {
-                            Image(systemName: "calendar.badge.exclamationmark")
-                                .font(.system(size: 52, weight: .light))
-                                .foregroundStyle(palette.textSec)
+                            ToolIcon(tool: .calendar, tile: 48, palette: palette)
                                 .padding(.top, 40)
                             Text(calendarService.authStatusLabel)
-                                .font(.system(size: 15))
+                                .font(.evryBody)
                                 .foregroundStyle(palette.textSec)
                                 .multilineTextAlignment(.center)
                             if calendarService.accessDenied {
@@ -1914,60 +2092,56 @@ private struct CalendarsSettingsView: View {
                                         UIApplication.shared.open(url)
                                     }
                                 }
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 28)
-                                .padding(.vertical, 12)
-                                .background(palette.primary, in: Capsule())
+                                .buttonStyle(EvryPrimaryButtonStyle(palette: palette))
                             } else {
-                                Button("Connect Calendar") {
+                                Button("Connect your calendar") {
                                     Task { await calendarService.requestAccess() }
                                 }
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 28)
-                                .padding(.vertical, 12)
-                                .background(palette.primary, in: Capsule())
+                                .buttonStyle(EvryPrimaryButtonStyle(palette: palette))
                             }
                         }
                         .frame(maxWidth: .infinity)
                     } else if calendarService.allCalendarInfos.isEmpty {
-                        Text("No calendars found")
-                            .font(.system(size: 15))
-                            .foregroundStyle(palette.textSec)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.top, 60)
+                        EmptyStateView(
+                            title: "No calendars yet",
+                            text: "Add a calendar on your iPhone and it’ll show up here.",
+                            palette: palette
+                        )
+                        .padding(.top, 28)
                     } else {
-                        sectionLabel("CALENDARS")
+                        sectionLabel("Calendars")
 
                         VStack(spacing: 0) {
                             ForEach(Array(calendarService.allCalendarInfos.enumerated()), id: \.element.id) { i, info in
                                 if i > 0 {
-                                    Divider().background(palette.border).padding(.leading, 58)
+                                    paletteDivider(palette).padding(.leading, 56)
                                 }
                                 Toggle(isOn: Binding(
                                     get: { calendarService.selectedCalendarIDs.contains(info.id) },
                                     set: { _ in calendarService.toggleCalendar(info.id) }
                                 )) {
                                     HStack(spacing: 12) {
+                                        // The calendar's own colour, kept only as a
+                                        // tiny dot — it's the user's data.
                                         Circle()
                                             .fill(info.color)
                                             .frame(width: 10, height: 10)
                                             .frame(width: 28, height: 28)
-                                            .background(info.color.opacity(0.15), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                            .accessibilityHidden(true)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(info.title)
-                                                .font(.system(size: 15))
+                                                .font(.evryBody)
                                                 .foregroundStyle(palette.text)
                                             Text(info.sourceTitle)
-                                                .font(.system(size: 12))
+                                                .font(.nunito(size: 14))
                                                 .foregroundStyle(palette.textSec)
                                         }
                                     }
                                 }
-                                .tint(info.color)
+                                .tint(palette.primary)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 12)
+                                .frame(minHeight: EvrySpace.storeHeight)
                                 .contextMenu {
                                     Button(role: .destructive) {
                                         calendarService.hideCalendar(info.id)
@@ -1977,10 +2151,12 @@ private struct CalendarsSettingsView: View {
                                 }
                             }
                         }
-                        .evryCard(palette, cornerRadius: 24)
+                        .clipShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
+                        .evryCard(palette)
                     }
                 }
-                .padding(20)
+                .padding(.horizontal, EvrySpace.gutter)
+                .padding(.vertical, 20)
             }
             .background(palette.bg)
             .navigationTitle("Calendars")
@@ -1997,11 +2173,7 @@ private struct CalendarsSettingsView: View {
     }
 
     private func sectionLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 12, weight: .bold))
-            .tracking(0.9)
-            .foregroundStyle(palette.textSec)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        SectionLabel(text: text, palette: palette)
             .padding(.horizontal, 4)
     }
 }
@@ -2039,80 +2211,73 @@ struct GlobalSearchSheet: View {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.nunito(size: 15, weight: .semibold))
                         .foregroundStyle(palette.textSec)
+                        .accessibilityHidden(true)
                     TextField("Tasks, notes, projects, tags…", text: $searchText)
-                        .font(.system(size: 16))
+                        .font(.evryBody)
                         .foregroundStyle(palette.text)
                         .autocorrectionDisabled()
                         .focused($focused)
                     if !searchText.isEmpty {
                         Button { searchText = "" } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(palette.textPh)
+                                .foregroundStyle(palette.textMuted)
+                                .frame(width: EvrySpace.tap, height: EvrySpace.tap)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Clear search")
+                        .padding(.vertical, -12)
+                        .padding(.trailing, -12)
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .evryField(palette)
-                .padding(.horizontal, 16)
+                .evryTextField(palette, focused: focused)
+                .padding(.horizontal, EvrySpace.gutter)
                 .padding(.top, 16)
-                .padding(.bottom, 8)
+                .padding(.bottom, 12)
 
-                Divider()
+                paletteDivider(palette)
 
                 ScrollView {
                     VStack(spacing: 0) {
                         if searchText.trimmingCharacters(in: .whitespaces).isEmpty {
-                            VStack(spacing: 12) {
-                                Image(systemName: "magnifyingglass")
-                                    .font(.system(size: 40, weight: .light))
-                                    .foregroundStyle(palette.textPh)
-                                Text("Search everything")
-                                    .font(.system(size: 17, weight: .semibold))
-                                    .foregroundStyle(palette.textSec)
-                                Text("Tasks, notes, projects and tags\nacross your entire workspace.")
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(palette.textPh)
-                                    .multilineTextAlignment(.center)
-                            }
-                            .padding(.top, 60)
+                            EmptyStateView(
+                                title: "Search everything",
+                                text: "Find tasks, notes, projects and tags in one place.",
+                                palette: palette
+                            )
+                            .padding(.top, 28)
                         } else if results.isEmpty {
-                            VStack(spacing: 10) {
-                                Image(systemName: "doc.text.magnifyingglass")
-                                    .font(.system(size: 36, weight: .light))
-                                    .foregroundStyle(palette.textPh)
-                                Text("No results for \"\(searchText)\"")
-                                    .font(.system(size: 15))
-                                    .foregroundStyle(palette.textSec)
-                            }
-                            .padding(.top, 60)
+                            EmptyStateView(
+                                systemImage: "magnifyingglass",
+                                title: "Nothing matches “\(searchText.trimmingCharacters(in: .whitespaces))”",
+                                text: "Try a different word, or check the spelling.",
+                                palette: palette
+                            )
+                            .padding(.top, 28)
                         } else {
                             VStack(alignment: .leading, spacing: 0) {
                                 if !results.isEmpty {
-                                    Text("TASKS & NOTES")
-                                        .font(.system(size: 11, weight: .bold))
-                                        .tracking(0.8)
-                                        .foregroundStyle(palette.textSec)
+                                    SectionLabel(text: "Tasks and notes", palette: palette)
                                         .padding(.horizontal, 20)
-                                        .padding(.top, 16)
-                                        .padding(.bottom, 6)
 
                                     Text("\(results.count) result\(results.count == 1 ? "" : "s")")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(palette.textSec)
+                                        .font(.nunito(size: 13))
+                                        .foregroundStyle(palette.textMuted)
                                         .padding(.horizontal, 20)
-                                        .padding(.bottom, 4)
+                                        .padding(.bottom, 8)
 
                                     ForEach(results) { task in
                                         SearchResultRow(task: task, palette: palette, query: searchText) {
+                                            // Go to the Inbox, on the task's own day, and
+                                            // spotlight the task itself.
+                                            projectNavState.focusTaskID = task.uid
                                             projectNavState.requestedTab = .inbox
                                             dismiss()
                                         }
-                                        .padding(.horizontal, 16)
-                                        .padding(.bottom, 6)
+                                        .padding(.horizontal, EvrySpace.gutter)
+                                        .padding(.bottom, 8)
                                     }
                                 }
                             }
@@ -2159,7 +2324,7 @@ private struct SearchResultRow: View {
             let attrStart = attr.characters.index(attr.startIndex, offsetBy: start)
             let attrEnd   = attr.characters.index(attr.startIndex, offsetBy: end)
             attr[attrStart..<attrEnd].foregroundColor = palette.primary
-            attr[attrStart..<attrEnd].font = .systemFont(ofSize: 14, weight: .bold)
+            attr[attrStart..<attrEnd].font = Font.nunito(size: 15, weight: .heavy)
             searchFrom = range.upperBound
         }
         return attr
@@ -2170,41 +2335,59 @@ private struct SearchResultRow: View {
             onTap?()
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: task.completed ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 16))
-                    .foregroundStyle(task.completed ? Palette.success : palette.border)
-                    .frame(width: 24, height: 24)
+                Group {
+                    if task.completed {
+                        EvryCheck(size: 22)
+                    } else {
+                        Circle()
+                            .strokeBorder(palette.dark ? Color.evryWhite35 : .evryNavy28, lineWidth: 1.5)
+                            .frame(width: 22, height: 22)
+                    }
+                }
+                .frame(width: 24, height: 24)
+                .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(highlighted(task.title))
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.nunito(size: 15, weight: .semibold))
                         .foregroundStyle(task.completed ? palette.textSec : palette.text)
-                        .strikethrough(task.completed, color: palette.textPh)
+                        .strikethrough(task.completed, color: palette.textMuted)
                         .lineLimit(1)
 
                     HStack(spacing: 6) {
                         if let due = task.dueDate {
-                            Text(due.formatted(.dateTime.month(.abbreviated).day()))
-                                .font(.system(size: 11))
-                                .foregroundStyle(isOverdueDate(due) ? Palette.danger : palette.textSec)
+                            let overdue = isOverdueDate(due) && !task.completed
+                            HStack(spacing: 3) {
+                                if overdue {
+                                    Image(systemName: "exclamationmark.circle.fill")
+                                        .accessibilityHidden(true)
+                                }
+                                Text(due.formatted(.dateTime.month(.abbreviated).day()))
+                            }
+                            .font(.nunito(size: 13, weight: overdue ? .bold : .regular))
+                            .foregroundStyle(overdue ? palette.text : palette.textSec)
                         }
                         if !task.tags.isEmpty {
                             Text(task.tags.prefix(2).map { "#\($0)" }.joined(separator: " "))
-                                .font(.system(size: 11))
+                                .font(.nunito(size: 13))
                                 .foregroundStyle(palette.textSec)
                         }
                     }
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(palette.textPh)
+                    .font(.nunito(size: 12, weight: .bold))
+                    .foregroundStyle(palette.textMuted)
+                    .accessibilityHidden(true)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .frame(minHeight: EvrySpace.storeHeight)
             .evryField(palette)
+            .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleStyle(scale: 0.98))
+        .accessibilityValue(task.completed ? "Done" : "")
     }
 }
 
@@ -2220,26 +2403,22 @@ struct TrashView: View {
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
     private var trashedTasks: [TaskItem] { allTasks.filter { $0.deletedAt != nil } }
+    @State private var confirmDeleteAll = false
 
     var body: some View {
         NavigationStack {
             Group {
                 if trashedTasks.isEmpty {
-                    VStack(spacing: 12) {
+                    VStack {
                         Spacer()
-                        Image(systemName: "trash")
-                            .font(.system(size: 48, weight: .light))
-                            .foregroundStyle(palette.textPh)
-                        Text("Recently Deleted is empty")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(palette.textSec)
-                        Text("Deleted tasks appear here for 30 days.")
-                            .font(.system(size: 14))
-                            .foregroundStyle(palette.textPh)
-                            .multilineTextAlignment(.center)
+                        EmptyStateView(
+                            title: "Nothing here",
+                            text: "Deleted tasks stay here for 30 days, in case you change your mind.",
+                            palette: palette
+                        )
                         Spacer()
                     }
-                    .padding(.horizontal, 32)
+                    .frame(maxWidth: .infinity)
                 } else {
                     List {
                         Section {
@@ -2247,57 +2426,59 @@ struct TrashView: View {
                                 HStack(spacing: 12) {
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(task.title)
-                                            .font(.system(size: 15, weight: .medium))
+                                            .font(.nunito(size: 16, weight: .semibold))
                                             .foregroundStyle(palette.text)
                                             .lineLimit(1)
                                         if let deleted = task.deletedAt {
                                             let days = Calendar.current.dateComponents([.day], from: deleted, to: Date()).day ?? 0
                                             let remaining = max(0, 30 - days)
                                             Text("Deleted \(deleted.formatted(.relative(presentation: .named))) · \(remaining)d left")
-                                                .font(.system(size: 12))
+                                                .font(.nunito(size: 13))
                                                 .foregroundStyle(palette.textSec)
                                         }
                                     }
                                     Spacer()
                                     Button {
-                                        withAnimation { TaskActions.restore(task) }
+                                        withAnimation(EvryMotion.settle) { TaskActions.restore(task) }
                                     } label: {
                                         Text("Restore")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(palette.primary)
-                                            .padding(.horizontal, 10)
-                                            .padding(.vertical, 5)
-                                            .background(palette.primaryLight, in: Capsule())
+                                            .font(.evrySmall)
+                                            .padding(.horizontal, 14)
+                                            .frame(minHeight: 36)
+                                            .evryButtonFace(palette, in: Capsule())
+                                            .frame(minHeight: EvrySpace.tap)
+                                            .contentShape(Rectangle())
                                     }
-                                    .buttonStyle(.plain)
+                                    .buttonStyle(PressScaleStyle())
+                                    .accessibilityLabel("Restore \(task.title)")
                                 }
+                                .listRowBackground(palette.card)
                                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                     Button(role: .destructive) {
                                         context.delete(task)
                                     } label: {
-                                        Label("Delete Forever", systemImage: "trash.fill")
+                                        Label("Delete forever", systemImage: "trash.fill")
                                     }
                                 }
                             }
                         } footer: {
                             Text("Tasks are permanently deleted after 30 days.")
-                                .font(.system(size: 12))
+                                .font(.nunito(size: 13))
                                 .foregroundStyle(palette.textSec)
                         }
                     }
+                    .scrollContentBackground(.hidden)
                     .toolbar {
                         ToolbarItem(placement: .navigationBarLeading) {
-                            Button("Delete All") {
-                                for task in trashedTasks { context.delete(task) }
-                            }
-                            .font(.system(size: 14, weight: .medium))
+                            Button("Delete all") { confirmDeleteAll = true }
+                            .font(.evrySmall)
                             .foregroundStyle(Palette.danger)
                         }
                     }
                 }
             }
             .background(palette.bg)
-            .navigationTitle("Recently Deleted")
+            .navigationTitle("Recently deleted")
             #if !os(macOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -2309,5 +2490,142 @@ struct TrashView: View {
             }
         }
         .tint(palette.primary)
+        .evryConfirm(
+            isPresented: $confirmDeleteAll,
+            title: "Delete all \(trashedTasks.count) task\(trashedTasks.count == 1 ? "" : "s")?",
+            message: "They’ll be permanently removed. This can’t be undone.",
+            confirmTitle: "Delete all"
+        ) {
+            withAnimation { for task in trashedTasks { context.delete(task) } }
+        }
+    }
+}
+
+// MARK: - Profile photo cropper
+
+/// Identifiable wrapper so a picked image can drive a `.fullScreenCover(item:)`.
+struct CropImage: Identifiable {
+    let id = UUID()
+    let image: UIImage
+}
+
+/// A circular crop/zoom editor: pan and pinch the image within a round window,
+/// then confirm to save it as the profile picture.
+struct ProfilePhotoCropper: View {
+    let image: UIImage
+    let palette: Palette
+    /// Called with the cropped, downscaled JPEG when the user confirms.
+    var onDone: (Data) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    // Committed transform, plus live gesture deltas.
+    @State private var scale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @GestureState private var pinch: CGFloat = 1
+    @GestureState private var drag: CGSize = .zero
+
+    /// On-screen diameter of the crop window.
+    private let side: CGFloat = 300
+
+    private var effectiveScale: CGFloat { scale * pinch }
+    private var effectiveOffset: CGSize {
+        CGSize(width: offset.width + drag.width, height: offset.height + drag.height)
+    }
+
+    var body: some View {
+        ZStack {
+            Color.evryNavy.ignoresSafeArea()
+
+            VStack(spacing: 28) {
+                Text("Move and zoom")
+                    .font(.evryTitle)
+                    .foregroundStyle(Color.evryWhite)
+
+                // The crop window: the image fills a square, pannable/zoomable,
+                // with a circular mask cut out of a dimming overlay to show the
+                // area that becomes the avatar.
+                cropContent(scale: effectiveScale, offset: effectiveOffset)
+                    .frame(width: side, height: side)
+                    .clipped()
+                    .overlay(
+                        Rectangle()
+                            .fill(Color.evryNavy.opacity(0.6))
+                            .frame(width: side, height: side)
+                            .reverseMask { Circle().frame(width: side, height: side) }
+                            .allowsHitTesting(false)
+                    )
+                    .overlay(
+                        Circle().strokeBorder(Color.evrySky, lineWidth: 2)
+                            .frame(width: side, height: side)
+                            .allowsHitTesting(false)
+                    )
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture()
+                            .updating($drag) { v, state, _ in state = v.translation }
+                            .onEnded { v in
+                                offset.width += v.translation.width
+                                offset.height += v.translation.height
+                            }
+                            .simultaneously(with:
+                                MagnificationGesture()
+                                    .updating($pinch) { v, state, _ in state = v }
+                                    .onEnded { v in scale = min(4, max(1, scale * v)) }
+                            )
+                    )
+
+                // On navy: ghost-light for the alternative, sky for the main action.
+                HStack(spacing: 12) {
+                    Button("Cancel") { dismiss() }
+                        .buttonStyle(EvryGhostLightButtonStyle(fullWidth: true))
+
+                    Button("Use photo") {
+                        if let jpeg = renderCrop() { onDone(jpeg) }
+                        dismiss()
+                    }
+                    .buttonStyle(EvrySkyButtonStyle(fullWidth: true))
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    /// The zoom/pan image layer, sized to fill the square crop window.
+    private func cropContent(scale: CGFloat, offset: CGSize) -> some View {
+        Image(uiImage: image)
+            .resizable()
+            .scaledToFill()
+            .frame(width: side, height: side)
+            .scaleEffect(scale)
+            .offset(offset)
+            .frame(width: side, height: side)
+    }
+
+    /// Snapshots the crop window (square, so the avatar's circular clip shows the
+    /// centered region) and downscales it to a profile-sized JPEG.
+    @MainActor private func renderCrop() -> Data? {
+        let content = cropContent(scale: scale, offset: offset)
+            .frame(width: side, height: side)
+            .clipped()
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = UIScreen.main.scale
+        guard let rendered = renderer.uiImage else { return nil }
+        let thumb = rendered.preparingThumbnail(of: CGSize(width: 300, height: 300)) ?? rendered
+        return thumb.jpegData(compressionQuality: 0.8)
+    }
+}
+
+private extension View {
+    /// Punches the given shape out of the view (used for the crop dimming overlay).
+    func reverseMask<Mask: View>(@ViewBuilder _ mask: () -> Mask) -> some View {
+        self.mask(
+            ZStack {
+                Rectangle()
+                mask().blendMode(.destinationOut)
+            }
+            .compositingGroup()
+        )
     }
 }

@@ -58,10 +58,11 @@ struct NoteFormattingBar: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     Menu {
-                        Button { controller.applyTextStyle(size: 28, weight: .bold) } label: {
+                        // Title = Nunito ExtraBold 28, Heading = Bold 22 (h3), Body = Regular 16.
+                        Button { controller.applyTextStyle(size: 28, weight: .heavy) } label: {
                             Label("Title", systemImage: controller.textStyle == .title ? "checkmark" : "textformat.size.larger")
                         }
-                        Button { controller.applyTextStyle(size: 20, weight: .semibold) } label: {
+                        Button { controller.applyTextStyle(size: 22, weight: .bold) } label: {
                             Label("Heading", systemImage: controller.textStyle == .heading ? "checkmark" : "textformat.size")
                         }
                         Button { controller.applyTextStyle(size: 16, weight: .regular) } label: {
@@ -70,25 +71,26 @@ struct NoteFormattingBar: View {
                     } label: {
                         iconChip("textformat", active: controller.textStyle != .body)
                     }
+                    .accessibilityLabel("Text style")
 
                     divider
 
-                    formatButton(icon: "bold", active: controller.isBold) { controller.toggleTrait(.traitBold) }
-                    formatButton(icon: "italic", active: controller.isItalic) { controller.toggleTrait(.traitItalic) }
-                    formatButton(icon: "underline", active: controller.isUnderline) { controller.toggleUnderline() }
-                    formatButton(icon: "strikethrough", active: controller.isStrikethrough) { controller.toggleStrikethrough() }
+                    formatButton(icon: "bold", label: "Bold", active: controller.isBold) { controller.toggleTrait(.traitBold) }
+                    formatButton(icon: "italic", label: "Italic", active: controller.isItalic) { controller.toggleTrait(.traitItalic) }
+                    formatButton(icon: "underline", label: "Underline", active: controller.isUnderline) { controller.toggleUnderline() }
+                    formatButton(icon: "strikethrough", label: "Strikethrough", active: controller.isStrikethrough) { controller.toggleStrikethrough() }
 
                     divider
 
-                    formatButton(icon: "text.alignleft", active: controller.alignment == .left) { controller.setAlignment(.left) }
-                    formatButton(icon: "text.aligncenter", active: controller.alignment == .center) { controller.setAlignment(.center) }
-                    formatButton(icon: "text.alignright", active: controller.alignment == .right) { controller.setAlignment(.right) }
-                    formatButton(icon: "text.justify", active: controller.alignment == .justified) { controller.setAlignment(.justified) }
+                    formatButton(icon: "text.alignleft", label: "Align left", active: controller.alignment == .left) { controller.setAlignment(.left) }
+                    formatButton(icon: "text.aligncenter", label: "Align centre", active: controller.alignment == .center) { controller.setAlignment(.center) }
+                    formatButton(icon: "text.alignright", label: "Align right", active: controller.alignment == .right) { controller.setAlignment(.right) }
+                    formatButton(icon: "text.justify", label: "Justify", active: controller.alignment == .justified) { controller.setAlignment(.justified) }
 
                     divider
 
-                    formatButton(icon: "list.bullet", active: controller.listActive == .bulleted) { controller.startList(.bulleted) }
-                    formatButton(icon: "list.number", active: controller.listActive == .numbered) { controller.startList(.numbered) }
+                    formatButton(icon: "list.bullet", label: "Bulleted list", active: controller.listActive == .bulleted) { controller.startList(.bulleted) }
+                    formatButton(icon: "list.number", label: "Numbered list", active: controller.listActive == .numbered) { controller.startList(.numbered) }
                 }
                 .padding(.horizontal, 12)
             }
@@ -97,16 +99,18 @@ struct NoteFormattingBar: View {
 
             Button { controller.dismissKeyboard() } label: {
                 Image(systemName: "keyboard.chevron.compact.down")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.nunito(size: 16, weight: .bold))
                     .foregroundStyle(palette.primary)
-                    .frame(width: 46, height: 34)
+                    .frame(width: EvrySpace.tap + 4, height: EvrySpace.tap)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Hide keyboard")
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
         .background(palette.card)
-        .overlay(alignment: .top) { Rectangle().fill(palette.border).frame(height: 1) }
+        .overlay(alignment: .top) { Rectangle().fill(palette.hairline).frame(height: 1) }
     }
 
     private var divider: some View {
@@ -115,16 +119,22 @@ struct NoteFormattingBar: View {
 
     private func iconChip(_ icon: String, active: Bool) -> some View {
         Image(systemName: icon)
-            .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(active ? palette.onPrimary : palette.text)
-            .frame(width: 38, height: 32)
-            .background(active ? palette.primary : palette.hover,
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .font(.nunito(size: 15, weight: .bold))
+            // Active: a sky tile with a navy glyph (the brand's "on" state);
+            // resting: a sky-soft tile with ink glyph.
+            .foregroundStyle(active ? Color.evryNavy : palette.text)
+            .frame(width: EvrySpace.tap, height: 40)
+            .background(active ? Color.evrySky : palette.skySoft,
+                        in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
+            .animation(EvryMotion.hover, value: active)
     }
 
-    private func formatButton(icon: String, active: Bool, action: @escaping () -> Void) -> some View {
+    private func formatButton(icon: String, label: String, active: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) { iconChip(icon, active: active) }
-            .buttonStyle(.plain)
+            .buttonStyle(PressScaleStyle())
+            .accessibilityLabel(label)
+            .accessibilityAddTraits(active ? .isSelected : [])
     }
 }
 
@@ -177,7 +187,7 @@ private struct RichTextEditorRepresentable: UIViewRepresentable {
     private func installAccessory(on tv: FadingCaretTextView) {
         let host = UIHostingController(rootView: NoteFormattingBar(controller: controller, palette: palette))
         host.view.backgroundColor = .clear
-        host.view.frame = CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: 50)
+        host.view.frame = CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: 52)
         host.view.autoresizingMask = [.flexibleWidth]
         controller.accessoryHost = host
         tv.inputAccessoryView = host.view
@@ -198,7 +208,6 @@ final class RichTextController: NSObject, UITextViewDelegate {
     /// Retains the hosting controller for the inputAccessoryView formatting bar.
     @ObservationIgnored var accessoryHost: UIViewController?
 
-    var isFocused = false
     var isBold = false
     var isItalic = false
     var isUnderline = false
@@ -251,7 +260,7 @@ final class RichTextController: NSObject, UITextViewDelegate {
         return false
     }
 
-    private var bodyFont: UIFont { textView?.bodyFont ?? .systemFont(ofSize: 16) }
+    private var bodyFont: UIFont { textView?.bodyFont ?? .nunito(size: 16) }
 
     // MARK: Delegate
 
@@ -272,13 +281,11 @@ final class RichTextController: NSObject, UITextViewDelegate {
     }
 
     func textViewDidBeginEditing(_ tv: UITextView) {
-        isFocused = true
         (tv as? FadingCaretTextView)?.moveCaret(animated: false)
         refreshState()
     }
 
     func textViewDidEndEditing(_ tv: UITextView) {
-        isFocused = false
         (tv as? FadingCaretTextView)?.hideCaret()
     }
 
@@ -369,7 +376,7 @@ final class RichTextController: NSObject, UITextViewDelegate {
     }
 
     func applyTextStyle(size: CGFloat, weight: UIFont.Weight) {
-        mutateFont { _ in .systemFont(ofSize: size, weight: weight) }
+        mutateFont { _ in .nunito(size: size, weight: weight) }
     }
 
     func toggleUnderline() { toggleLineStyle(.underlineStyle) }
@@ -477,30 +484,61 @@ final class RichTextController: NSObject, UITextViewDelegate {
 // MARK: - Font trait helper
 
 private extension UIFont {
-    /// Toggles bold/italic reliably for the system font. Rebuilding from a fresh
-    /// system font (bold via weight, italic via descriptor) avoids the case where
-    /// `withSymbolicTraits` refuses to apply to the system font's descriptor and
-    /// silently returns the original font.
+    /// Toggles bold/italic by rebuilding the matching Nunito face directly
+    /// (`withSymbolicTraits` is unreliable across fonts and can silently return
+    /// the original).
     func withTrait(_ trait: UIFontDescriptor.SymbolicTraits, on: Bool) -> UIFont {
         var traits = fontDescriptor.symbolicTraits
         if on { traits.insert(trait) } else { traits.remove(trait) }
-        let wantsBold = traits.contains(.traitBold)
-        let wantsItalic = traits.contains(.traitItalic)
+        return .nunito(size: pointSize,
+                       weight: traits.contains(.traitBold) ? Self.boldWeight(forSize: pointSize) : .regular,
+                       italic: traits.contains(.traitItalic))
+    }
 
-        let base = UIFont.systemFont(ofSize: pointSize, weight: wantsBold ? .bold : .regular)
-        guard wantsItalic else { return base }
-        let italicTraits = base.fontDescriptor.symbolicTraits.union(.traitItalic)
-        if let descriptor = base.fontDescriptor.withSymbolicTraits(italicTraits) {
-            return UIFont(descriptor: descriptor, size: pointSize)
+    /// Headlines are heavy: title-sized text bolds to ExtraBold, the rest to Bold.
+    static func boldWeight(forSize size: CGFloat) -> UIFont.Weight {
+        size >= 24 ? .heavy : .bold
+    }
+
+    /// The Nunito equivalent of this font (same size, bold and italic) — used to
+    /// bring notes saved in the system font into the app typeface.
+    var asNunito: UIFont {
+        guard !familyName.localizedCaseInsensitiveContains("Nunito") else { return self }
+        let traits = fontDescriptor.symbolicTraits
+        return .nunito(size: pointSize,
+                       weight: traits.contains(.traitBold) ? Self.boldWeight(forSize: pointSize) : .regular,
+                       italic: traits.contains(.traitItalic))
+    }
+}
+
+extension UIFont {
+    /// The app typeface (Nunito) as a UIFont for UIKit text views — e.g.
+    /// "Nunito-Regular", "Nunito-Bold", "Nunito-ExtraBold" — falling back to the
+    /// system font if the bundled face isn't available.
+    static func nunito(size: CGFloat, weight: UIFont.Weight = .regular, italic: Bool = false) -> UIFont {
+        let base: String
+        switch weight {
+        case .ultraLight, .thin: base = "ExtraLight"
+        case .light: base = "Light"
+        case .medium: base = "Medium"
+        case .semibold: base = "SemiBold"
+        case .bold: base = "Bold"
+        case .heavy: base = "ExtraBold"
+        case .black: base = "Black"
+        default: base = "Regular"
         }
-        return base
+        let name = italic ? (base == "Regular" ? "Nunito-Italic" : "Nunito-\(base)Italic") : "Nunito-\(base)"
+        if let font = UIFont(name: name, size: size) { return font }
+        let system = UIFont.systemFont(ofSize: size, weight: weight)
+        guard italic, let d = system.fontDescriptor.withSymbolicTraits(.traitItalic) else { return system }
+        return UIFont(descriptor: d, size: size)
     }
 }
 
 // MARK: - Text view (custom caret + glyph fade-in)
 
 final class FadingCaretTextView: UITextView {
-    let bodyFont = UIFont.systemFont(ofSize: 16)
+    let bodyFont = UIFont.nunito(size: 16)
     var placeholderText = ""
     /// Range awaiting a fade-in, captured in `shouldChangeText` and applied once
     /// the characters actually exist.
@@ -525,7 +563,69 @@ final class FadingCaretTextView: UITextView {
     }
 
     var bodyTypingAttributes: [NSAttributedString.Key: Any] {
-        [.font: bodyFont, .foregroundColor: textColor ?? .label]
+        let ink = textColor ?? .label
+        // Line decorations get the ink colour explicitly so strikethroughs and
+        // underlines always match the text.
+        return [.font: bodyFont, .foregroundColor: ink, .strikethroughColor: ink, .underlineColor: ink]
+    }
+
+    /// Recolours a whole document with the current theme's ink. Notes store
+    /// their colours in the archived body, so one saved in the other theme (or
+    /// before explicit decoration colours) would otherwise open with white text
+    /// or white strikethroughs until something re-rendered it.
+    func themed(_ text: NSAttributedString) -> NSAttributedString {
+        guard text.length > 0 else { return text }
+        let ink = textColor ?? .label
+        let out = NSMutableAttributedString(attributedString: text)
+        let full = NSRange(location: 0, length: out.length)
+        out.addAttributes([.foregroundColor: ink, .strikethroughColor: ink, .underlineColor: ink], range: full)
+        // Notes saved before the editor used Nunito carry system-font runs —
+        // bring them into the app typeface (keeping size, bold and italic).
+        var fontUpdates: [(NSRange, UIFont)] = []
+        out.enumerateAttribute(.font, in: full, options: []) { value, range, _ in
+            let font = (value as? UIFont) ?? bodyFont
+            let nunito = font.asNunito
+            if nunito != font || value == nil { fontUpdates.append((range, nunito)) }
+        }
+        for (range, font) in fontUpdates { out.addAttribute(.font, value: font, range: range) }
+        styleLinks(in: out)
+        return out
+    }
+
+    /// The design system's TextLink: bold, current ink, with a soft navy-30
+    /// underline (white-35 on navy). Applied to any `.link` runs in the body.
+    private var linkUnderlineColor: UIColor {
+        traitCollection.userInterfaceStyle == .dark ? UIColor(Color.evryWhite35) : UIColor(Color.evryNavy.opacity(0.3))
+    }
+
+    private func styleLinks(in storage: NSMutableAttributedString) {
+        let full = NSRange(location: 0, length: storage.length)
+        var updates: [(NSRange, UIFont)] = []
+        storage.enumerateAttribute(.link, in: full, options: []) { value, range, _ in
+            guard value != nil else { return }
+            storage.enumerateAttribute(.font, in: range, options: []) { f, sub, _ in
+                let font = (f as? UIFont) ?? bodyFont
+                let italic = font.fontDescriptor.symbolicTraits.contains(.traitItalic)
+                updates.append((sub, .nunito(size: font.pointSize,
+                                             weight: UIFont.boldWeight(forSize: font.pointSize),
+                                             italic: italic)))
+            }
+            storage.addAttributes([.underlineStyle: NSUnderlineStyle.thick.rawValue,
+                                   .underlineColor: linkUnderlineColor], range: range)
+        }
+        for (range, font) in updates { storage.addAttribute(.font, value: font, range: range) }
+    }
+
+    /// Applies the current ink to the live document in place (theme switch).
+    private func rethemeStorage() {
+        guard textStorage.length > 0 else { return }
+        let ink = textColor ?? .label
+        let full = NSRange(location: 0, length: textStorage.length)
+        textStorage.addAttributes([.foregroundColor: ink, .strikethroughColor: ink, .underlineColor: ink], range: full)
+        styleLinks(in: textStorage)
+        typingAttributes[.foregroundColor] = ink
+        typingAttributes[.strikethroughColor] = ink
+        typingAttributes[.underlineColor] = ink
     }
 
     // MARK: Setup
@@ -535,9 +635,19 @@ final class FadingCaretTextView: UITextView {
         // NOTE: never assign `self.font` here — setting a UITextView's font
         // re-applies it to the whole document, wiping per-run bold/italic/size.
         // `textColor` only affects color (safe, and keeps text theme-correct).
-        textColor = UIColor(palette.text)
+        let ink = UIColor(palette.text)
+        let inkChanged = textColor != ink
+        textColor = ink
+        if inkChanged { rethemeStorage() }
         tintColor = UIColor(palette.primary)
         caretColor = UIColor(palette.primary)
+        // Links read as ink with the soft TextLink underline (bold is applied
+        // per-run in `styleLinks`, since linkTextAttributes can't set a font).
+        linkTextAttributes = [
+            .foregroundColor: ink,
+            .underlineStyle: NSUnderlineStyle.thick.rawValue,
+            .underlineColor: linkUnderlineColor,
+        ]
         caretView.backgroundColor = caretColor
         autocorrectionType = .default
         autocapitalizationType = .sentences
@@ -545,6 +655,7 @@ final class FadingCaretTextView: UITextView {
 
         if caretView.superview == nil {
             caretView.layer.cornerRadius = 1
+            caretView.layer.cornerCurve = .continuous
             caretView.isHidden = true
             addSubview(caretView)
         }
@@ -560,7 +671,7 @@ final class FadingCaretTextView: UITextView {
     /// Replaces content while keeping the caret where it was when possible.
     func setAttributedTextPreservingSelection(_ new: NSAttributedString) {
         let sel = selectedRange
-        attributedText = new
+        attributedText = themed(new)
         let loc = min(sel.location, (new.string as NSString).length)
         selectedRange = NSRange(location: loc, length: 0)
         moveCaret(animated: false)

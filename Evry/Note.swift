@@ -59,8 +59,13 @@ final class Folder {
     var uid: UUID = UUID()
     var name: String = ""
     var icon: String = "folder"
-    /// Optional folder tint (hex). `nil` falls back to the app accent.
+    /// Legacy folder tint (hex), from when colours were picked. Still decoded,
+    /// but only ever rendered as a brand sky/navy shade.
     var colorHex: Int?
+    /// Automatic colour: a position (0…1) between sky (0) and navy (1),
+    /// assigned in sequence when the folder is created. Takes precedence over
+    /// the legacy `colorHex`.
+    var shade: Double?
     var createdAt: Date = Date()
     var sortOrder: Int = 0
 
@@ -73,7 +78,52 @@ final class Folder {
         self.colorHex = colorHex
     }
 
-    var color: Color? { colorHex.map { Color(hex: UInt32(truncatingIfNeeded: $0)) } }
+    /// Legacy accessor. Old picked hues (blue, pink, orange…) are never shown;
+    /// any stored colour resolves to the brand's mid sky/navy shade.
+    var color: Color? {
+        colorHex.map { _ in Color.evrySky.mix(with: .evryNavy, by: 0.55) }
+    }
+
+    /// The folder's display colour in the current theme.
+    func tint(_ palette: Palette) -> Color {
+        if let shade { return palette.folderColor(shade: shade) }
+        return palette.folderColor(shade: 0.5)
+    }
+}
+
+// MARK: - Note background tints
+
+/// The note background choices: steps of sky, from mist to a deeper sky/navy
+/// mix, so notes differ by strength, never by a new hue. The stored value stays
+/// an RGB hex in `Note.backgroundColorHex` so existing notes keep decoding.
+enum NoteTint {
+    /// Selectable tints, lightest to strongest (stored as these hex values).
+    static let options: [UInt32] = [
+        0xF1FBFF, // sky-mist
+        0xE3F6FF, // sky-soft
+        0xD0F0FF, // sky 60%
+        0xB0E6FF, // sky
+        0x99C9E1, // sky + 15% navy
+    ]
+
+    /// Hues offered before the brand palette (amber, coral, pink, violet, blue,
+    /// teal, green, grey), each mapped onto a sky step so old notes still tint.
+    private static let legacy: [UInt32: UInt32] = [
+        0xF5B301: 0xE3F6FF, 0xF5847F: 0xD0F0FF, 0xF287AC: 0xD0F0FF, 0xB795EE: 0xB0E6FF,
+        0x84BAEF: 0xB0E6FF, 0x77CEC4: 0xD0F0FF, 0x86D19C: 0xE3F6FF, 0x9CA3AF: 0x99C9E1,
+    ]
+
+    /// The brand step to show for whatever hex is stored.
+    static func brandHex(forStoredHex stored: Int) -> UInt32 {
+        let hex = UInt32(truncatingIfNeeded: stored) & 0xFFFFFF
+        if options.contains(hex) { return hex }
+        if let mapped = legacy[hex] { return mapped }
+        return 0xE3F6FF
+    }
+
+    static func color(forStoredHex stored: Int) -> Color {
+        Color(hex: brandHex(forStoredHex: stored))
+    }
 }
 
 // MARK: - Sticker
@@ -87,6 +137,10 @@ struct NoteSticker: Identifiable, Codable, Hashable {
     var y: Double            // normalized center Y (0…1)
     var scale: Double = 1
     var rotation: Double = 0 // radians
+    /// Optional PNG data for an image sticker imported from the photo library
+    /// (e.g. an Apple sticker). When set, it's drawn instead of `emoji`. Decodes
+    /// as nil for stickers saved before image support.
+    var imageData: Data? = nil
 }
 
 // MARK: - Note
@@ -111,6 +165,8 @@ final class Note {
     var folder: Folder?
     /// JSON-encoded emoji stickers — access through `stickers`.
     var stickersData: Data = Data()
+    /// Optional custom background color (hex RGB). nil = the default editor bg.
+    var backgroundColorHex: Int?
 
     init(title: String = "", body: NSAttributedString = NSAttributedString(), folder: Folder? = nil) {
         self.title = title
@@ -142,6 +198,20 @@ final class Note {
     var stickers: [NoteSticker] {
         get { (try? JSONDecoder().decode([NoteSticker].self, from: stickersData)) ?? [] }
         set { stickersData = (try? JSONEncoder().encode(newValue)) ?? Data() }
+    }
+
+    /// The note's custom background tint, if one was chosen — always a brand
+    /// sky step (legacy multi-colour picks are mapped onto the same steps).
+    var backgroundColor: Color? {
+        backgroundColorHex.map { NoteTint.color(forStoredHex: $0) }
+    }
+
+    /// The surface to paint behind this note (editor and list row), or nil for
+    /// the default. Light mode uses the sky step directly (navy text reads on
+    /// all of them); dark mode lays it over navy as a soft wash.
+    func backgroundSurface(_ palette: Palette) -> Color? {
+        guard let tint = backgroundColor else { return nil }
+        return palette.dark ? tint.opacity(0.16) : tint
     }
 
     var isTrashed: Bool { deletedAt != nil }

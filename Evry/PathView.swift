@@ -22,6 +22,7 @@ struct PathView: View {
 
     @Environment(\.modelContext) private var context
     @Environment(PomodoroModel.self) private var pomodoro
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
 
     /// Skip order survives re-renders, resets with the view — same scope as
@@ -63,25 +64,29 @@ struct PathView: View {
                         HStack(spacing: 4) {
                             Text("Not this one")
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .bold))
+                                .font(.nunito(size: 12, weight: .bold))
+                                .accessibilityHidden(true)
                         }
-                        .font(.system(size: 13.5, weight: .medium))
+                        .font(.evrySmall)
                         .foregroundStyle(palette.textSec)
-                        .padding(8)
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: EvrySpace.tap)
+                        .contentShape(Capsule())
                     }
+                    .buttonStyle(PressScaleStyle())
+                    .accessibilityHint("Shows the next task instead")
                     .disabled(celebrating)
                     Spacer()
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, EvrySpace.grid)
                 .padding(.top, inFocusMode ? 60 : 0)
                 .padding(.bottom, inFocusMode ? 80 : 110)
             } else {
                 VStack {
                     Spacer()
                     EmptyStateView(
-                        imageName: "Dog",
-                        title: "All done!",
-                        text: "Now relax and enjoy the day!",
+                        title: "That’s everything for now",
+                        text: "Take a breath and enjoy the rest of your day.",
                         palette: palette
                     )
                     Spacer()
@@ -114,24 +119,30 @@ struct PathView: View {
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: "timer")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(palette.primary)
+                    .font(.nunito(size: 17, weight: .bold))
+                    .foregroundStyle(palette.onSky)
                     .frame(width: 40, height: 40)
-                    .background(palette.primaryLight, in: Circle())
+                    .background(palette.sky, in: Circle())
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Pomodoro")
-                        .font(.system(size: 15, weight: .bold))
+                        .font(.evryTitle)
                         .foregroundStyle(palette.text)
                     Text(pomodoro.running
-                         ? "\(pomodoro.phase.statusLabel) — \(pomodoro.timeLabel)"
-                         : "Timed focus sessions with breaks")
-                        .font(.system(size: 12.5))
+                         ? "\(pomodoro.phase.statusLabel), \(pomodoro.timeLabel) left"
+                         : "Timed focus sessions with gentle breaks")
+                        .font(.nunito(size: 14))
                         .foregroundStyle(palette.textSec)
                 }
                 Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.nunito(size: 14, weight: .bold))
+                    .foregroundStyle(palette.textMuted)
+                    .accessibilityHidden(true)
             }
-            .padding(14)
+            .padding(16)
             .evryCard(palette)
+            .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
         }
         .buttonStyle(.plain)
         .fullScreenCover(isPresented: $showPomodoro) {
@@ -154,9 +165,9 @@ struct PathView: View {
                 onEdit(task)
             } label: {
                 Text(task.title)
-                    .font(.system(size: 24, weight: .bold))
+                    .font(.evryH3)
                     .foregroundStyle(celebrating ? palette.textSec : palette.text)
-                    .strikethrough(celebrating, color: palette.textPh)
+                    .strikethrough(celebrating, color: palette.textMuted)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 2)
                     .padding(.vertical, 4)
@@ -165,13 +176,14 @@ struct PathView: View {
 
             if !task.notes.isEmpty {
                 Text(task.notes)
-                    .font(.system(size: 14))
+                    .font(.evryBody)
+                    .lineSpacing(4)
                     .foregroundStyle(palette.textSec)
                     .multilineTextAlignment(.center)
             }
 
             if !task.subtasks.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
                     ForEach(task.subtasks) { subtask in
                         HStack(spacing: 8) {
                             Button {
@@ -179,22 +191,28 @@ struct PathView: View {
                                     task.subtasks[idx].completed.toggle()
                                 }
                             } label: {
+                                // Done = the sky check disc with a navy tick.
                                 ZStack {
-                                    Circle().fill(subtask.completed ? Palette.success : .clear)
-                                    Circle().strokeBorder(subtask.completed ? Palette.success : palette.border, lineWidth: 1.5)
+                                    Circle().fill(subtask.completed ? Palette.doneFill : .clear)
+                                    Circle().strokeBorder(subtask.completed ? Color.clear : palette.border, lineWidth: 1.5)
                                     if subtask.completed {
                                         Image(systemName: "checkmark")
-                                            .font(.system(size: 7, weight: .bold))
-                                            .foregroundStyle(.white)
+                                            .font(.nunito(size: 10, weight: .heavy))
+                                            .foregroundStyle(palette.onSky)
                                     }
                                 }
-                                .frame(width: 16, height: 16)
+                                .frame(width: 20, height: 20)
+                                .frame(width: 32, height: 32)
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(subtask.title)
+                            .accessibilityValue(subtask.completed ? "Done" : "Not done")
                             Text(subtask.title)
-                                .font(.system(size: 13))
+                                .font(.nunito(size: 15))
                                 .foregroundStyle(subtask.completed ? palette.textSec : palette.text)
-                                .strikethrough(subtask.completed, color: palette.textPh)
+                                .strikethrough(subtask.completed, color: palette.textMuted)
+                                .accessibilityHidden(true)
                         }
                     }
                 }
@@ -210,28 +228,30 @@ struct PathView: View {
                 }
             }
 
-            // Big complete button — 68pt circle, fills green while celebrating
+            // Big complete button — 68pt circle; while celebrating it becomes the
+            // sky check disc with a navy tick (the done fill).
             Button {
                 complete(task)
             } label: {
                 ZStack {
                     // Radiating ring that bursts outward on completion.
                     Circle()
-                        .stroke(Palette.success, lineWidth: 2.5)
+                        .stroke(palette.primary, lineWidth: 2.5)
                         .scaleEffect(burstScale)
                         .opacity(burstOpacity)
                     Circle()
-                        .fill(celebrating ? Palette.success : palette.card)
+                        .fill(celebrating ? Palette.doneFill : palette.card)
                     Circle()
-                        .strokeBorder(celebrating ? Palette.success : palette.border, lineWidth: 2.5)
+                        .strokeBorder(celebrating ? Color.clear : palette.border, lineWidth: 2.5)
                     Image(systemName: "checkmark")
-                        .font(.system(size: 26, weight: .semibold))
-                        .foregroundStyle(celebrating ? .white : .clear)
+                        .font(.nunito(size: 26, weight: .heavy))
+                        .foregroundStyle(celebrating ? palette.onSky : palette.textPh)
                 }
                 .frame(width: 68, height: 68)
                 .scaleEffect(popScale)
             }
             .buttonStyle(PressScaleStyle(scale: 0.94))
+            .accessibilityLabel("Complete \(task.title)")
             .disabled(celebrating)
             .padding(.top, 10)
         }
@@ -239,18 +259,20 @@ struct PathView: View {
         .padding(.top, 28)
         .padding(.horizontal, 24)
         .padding(.bottom, 26)
-        .evryCard(palette, cornerRadius: 24)
+        .evryCard(palette, cornerRadius: EvryRadius.panel)
         .overlay(alignment: .topTrailing) {
             Button {
                 onDelete(task)
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 13))
-                    .foregroundStyle(palette.textPh)
-                    .frame(width: 30, height: 30)
+                    .font(.nunito(size: 15, weight: .semibold))
+                    .foregroundStyle(palette.textMuted)
+                    .frame(width: EvrySpace.tap, height: EvrySpace.tap)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(14)
+            .accessibilityLabel("Delete task")
+            .padding(8)
         }
         .scaleEffect(celebrating ? 1.02 : 1)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: celebrating)
@@ -272,6 +294,7 @@ struct PathView: View {
     /// Springy pop + radiating ring — the same completion beat as TaskCheckbox.
     private func playCompletion() {
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+        guard !reduceMotion else { return }
         withAnimation(.spring(response: 0.16, dampingFraction: 0.45)) { popScale = 1.35 }
         withAnimation(.spring(response: 0.34, dampingFraction: 0.55).delay(0.12)) { popScale = 1 }
         burstScale = 0.85
@@ -285,7 +308,7 @@ struct PathView: View {
 
 #Preview {
     PathView(
-        palette: Palette(dark: false, accent: .byKey("default")),
+        palette: Palette(dark: false, accent: .evry),
         onEdit: { _ in },
         onDelete: { _ in },
         inFocusMode: true

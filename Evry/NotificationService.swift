@@ -9,14 +9,21 @@ enum NotificationService {
     }
 
     static func schedule(_ task: TaskItem) {
-        guard let due = task.dueDate, !task.completed, task.deletedAt == nil else {
+        // Reminders require an active membership (trial or subscribed) and the
+        // reminders setting on; otherwise nothing is scheduled.
+        let remindersOn = UserDefaults.standard.object(forKey: "notif_task_reminders") as? Bool ?? true
+        guard MembershipAccess.hasAccess(), remindersOn,
+              let due = task.dueDate, !task.completed, task.deletedAt == nil else {
             cancel(task.uid)
             return
         }
         cancel(task.uid)
 
         let content = UNMutableNotificationContent()
-        content.title = task.priority == .high ? "⚡ High-priority task due" : "Task due"
+        // Kind reminders instead of nagging alerts: warm, sentence case, no emoji.
+        content.title = task.priority == .high
+            ? "A gentle nudge for something important"
+            : "A kind reminder from Evry"
         content.body = task.title
         content.sound = .default
         if !task.tags.isEmpty {
@@ -42,26 +49,5 @@ enum NotificationService {
     static func cancel(_ taskID: UUID) {
         UNUserNotificationCenter.current()
             .removePendingNotificationRequests(withIdentifiers: [taskID.uuidString])
-    }
-
-    /// Fires a test notification in 5 seconds. Used from the developer menu.
-    static func scheduleTest() {
-        let content = UNMutableNotificationContent()
-        content.title = "Evry — Test Notification"
-        content.body = "Notifications are working correctly. ✅"
-        content.sound = .default
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
-        let request = UNNotificationRequest(
-            identifier: "evry-dev-test-\(UUID().uuidString)", content: content, trigger: trigger
-        )
-        UNUserNotificationCenter.current().add(request)
-    }
-
-    /// Returns a human-readable summary of all pending notification identifiers.
-    static func pendingSummary() async -> String {
-        let requests = await UNUserNotificationCenter.current().pendingNotificationRequests()
-        if requests.isEmpty { return "No pending notifications." }
-        return "\(requests.count) pending:\n" +
-            requests.prefix(8).map { "• \($0.content.body)" }.joined(separator: "\n")
     }
 }

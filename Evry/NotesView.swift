@@ -21,12 +21,12 @@ enum NoteScope: Hashable {
 
     var title: String {
         switch self {
-        case .all:              return "All Notes"
+        case .all:              return "All notes"
         case .folder(let f):    return f.name
         }
     }
 
-    /// The folder new notes should be filed into for this scope (nil for All Notes).
+    /// The folder new notes should be filed into for this scope (nil for All notes).
     var folder: Folder? {
         if case .folder(let f) = self { return f }
         return nil
@@ -45,16 +45,23 @@ final class NotesNavigationState {
 // MARK: - Folder styling shared between the edit sheet and quick-create
 
 enum FolderStyle {
-    static let colors: [UInt32] = [
-        0x3B82F6, 0x8B5CF6, 0xEC4899, 0xEF4444, 0xF97316,
-        0xF59E0B, 0x22C55E, 0x14B8A6, 0x64748B,
-    ]
+    // Folder colours are automatic sky/navy shades (see `FolderShade`); only
+    // the icon is picked.
     static let icons: [String] = [
         "folder", "tray.full", "briefcase", "book.closed", "star", "heart",
         "flame", "house", "globe", "lightbulb", "pencil", "camera",
         "music.note", "gamecontroller", "car", "airplane", "graduationcap",
         "fork.knife", "leaf", "cart", "gift", "target", "flag", "tag",
     ]
+}
+
+/// Glyph ink for an icon sitting on a folder's shade tile: navy on the lighter
+/// sky steps, white once the shade leans toward navy (mirrors
+/// `Palette.folderColor`'s mix so the glyph always reads).
+private func folderInk(shade: Double?, palette: Palette) -> Color {
+    let s = min(max(shade ?? 0.5, 0), 1)
+    let navyMix = palette.dark ? s * 0.45 : 0.3 + s * 0.55
+    return navyMix > 0.5 ? .evryWhite : .evryNavy
 }
 
 // MARK: - Folders screen (Notes tab entry)
@@ -88,36 +95,40 @@ struct NotesView: View {
         return NavigationStack(path: $navPath) {
             ScrollView {
                 VStack(spacing: 12) {
-                    HStack {
-                        Text("Folders")
-                            .font(.system(size: 34, weight: .heavy))
-                            .tracking(-0.5)
-                            .foregroundStyle(palette.text)
+                    HStack(alignment: .center, spacing: 14) {
+                        ToolIcon(tool: .notes, tile: 48, palette: palette)
+                        PageTitle(
+                            title: "Notes",
+                            subtitle: "\(total) note\(total == 1 ? "" : "s")",
+                            palette: palette
+                        )
                         Spacer()
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 20)
+                    .padding(.horizontal, EvrySpace.gutter)
+                    .padding(.top, 24)
+                    .padding(.bottom, 8)
 
-                    VStack(spacing: 10) {
-                        // "All Notes" smart folder — always present, catches notes
+                    VStack(spacing: 8) {
+                        // "All notes" smart folder — always present, catches notes
                         // that don't belong to any folder.
-                        folderCard(title: "All Notes", icon: "tray.full",
-                                   color: palette.primary, count: total) {
+                        folderCard(title: "All notes", icon: "tray.full",
+                                   tile: Color.evrySky, ink: Color.evryNavy, count: total) {
                             navPath.append(NoteScope.all)
                         }
 
                         ForEach(folders) { folder in
                             folderCard(title: folder.name, icon: folder.icon,
-                                       color: folder.color ?? palette.primary,
+                                       tile: folder.tint(palette),
+                                       ink: folderInk(shade: folder.shade, palette: palette),
                                        count: counts[folder.uid] ?? 0) {
                                 navPath.append(NoteScope.folder(folder))
                             }
                             .contextMenu {
                                 Button { editingFolder = folder } label: {
-                                    Label("Edit Folder", systemImage: "pencil")
+                                    Label("Edit folder", systemImage: "pencil")
                                 }
                                 Button(role: .destructive) { deleteFolder(folder) } label: {
-                                    Label("Delete Folder", systemImage: "trash")
+                                    Label("Delete folder", systemImage: "trash")
                                 }
                             }
                         }
@@ -125,13 +136,13 @@ struct NotesView: View {
                         if folders.isEmpty {
                             EmptyStateView(
                                 title: "No folders yet",
-                                text: "Pull up the handle below to create your first folder.",
+                                text: "Folders keep related notes together. Swipe up on the handle below to make your first one.",
                                 palette: palette
                             )
                             .padding(.top, 30)
                         }
                     }
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, EvrySpace.gutter)
                 }
                 .padding(.bottom, 130)
             }
@@ -149,36 +160,42 @@ struct NotesView: View {
 
     // MARK: Folder card
 
-    private func folderCard(title: String, icon: String, color: Color,
+    private func folderCard(title: String, icon: String, tile: Color, ink: Color,
                             count: Int, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 12) {
+            HStack(spacing: 14) {
+                // The folder's shade fills an icon tile (shades differ by
+                // strength, never hue); the glyph ink flips to stay readable.
                 Image(systemName: icon)
-                    .font(.system(size: 26, weight: .medium))
-                    .foregroundStyle(color)
+                    .font(.nunito(size: 18, weight: .semibold))
+                    .foregroundStyle(ink)
                     .frame(width: 40, height: 40)
+                    .background(tile, in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.evryTitle)
                         .foregroundStyle(palette.text)
                         .lineLimit(1)
                     Text("\(count) note\(count == 1 ? "" : "s")")
-                        .font(.system(size: 12))
-                        .foregroundStyle(palette.textSec)
+                        .font(.nunito(size: 14))
+                        .foregroundStyle(palette.textMuted)
                 }
 
                 Spacer()
 
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(palette.textPh)
+                    .font(.nunito(size: 13, weight: .bold))
+                    .foregroundStyle(palette.textMuted)
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 16)
             .padding(.vertical, 14)
-            .background(palette.card, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .frame(minHeight: EvrySpace.storeHeight)
+            .evryCard(palette)
+            .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleStyle(scale: 0.98))
     }
 
     private func deleteFolder(_ folder: Folder) {
@@ -277,13 +294,13 @@ struct NotesListView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
+                .padding(.horizontal, EvrySpace.gutter)
+                .padding(.top, 24)
                 .padding(.bottom, 8)
 
             if searchActive {
                 searchBar
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, EvrySpace.gutter)
                     .padding(.top, 4)
                     .padding(.bottom, 4)
                     .transition(.move(edge: .top).combined(with: .opacity))
@@ -293,18 +310,19 @@ struct NotesListView: View {
                 VStack(spacing: 0) {
                     if filtered.isEmpty {
                         emptyState
-                            .padding(.top, 40)
+                            // Lines up with the Inbox's empty state.
+                            .padding(.top, 36)
                     } else {
                         if !pinned.isEmpty {
                             SectionLabel(text: "Pinned", palette: palette)
-                                .padding(.horizontal, 20)
+                                .padding(.horizontal, EvrySpace.gutter)
                             noteRows(pinned)
                         }
                         // Unpinned notes grouped by creation day, newest first,
                         // with a date header between groups (Apple Notes style).
                         ForEach(dateGroups) { group in
                             SectionLabel(text: group.title, palette: palette)
-                                .padding(.horizontal, 20)
+                                .padding(.horizontal, EvrySpace.gutter)
                             noteRows(group.notes)
                         }
                     }
@@ -351,27 +369,30 @@ struct NotesListView: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
             Button { dismiss() } label: {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.nunito(size: 18, weight: .bold))
                     .foregroundStyle(palette.primary)
-                    .frame(width: 32, height: 38)
+                    .frame(width: EvrySpace.tap, height: EvrySpace.tap)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Back to folders")
 
-            Text(scope.title)
-                .font(.system(size: 28, weight: .heavy))
-                .tracking(-0.5)
-                .foregroundStyle(palette.text)
-                .lineLimit(1)
+            // Tapping the title goes back too, matching the chevron.
+            PageTitle(
+                title: scope.title,
+                subtitle: "\(notes.count) note\(notes.count == 1 ? "" : "s")",
+                palette: palette
+            )
+            .contentShape(Rectangle())
+            .onTapGesture { dismiss() }
 
             Spacer(minLength: 4)
 
-            RoundIconButton(systemName: searchActive ? "xmark" : "magnifyingglass", palette: palette) {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { searchActive.toggle() }
+            HeaderIconButton(systemName: searchActive ? "xmark" : "magnifyingglass", palette: palette) {
+                withAnimation(EvryMotion.settle) { searchActive.toggle() }
                 if searchActive {
                     searchFocused = true
                 } else {
@@ -381,7 +402,7 @@ struct NotesListView: View {
             }
             .accessibilityLabel(searchActive ? "Close search" : "Search notes")
 
-            RoundIconButton(systemName: "lightbulb", palette: palette) {
+            HeaderIconButton(systemName: "lightbulb", palette: palette) {
                 // Suppress the cover's slide-up so Brain Dump fades in.
                 var t = Transaction(); t.disablesAnimations = true
                 withTransaction(t) { showBrainDump = true }
@@ -395,26 +416,33 @@ struct NotesListView: View {
     private var searchBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(palette.textSec)
+                .font(.nunito(size: 15, weight: .bold))
+                .foregroundStyle(palette.textMuted)
+                .accessibilityHidden(true)
             TextField("Search notes", text: $searchText)
-                .font(.system(size: 15))
+                .font(.evryBody)
                 .foregroundStyle(palette.text)
+                .tint(palette.primary)
                 .autocorrectionDisabled()
                 .focused($searchFocused)
             if !searchText.isEmpty {
                 Button { searchText = "" } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 15))
-                        .foregroundStyle(palette.textPh)
+                        .font(.nunito(size: 16))
+                        .foregroundStyle(palette.textMuted)
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(palette.hover, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+        .padding(.horizontal, 16)
+        .frame(minHeight: EvrySpace.buttonHeight)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous)
+            .strokeBorder(searchFocused ? palette.text : (palette.dark ? Color.evryWhite35 : .evryNavy20),
+                          lineWidth: 1.5))
     }
 
     // MARK: Rows
@@ -438,12 +466,13 @@ struct NotesListView: View {
                         .contentShape(Rectangle())
                         .onTapGesture { sheet = .editor(note) }
                         .contextMenu {
-                            Button { NoteActions.togglePin(note) } label: {
+                            Button {
+                                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                    NoteActions.togglePin(note)
+                                }
+                            } label: {
                                 Label(note.pinned ? "Unpin" : "Pin",
                                       systemImage: note.pinned ? "bookmark.slash" : "bookmark")
-                            }
-                            Button { convertToTask(note) } label: {
-                                Label("Turn into Task", systemImage: "checklist")
                             }
                             Divider()
                             Button(role: .destructive) {
@@ -454,18 +483,18 @@ struct NotesListView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
             }
         }
-        .padding(.horizontal, 12)
-        .animation(.spring(response: 0.4, dampingFraction: 0.75), value: items.count)
+        .padding(.horizontal, EvrySpace.gutter)
+        .animation(EvryMotion.settle, value: items.count)
     }
 
     // MARK: Empty state
 
     private var emptyState: some View {
         EmptyStateView(
-            title: searchText.isEmpty ? "No notes yet" : "No matching notes",
+            title: searchText.isEmpty ? "No notes yet" : "Nothing matches that",
             text: searchText.isEmpty
-                ? "Pull up the handle below to start a note."
-                : "Try a different search.",
+                ? "Jot down whatever’s on your mind. Swipe up on the handle below to start a note."
+                : "Try a different word, or clear the search to see every note.",
             palette: palette
         )
     }
@@ -480,12 +509,6 @@ struct NotesListView: View {
         try? context.save()
         sheet = .editor(note)
     }
-
-    private func convertToTask(_ note: Note) {
-        NoteActions.makeTask(from: note, context: context)
-        try? context.save()
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
-    }
 }
 
 // MARK: - Note row
@@ -496,105 +519,127 @@ struct NoteRowView: View {
     var showFolder: Bool = true
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 5) {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
                     if note.pinned {
                         Image(systemName: "bookmark.fill")
-                            .font(.system(size: 11))
+                            .font(.nunito(size: 12, weight: .bold))
                             .foregroundStyle(palette.primary)
+                            .accessibilityLabel("Pinned")
                     }
                     Text(note.title.isEmpty ? "Untitled" : note.title)
-                        .font(.system(size: 16.5, weight: .semibold))
-                        .foregroundStyle(note.title.isEmpty ? palette.textSec : palette.text)
+                        .font(.nunito(size: 17, weight: .bold))
+                        .foregroundStyle(note.title.isEmpty ? palette.textMuted : palette.text)
                         .lineLimit(1)
                 }
 
                 if !note.preview.isEmpty {
                     Text(note.preview)
-                        .font(.system(size: 13))
+                        .font(.nunito(size: 14))
                         .foregroundStyle(palette.textSec)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
-
-                if showFolder, let folder = note.folder {
-                    ChipView(text: folder.name,
-                             foreground: folder.color ?? palette.textSec,
-                             background: palette.hover)
-                        .padding(.top, 1)
+                        .lineLimit(1)
                 }
             }
-            Spacer(minLength: 0)
+
+            Spacer(minLength: 8)
+
+            // Folder chip sits on the trailing edge (not below the text) so every
+            // row keeps the same standardized height as a task card.
+            if showFolder, let folder = note.folder {
+                // Folder chip: the folder's shade as a small dot (never as text
+                // colour — the lighter shades aren't readable), name in ink.
+                HStack(spacing: 5) {
+                    Circle().fill(folder.tint(palette)).frame(width: 8, height: 8)
+                    Text(folder.name)
+                        .font(.evryCaption)
+                        .foregroundStyle(palette.text)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(palette.skySoft, in: Capsule())
+            }
         }
-        .padding(.vertical, 11)
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 16)
+        .frame(height: 68)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.card, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        // Tint the card with the note's chosen background (matching the
+        // editor), falling back to the normal card when unset.
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous).fill(palette.card)
+                if let surface = note.backgroundSurface(palette) {
+                    RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous).fill(surface)
+                }
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous)
+            .strokeBorder(palette.hairline, lineWidth: 1))
+        .evryShadowSoft(palette)
     }
 }
 
-// MARK: - New folder sheet (pick icon + color before creating)
+// MARK: - New folder card (swipe-up)
 
+/// Folder quick-add, opened from the shared swipe-up handle on the Notes
+/// screen. Built on `QuickAddCard` — the reference design every creation card
+/// (task, habit, folder) shares.
 struct NewFolderSheet: View {
+    @Binding var isPresented: Bool
+
     @Environment(\.modelContext) private var context
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
     @Environment(Appearance.self) private var appearance
-
     @State private var name = ""
     @State private var icon = "folder"
-    @State private var colorHex: UInt32 = FolderStyle.colors[0]
     @FocusState private var nameFocused: Bool
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
-    private var tint: Color { Color(hex: colorHex) }
+    /// Colour is automatic — the next sky/navy shade, previewed here.
+    private var shade: Double { FolderShade.peek(FolderShade.noteFoldersKey) }
+    private var tint: Color { palette.folderColor(shade: shade) }
+    private var ink: Color { folderInk(shade: shade, palette: palette) }
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Name") {
-                    TextField("Folder name", text: $name)
-                        .focused($nameFocused)
-                        .submitLabel(.done)
-                        .onSubmit { create() }
-                }
+        QuickAddCard(palette: palette, actionTitle: "Add folder", actionEnabled: !trimmed.isEmpty,
+                     onAction: create, onClose: close) {
+            TextField("Name your folder", text: $name)
+                .focused($nameFocused)
+                .submitLabel(.done)
+                .onSubmit(create)
+                .evryTextField(palette, focused: nameFocused)
 
-                Section("Icon") {
-                    FolderIconGrid(selected: icon, tint: tint) { icon = $0 }
-                }
-
-                Section("Color") {
-                    FolderColorGrid(selectedHex: colorHex) { colorHex = $0 }
-                }
-            }
-            .navigationTitle("New Folder")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") { create() }
-                        .fontWeight(.semibold)
-                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
+            VStack(alignment: .leading, spacing: 10) {
+                QuickAddLabel(text: "Icon", icon: "square.grid.2x2", palette: palette)
+                QuickAddIconRow(icons: FolderStyle.icons, selection: $icon, tint: tint, ink: ink, palette: palette)
             }
         }
-        .tint(palette.primary)
-        .preferredColorScheme(appearance.preferredColorScheme)
-        .onAppear { nameFocused = true }
+        .task {
+            // Focus once the overlay is in the window (an early request is dropped).
+            try? await Task.sleep(for: .milliseconds(120))
+            nameFocused = true
+            try? await Task.sleep(for: .milliseconds(300))
+            if !nameFocused { nameFocused = true }
+        }
     }
 
     private func create() {
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         let count = (try? context.fetch(FetchDescriptor<Folder>()))?.count ?? 0
-        let folder = Folder(name: trimmed, icon: icon, colorHex: Int(colorHex))
+        let folder = Folder(name: trimmed, icon: icon)
+        folder.shade = FolderShade.next(FolderShade.noteFoldersKey)
         folder.sortOrder = count
         context.insert(folder)
         try? context.save()
-        dismiss()
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        close()
+    }
+
+    private func close() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        isPresented = false
     }
 }
 
@@ -603,6 +648,8 @@ struct NewFolderSheet: View {
 private struct FolderIconGrid: View {
     let selected: String
     let tint: Color
+    let ink: Color
+    let palette: Palette
     let onSelect: (String) -> Void
 
     var body: some View {
@@ -610,41 +657,23 @@ private struct FolderIconGrid: View {
             ForEach(FolderStyle.icons, id: \.self) { icon in
                 Button { onSelect(icon) } label: {
                     Image(systemName: icon)
-                        .font(.system(size: 18))
-                        .foregroundStyle(selected == icon ? .white : tint)
-                        .frame(width: 40, height: 40)
+                        .font(.nunito(size: 18, weight: .semibold))
+                        .foregroundStyle(selected == icon ? ink : palette.text)
+                        .frame(width: EvrySpace.tap, height: EvrySpace.tap)
                         .background(
-                            selected == icon ? tint : tint.opacity(0.1),
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            selected == icon ? tint : palette.skySoft,
+                            in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous)
                         )
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-private struct FolderColorGrid: View {
-    let selectedHex: UInt32
-    let onSelect: (UInt32) -> Void
-
-    var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 12) {
-            ForEach(FolderStyle.colors, id: \.self) { hex in
-                Button { onSelect(hex) } label: {
-                    Circle()
-                        .fill(Color(hex: hex))
-                        .frame(width: 34, height: 34)
                         .overlay {
-                            if selectedHex == hex {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 13, weight: .bold))
-                                    .foregroundStyle(.white)
+                            if selected == icon {
+                                RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous)
+                                    .strokeBorder(palette.text, lineWidth: 2)
                             }
                         }
                 }
-                .buttonStyle(PressScaleStyle())
+                .buttonStyle(.plain)
+                .accessibilityLabel(icon)
+                .accessibilityAddTraits(selected == icon ? .isSelected : [])
             }
         }
         .padding(.vertical, 4)
@@ -661,34 +690,40 @@ private struct EditFolderSheet: View {
     @Environment(Appearance.self) private var appearance
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
-    private var tint: Color { folder.color ?? palette.primary }
+    private var tint: Color { folder.tint(palette) }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Name") {
+                Section {
                     TextField("Folder name", text: $folder.name)
+                        .font(.evryBody)
+                        .foregroundStyle(palette.text)
+                } header: {
+                    Text("Name").font(.evrySmall).foregroundStyle(palette.textSec).textCase(nil)
                 }
+                .listRowBackground(palette.card)
 
-                Section("Icon") {
-                    FolderIconGrid(selected: folder.icon, tint: tint) { folder.icon = $0 }
+                Section {
+                    FolderIconGrid(selected: folder.icon, tint: tint,
+                                   ink: folderInk(shade: folder.shade, palette: palette), palette: palette) { folder.icon = $0 }
+                } header: {
+                    Text("Icon").font(.evrySmall).foregroundStyle(palette.textSec).textCase(nil)
                 }
-
-                Section("Color") {
-                    FolderColorGrid(selectedHex: folder.colorHex.map { UInt32(truncatingIfNeeded: $0) } ?? 0) {
-                        folder.colorHex = Int($0)
-                    }
-                }
+                .listRowBackground(palette.card)
             }
-            .navigationTitle("Edit Folder")
+            .scrollContentBackground(.hidden)
+            .background(palette.bg)
+            .navigationTitle("Edit folder")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }.fontWeight(.semibold)
+                    Button("Done") { dismiss() }.font(.evryLabel)
                 }
             }
         }
         .tint(palette.primary)
+        .presentationCornerRadius(EvryRadius.panel)
         .preferredColorScheme(appearance.preferredColorScheme)
     }
 }

@@ -1,20 +1,20 @@
-// AddTaskIntent.swift — Siri / Shortcuts "Add Task" App Intent.
+// AddTaskIntent.swift — Siri / Shortcuts "Add a task" App Intent.
 import AppIntents
 import Foundation
 
 struct AddTaskIntent: AppIntent {
-    static var title: LocalizedStringResource = "Add Task to Evry"
+    static var title: LocalizedStringResource = "Add a task to Evry"
     static var description = IntentDescription(
-        "Quickly add a new task to your Evry list. Works with Siri and Shortcuts."
+        "Add a task to your Evry list. Works with Siri and Shortcuts."
     )
     // Keep the app in background; the task is written to UserDefaults and
     // the main app processes it on next foreground activation.
     static var openAppWhenRun = false
 
-    @Parameter(title: "Task Title", description: "Name of the task to add")
+    @Parameter(title: "Task title", description: "What the task is called")
     var taskTitle: String
 
-    @Parameter(title: "Due Date", default: nil)
+    @Parameter(title: "Due date", default: nil)
     var dueDate: Date?
 
     static var parameterSummary: some ParameterSummary {
@@ -42,7 +42,7 @@ struct AddTaskIntent: AppIntent {
         pending.append(entry)
         UserDefaults.standard.set(pending, forKey: key)
 
-        return .result(dialog: "Added \"\(finalTitle)\" to Evry\(dateSuffix).")
+        return .result(dialog: "I’ve added “\(finalTitle)” to Evry\(dateSuffix).")
     }
 }
 
@@ -55,7 +55,7 @@ struct EvryShortcuts: AppShortcutsProvider {
                 "Create a new task in \(.applicationName)",
                 "Remind me in \(.applicationName)",
             ],
-            shortTitle: "Add Task",
+            shortTitle: "Add task",
             systemImageName: "plus.circle"
         )
     }

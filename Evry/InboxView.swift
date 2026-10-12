@@ -10,56 +10,36 @@ import SwiftUI
 import SwiftData
 import FoundationModels
 
-enum InboxViewMode: String, CaseIterable, Identifiable {
-    case today, all
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .today: "Today"
-        case .all: "All Tasks"
-        }
-    }
-}
-
-enum InboxLayout: String {
-    case inbox, timeline, calendar
-}
-
 struct InboxView: View {
     let palette: Palette
     var onEdit: (TaskItem) -> Void
     var onDelete: (TaskItem) -> Void
     var inFocusMode: Bool = false
     var onEnterFocusMode: () -> Void = {}
+    /// Opens the chat with Evry (presented from the root, over everything).
+    var onOpenChat: () -> Void = {}
 
     @Environment(\.modelContext) private var context
     @Environment(Appearance.self) private var appearance
+    @Environment(ProjectNavigationState.self) private var projectNavState
     @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
-    @AppStorage("inbox_view") private var viewModeRaw = InboxViewMode.today.rawValue
-    @State private var showCompleted = false
     @State private var emptyMessage = emptyMessages.randomElement()!
-    @State private var showBrainDump = false
-    @State private var showLayoutPicker = false
-    @State private var showPomodoro = false
-    // Lifted from the child layouts so the shared header can show their titles.
-    @State private var calendarMonth: Date = .now
     // Current timeline day (0 = today). Owned here so the shared header can show
     // the day title; the paging drag itself lives in InboxTimelineView.
     @State private var timelineDayOffset = 0
-    @AppStorage("inbox_layout") private var layoutRaw = InboxLayout.timeline.rawValue
-    @AppStorage("membership_plan") private var membershipPlan = ""
     @AppStorage("inbox_hide_completed") private var hideCompleted = false
-    @AppStorage("inbox_sort_by") private var sortBy = "created"
     @AppStorage("inbox_hide_notes") private var hideNotes = false
     @AppStorage("inbox_hide_reschedule") private var hideReschedule = false
     // Multi-select
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
+    // Tap-and-drag select (hold a select circle, slide to select a range).
+    @State private var dragSel = DragSelector()
+    // Grouping the selection into a shaded folder.
+    @State private var showGroupSheet = false
+    @State private var pendingGroupTasks: [TaskItem] = []
     // Drag reorder
     @State private var draggingID: UUID? = nil
-    @State private var dragOffset: CGFloat = 0
     // Accomplishments
     @State private var showAccomplishments = false
     // Reschedule on 0.2s hold
@@ -77,22 +57,7 @@ struct InboxView: View {
     // completion animation + delayed commit as a tap.
     @State private var completeTokens: [UUID: Int] = [:]
 
-    private var viewMode: InboxViewMode { InboxViewMode(rawValue: viewModeRaw) ?? .today }
-    private var inboxLayout: InboxLayout { InboxLayout(rawValue: layoutRaw) ?? .timeline }
-    private var isPro: Bool { membershipPlan == "pro" }
-    // Timeline is the free layout; Inbox and Calendar are Pro. Non-Pro users
-    // fall back to Timeline if a Pro-only layout is stored.
-    private var effectiveLayout: InboxLayout {
-        isPro ? inboxLayout : .timeline
-    }
     private var tasks: [TaskItem] { allTasks.filter { !$0.isTrashed && (!hideNotes || !$0.isNote) } }
-    /// Just the today progress-bar counts. The header is the only render-path
-    /// consumer, so we avoid the full `computeStats` (streaks, week/month
-    /// rollups) that would otherwise run on every redraw.
-    private var todayProgress: (done: Int, total: Int) {
-        let todayCompletable = tasks.filter { isTodayTask($0) && !$0.isNote }
-        return (todayCompletable.filter(\.completed).count, todayCompletable.count)
-    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -103,44 +68,24 @@ struct InboxView: View {
                         .padding(.top, 24)
                         .padding(.bottom, 8)
                         .contentShape(Rectangle())
+                        // Raise above the timeline so the tools menu's floating
+                        // bubbles fan down over the content.
+                        .zIndex(1)
                 }
 
-                if !globalOverdueTasks.isEmpty {
-                    overdueBanner(count: globalOverdueTasks.count)
-                        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: globalOverdueTasks.count)
+                let overdueCount = globalOverdueTasks.count
+                if overdueCount > 0 {
+                    overdueBanner(count: overdueCount)
+                        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: overdueCount)
                 }
 
-                switch effectiveLayout {
-                case .inbox:
-                    ScrollView {
-                        VStack(spacing: 0) {
-                            switch viewMode {
-                            case .today: todayList
-                            case .all: allList
-                            }
-                        }
-                        .padding(.bottom, inFocusMode ? 20 : (isSelecting ? 200 : 130))
-                    }
-                    .scrollDismissesKeyboard(.immediately)
-                    .scrollDisabled(draggingID != nil)
-                    .frame(maxHeight: .infinity)
-                case .timeline:
-                    InboxTimelineView(
-                        tasks: tasks, palette: palette, onEdit: onEdit, onDelete: onDelete,
-                        isSelecting: $isSelecting, selectedIDs: $selectedIDs,
-                        draggingID: $draggingID, dragOffset: $dragOffset,
-                        dayOffset: $timelineDayOffset,
-                        onToggleSelect: toggleSelect
-                    )
-                case .calendar:
-                    InboxCalendarLayout(
-                        tasks: tasks, palette: palette, onEdit: onEdit, onDelete: onDelete,
-                        isSelecting: $isSelecting, selectedIDs: $selectedIDs,
-                        draggingID: $draggingID, dragOffset: $dragOffset,
-                        displayMonth: $calendarMonth,
-                        onToggleSelect: toggleSelect
-                    )
-                }
+                InboxTimelineView(
+                    tasks: tasks, palette: palette, onEdit: onEdit, onDelete: onDelete,
+                    isSelecting: $isSelecting, selectedIDs: $selectedIDs,
+                    draggingID: $draggingID,
+                    dayOffset: $timelineDayOffset,
+                    onToggleSelect: toggleSelect
+                )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(inFocusMode ? Color.clear : palette.bg)
@@ -152,7 +97,9 @@ struct InboxView: View {
                     onDelete: deleteSelected,
                     onMove: {},
                     onCancel: cancelSelection,
-                    showMove: false
+                    onGroup: startGroupSelected,
+                    showMove: false,
+                    showGroup: true
                 )
                 .padding(.bottom, 100)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -160,20 +107,19 @@ struct InboxView: View {
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isSelecting)
-        .fullScreenCover(isPresented: $showBrainDump) {
-            BrainDumpSheet(context: .tasks(add: { tasks in
-                for task in tasks {
-                    let item = TaskItem(title: task.title)
-                    // Every task must have a due date — default to today when none
-                    // was detected in the dump.
-                    item.dueDate = task.dueDate ?? Calendar.current.startOfDay(for: Date())
-                    item.priority = task.priority
-                    context.insert(item)
-                }
-            }))
+        // A task picked in search: page the timeline to that task's day (the
+        // day's list then scrolls to and highlights it).
+        .onChange(of: projectNavState.focusTaskID) { _, id in pageToFocusedTask(id) }
+        .onAppear { pageToFocusedTask(projectNavState.focusTaskID) }
+        .sheet(isPresented: $showGroupSheet) {
+            NewTaskGroupSheet(
+                taskCount: pendingGroupTasks.count,
+                palette: palette,
+                onCreate: { name in createGroup(name: name) },
+                onAddToExisting: { group in addToGroup(group) }
+            )
+            .environment(appearance)
         }
-        .sheet(isPresented: $showLayoutPicker) { LayoutPickerSheet(selection: $layoutRaw) }
-        .fullScreenCover(isPresented: $showPomodoro) { PomodoroView(onStart: onEnterFocusMode) }
         .sheet(isPresented: $showAccomplishments) {
             let completedToday = tasks.filter { task in
                 guard task.completed, let completedAt = task.completedAt else { return false }
@@ -189,123 +135,36 @@ struct InboxView: View {
     private var header: some View {
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
-                if effectiveLayout == .inbox {
-                    Menu {
-                        ForEach(InboxViewMode.allCases) { mode in
-                            Button {
-                                viewModeRaw = mode.rawValue
-                            } label: {
-                                if mode == viewMode {
-                                    Label(mode.label, systemImage: "checkmark")
-                                } else {
-                                    Text(mode.label)
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(viewMode.label)
-                                .font(.system(size: 34, weight: .heavy))
-                                .tracking(-0.5)
-                                .foregroundStyle(palette.text)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(palette.textSec)
-                                .padding(.top, 4)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                } else if effectiveLayout == .timeline {
-                    timelineHeaderTitle
-                } else {
-                    calendarHeaderTitle
-                }
+                timelineHeaderTitle
 
                 Spacer()
 
-                HStack(spacing: 6) {
-                    Button {
-                        // Suppress the cover's slide-up so Brain Dump fades in.
-                        var t = Transaction(); t.disablesAnimations = true
-                        withTransaction(t) { showBrainDump = true }
-                    } label: {
-                        Image(systemName: "lightbulb")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(palette.textSec)
-                            .frame(width: 30, height: 30)
-                    }
-                    .buttonStyle(.glass)
-                    .accessibilityLabel("Brain Dump")
-
-                    Button { showPomodoro = true } label: {
-                        Image(systemName: "timer")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(palette.textSec)
-                            .frame(width: 30, height: 30)
-                    }
-                    .buttonStyle(.glass)
-                    .accessibilityLabel("Pomo Focus")
-
-                    Menu {
-                        Button { showLayoutPicker = true } label: {
-                            Label("Layout & Display", systemImage: "square.grid.2x2")
-                        }
-                    } label: {
-                        Image(systemName: "square.grid.2x2")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(palette.textSec)
-                            .frame(width: 30, height: 30)
-                    }
-                    .buttonStyle(.glass)
+                // Evry's mark: opens the chat with Evry (Distill, Pomo, Write).
+                Button(action: onOpenChat) {
+                    Image("EvryPlainMark")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 34, height: 34)
+                        .frame(width: EvrySpace.tap, height: EvrySpace.tap)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(PressScaleStyle(scale: 0.88))
+                .accessibilityLabel("Chat with Evry")
             }
-
-            if effectiveLayout == .inbox && viewMode == .today && todayProgress.total > 0 {
-                ProgressArea(done: todayProgress.done, total: todayProgress.total, palette: palette)
-            }
-
         }
-    }
-
-    private var calendarHeaderTitle: some View {
-        Text(calendarMonth.formatted(.dateTime.month(.wide).year()))
-            .font(.system(size: 34, weight: .heavy))
-            .tracking(-0.5)
-            .foregroundStyle(palette.text)
-            .contentTransition(.opacity)
-            .animation(.easeInOut(duration: 0.3), value: calendarMonth)
     }
 
     private var timelineHeaderTitle: some View {
         let date = addDays(Date(), timelineDayOffset)
         let isToday = timelineDayOffset == 0
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 8) {
-                Text(date.formatted(.dateTime.weekday(.wide)).uppercased())
-                    .font(.system(size: 12, weight: .bold))
-                    .tracking(0.6)
-                    .foregroundStyle(isToday ? palette.primary : palette.textSec)
-                    .contentTransition(.opacity)
-                if isToday {
-                    Text("TODAY")
-                        .font(.system(size: 10, weight: .bold))
-                        .tracking(0.5)
-                        .foregroundStyle(palette.onPrimary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(palette.primary, in: Capsule())
-                        .transition(.opacity)
-                }
-            }
-            // Fixed height so the TODAY badge appearing/disappearing doesn't
-            // shift the date below it.
-            .frame(height: 22, alignment: .leading)
-            Text(date.formatted(.dateTime.month(.wide).day()))
-                .font(.system(size: 34, weight: .heavy))
-                .tracking(-0.5)
-                .foregroundStyle(palette.text)
-                .contentTransition(.opacity)
-        }
+        // Weekday is the hero; the full date (ordinal day) is the supporting line,
+        // with a "Today" eyebrow pill. Shared PageTitle keeps this identical across tabs.
+        return PageTitle(
+            title: date.formatted(.dateTime.weekday(.wide)),
+            subtitle: "\(date.formatted(.dateTime.month(.wide))) \(date.ordinalDayString)",
+            badge: isToday ? "Today" : nil,
+            palette: palette
+        )
         .animation(.easeInOut(duration: 0.3), value: timelineDayOffset)
     }
 
@@ -318,19 +177,22 @@ struct InboxView: View {
     }
 
     private func overdueBanner(count: Int) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 13, weight: .semibold))
+        // No red: urgency is carried by the alert glyph and the words, on a calm
+        // sky-soft panel with a sky ring.
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.nunito(size: 15, weight: .bold))
                 .foregroundStyle(Palette.danger)
+                .accessibilityHidden(true)
 
             Text("\(count) overdue task\(count == 1 ? "" : "s")")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.evrySmall)
                 .foregroundStyle(palette.text)
 
             Spacer()
 
             if !hideReschedule {
-                BurstPillButton(title: "Reschedule all", color: Palette.danger) {
+                BurstPillButton(title: "Move all to today", color: Palette.danger) {
                     let today = Calendar.current.startOfDay(for: Date())
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
                         for task in globalOverdueTasks { task.dueDate = today }
@@ -340,398 +202,25 @@ struct InboxView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Palette.danger.opacity(palette.dark ? 0.18 : 0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Palette.danger.opacity(0.25), lineWidth: 1))
-        .padding(.horizontal, 16)
+        .frame(minHeight: EvrySpace.tap + 8)
+        .background(palette.skySoft, in: RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous).strokeBorder(Color.evrySky, lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .padding(.horizontal, 20)
         .padding(.top, 8)
     }
 
-    // MARK: Today view
+    // MARK: Search focus
 
-    private var todayTasks: [TaskItem] { tasks.filter(isTodayTask) }
-
-    private var todayList: some View {
-        let items = sortPinnedFirst(todayTasks)
-        let overdue = items.filter { !$0.completed && !$0.isNote && isOverdueDate($0.dueDate) }
-        let overdueIDs = Set(overdue.map(\.uid))
-        let active = items.filter { !$0.completed && !overdueIDs.contains($0.uid) }
-        let completed = items.filter { $0.completed && !$0.isNote && isTodayDate($0.completedAt) }
-
-        return VStack(spacing: 0) {
-            if overdue.isEmpty && active.isEmpty && completed.isEmpty {
-                if !inFocusMode {
-                    EmptyStateView(
-                        imageName: "Cat",
-                        title: emptyMessage,
-                        text: "No tasks match right now. Pull up below to add one.",
-                        palette: palette
-                    )
-                    .padding(.top, 40)
-                }
-            } else {
-                if !overdue.isEmpty {
-                    SectionLabel(text: "Overdue", palette: palette, danger: true)
-                        .padding(.horizontal, 20)
-                    taskRows(overdue)
-                }
-                if !active.isEmpty {
-                    if !overdue.isEmpty {
-                        SectionLabel(text: "Today", palette: palette)
-                            .padding(.horizontal, 20)
-                    }
-                    taskRows(active)
-                }
-                if !completed.isEmpty && !hideCompleted {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.25)) { showCompleted.toggle() }
-                    } label: {
-                        HStack(spacing: 4) {
-                            SectionLabel(text: "Completed (\(completed.count))", palette: palette)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(palette.textSec)
-                                .rotationEffect(.degrees(showCompleted ? 180 : 0))
-                            Spacer()
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 20)
-                    if showCompleted {
-                        taskRows(completed)
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: All view
-
-    private var allList: some View {
-        let items = sortPinnedFirst(tasks)
-        let active = items.filter { !$0.completed }
-        let completed = items.filter { $0.completed && !$0.isNote && isTodayDate($0.completedAt) }
-
-        let buckets: [(String, [TaskItem], Bool)] = [
-            ("Overdue", active.filter { dateCategory($0.dueDate) == .overdue && !$0.isNote }, true),
-            ("Today", active.filter { dateCategory($0.dueDate) == .today }, false),
-            ("Tomorrow", active.filter { dateCategory($0.dueDate) == .tomorrow }, false),
-            ("This Week", active.filter { dateCategory($0.dueDate) == .week }, false),
-            ("Next Week", active.filter { dateCategory($0.dueDate) == .nextweek }, false),
-            ("Later", active.filter { dateCategory($0.dueDate) == .later }, false),
-            ("No Date", active.filter { $0.dueDate == nil }, false),
-        ]
-
-        return VStack(spacing: 0) {
-            if active.isEmpty && completed.isEmpty {
-                if !inFocusMode {
-                    EmptyStateView(
-                        imageName: "Cat",
-                        title: emptyMessage,
-                        text: "No tasks match right now. Pull up below to add one.",
-                        palette: palette
-                    )
-                    .padding(.top, 40)
-                }
-            } else {
-                ForEach(buckets, id: \.0) { label, bucket, danger in
-                    if !bucket.isEmpty {
-                        SectionLabel(text: label, palette: palette, danger: danger)
-                            .padding(.horizontal, 20)
-                        taskRows(bucket)
-                    }
-                }
-                if !completed.isEmpty && !hideCompleted {
-                    HStack {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.25)) { showCompleted.toggle() }
-                        } label: {
-                            HStack(spacing: 4) {
-                                SectionLabel(text: "Completed (\(completed.count))", palette: palette)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundStyle(palette.textSec)
-                                    .rotationEffect(.degrees(showCompleted ? 180 : 0))
-                                Spacer()
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        Button { showAccomplishments = true } label: {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 13))
-                                .foregroundStyle(palette.primary)
-                                .frame(width: 28, height: 28)
-                                .background(palette.primaryLight, in: Circle())
-                        }
-                        .buttonStyle(PressScaleStyle())
-                    }
-                    .padding(.horizontal, 20)
-                    if showCompleted {
-                        taskRows(completed)
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: Rows
-
-    private func sortItems(_ items: [TaskItem]) -> [TaskItem] {
-        switch sortBy {
-        case "priority":
-            return items.sorted { a, b in
-                if a.pinned != b.pinned { return a.pinned }
-                if a.priority.rank != b.priority.rank { return a.priority.rank < b.priority.rank }
-                if a.sortOrder != b.sortOrder { return a.sortOrder < b.sortOrder }
-                return a.createdAt > b.createdAt
-            }
-        case "due":
-            return items.sorted { a, b in
-                if a.pinned != b.pinned { return a.pinned }
-                let da = a.dueDate ?? Date.distantFuture
-                let db = b.dueDate ?? Date.distantFuture
-                if da != db { return da < db }
-                if a.sortOrder != b.sortOrder { return a.sortOrder < b.sortOrder }
-                return a.createdAt > b.createdAt
-            }
-        default:
-            return items.sorted { a, b in
-                if a.pinned != b.pinned { return a.pinned }
-                if a.sortOrder != b.sortOrder { return a.sortOrder < b.sortOrder }
-                return a.createdAt > b.createdAt
-            }
-        }
-    }
-
-    private func taskRows(_ items: [TaskItem]) -> some View {
-        let sorted = sortItems(items)
-
-        return VStack(spacing: 8) {
-            ForEach(sorted, id: \.uid) { task in
-                let isSelf = draggingID == task.uid
-                let neighborOff = neighborOffset(task, in: sorted)
-                SwipeActionRow(
-                    leadingAction: task.isNote || task.completed ? nil : SwipeActionRow.Action(
-                        label: "Done", icon: "checkmark", color: Palette.success,
-                        action: { completeTokens[task.uid, default: 0] += 1 }
-                    ),
-                    trailingAction: SwipeActionRow.Action(
-                        label: "Delete", icon: "trash.fill", color: Palette.danger,
-                        action: { onDelete(task) }
-                    ),
-                    isDragging: draggingID != nil,
-                    onHorizontalSwipeChanged: { active in
-                        swipeActive = active
-                        if active {
-                            // Suppress the row's own buttons/taps so ending a swipe
-                            // can't also fire the trash button or open the editor.
-                            suppressTapAction = true
-                            multiSelectArm?.cancel()
-                            multiSelectArm = nil
-                        } else {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { suppressTapAction = false }
-                        }
-                    }
-                ) {
-                TaskRowView(
-                    task: task,
-                    palette: palette,
-                    onToggle: {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            TaskActions.toggle(task, context: context)
-                        }
-                    },
-                    onEdit: { rowTap { onEdit(task) } },
-                    onDelete: { rowTap { onDelete(task) } },
-                    onToggleSubtask: { subtask in
-                        if let idx = task.subtasks.firstIndex(where: { $0.id == subtask.id }) {
-                            var updatedSubtasks = task.subtasks
-                            updatedSubtasks[idx].completed.toggle()
-                            task.subtasks = updatedSubtasks
-                        }
-                    },
-                    isSelecting: isSelecting,
-                    isSelected: selectedIDs.contains(task.uid),
-                    onSelect: { rowTap { toggleSelect(task) } },
-                    cornerRadius: 26,
-                    completeToken: completeTokens[task.uid] ?? 0
-                )
-                } // SwipeActionRow
-                .scaleEffect(isSelf ? 1.04 : 1.0)
-                .shadow(color: isSelf ? .black.opacity(0.2) : .clear, radius: isSelf ? 14 : 0, y: isSelf ? 6 : 0)
-                .offset(y: isSelf ? dragOffset : neighborOff)
-                .zIndex(isSelf ? 1 : 0)
-                // isSelf animation: handles scale/shadow when entering or leaving drag state
-                // neighborOff animation: fires whenever a neighbor crosses a step boundary,
-                // making tasks slide smoothly rather than teleporting
-                .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isSelf)
-                .animation(.spring(response: 0.22, dampingFraction: 0.78), value: neighborOff)
-                .transition(.asymmetric(
-                    insertion: .scale(scale: 0.92, anchor: .top).combined(with: .opacity),
-                    removal: .opacity.combined(with: .scale(scale: 0.96))
-                ))
-                // Multi-select reorder handle (trailing) — drag to reorder. Reorder
-                // is handle-only so a plain drag on a row never blocks vertical scroll.
-                .overlay(alignment: .trailing) {
-                    if isSelecting {
-                        Image(systemName: "line.3.horizontal")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(isSelf ? palette.primary : palette.textSec)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                            .highPriorityGesture(reorderHandleGesture(task, in: sorted))
-                            .padding(.trailing, 6)
-                    }
-                }
-                // Reschedule menu anchored directly below the held task.
-                .popover(isPresented: Binding(
-                    get: { showRescheduleFor?.uid == task.uid },
-                    set: { if !$0 { showRescheduleFor = nil } }
-                )) {
-                    rescheduleMenu(for: task)
-                }
-                // Still hold (≥ 0.5 s, < 10 pt movement) → multi-select. Simultaneous
-                // (not `.onLongPressGesture`) so it never blocks the ScrollView's
-                // vertical pan when the drag starts on a task.
-                .simultaneousGesture(
-                    LongPressGesture(minimumDuration: 0.5, maximumDistance: 10)
-                        .onEnded { _ in
-                            guard draggingID == nil, !isSelecting, !swipeActive else { return }
-                            showRescheduleFor = nil
-                            suppressTapAction = true
-                            let gen = UIImpactFeedbackGenerator(style: .heavy)
-                            gen.impactOccurred()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                gen.impactOccurred(intensity: 0.7)
-                            }
-                            withAnimation(.spring(response: 0.3)) {
-                                isSelecting = true
-                                selectedIDs.insert(task.uid)
-                            }
-                        }
-                )
-                // Reorder is intentionally handle-only (multi-select mode) so a
-                // plain tap-and-drag on a row never steals the ScrollView's
-                // vertical pan — keeping scroll-over-tasks reliable.
-                // Hold 0.3–0.5 s → reschedule menu
-                .simultaneousGesture(
-                    LongPressGesture(minimumDuration: 0.3, maximumDistance: 10)
-                        .onEnded { _ in
-                            guard !isSelecting, draggingID == nil, !swipeActive,
-                                  !task.isNote, !task.completed else { return }
-                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                            suppressTapAction = true
-                            showRescheduleFor = task
-                        }
-                )
-            }
-        }
-        .padding(.horizontal, 12)
-        .animation(.spring(response: 0.4, dampingFraction: 0.75), value: items.count)
-    }
-
-    /// Runs a row's tap action unless a hold just triggered reschedule/multi-select
-    /// on the same touch — the finger-lift tap should be swallowed in that case.
-    private func rowTap(_ action: () -> Void) {
-        if suppressTapAction {
-            suppressTapAction = false
-            return
-        }
-        action()
-    }
-
-    // MARK: Reschedule popover
-
-    private func rescheduleMenu(for task: TaskItem) -> some View {
-        VStack(spacing: 0) {
-            rescheduleRow(label: "Tomorrow", icon: "arrow.right", date: addDays(Date(), 1), task: task)
-            Divider()
-            rescheduleRow(label: "This Weekend", icon: "beach.umbrella", date: TaskActions.nextWeekdayDate(6), task: task)
-            Divider()
-            rescheduleRow(label: "Next Week", icon: "calendar", date: TaskActions.nextWeekdayDate(1), task: task)
-        }
-        .frame(width: 220)
-        .padding(.vertical, 4)
-        .presentationCompactAdaptation(.popover)
-        .presentationBackground(palette.card)
-    }
-
-    private func rescheduleRow(label: String, icon: String, date: Date, task: TaskItem) -> some View {
-        Button {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
-                TaskActions.reschedule(task, to: date)
-            }
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            showRescheduleFor = nil
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(palette.primary)
-                    .frame(width: 22)
-                Text(label)
-                    .font(.system(size: 15))
-                    .foregroundStyle(palette.text)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    // MARK: Drag-to-reorder helpers
-
-    /// Drag gesture for the multi-select reorder handle — moves the dragged row
-    /// while the ScrollView keeps handling scrolling everywhere else.
-    private func reorderHandleGesture(_ task: TaskItem, in items: [TaskItem]) -> some Gesture {
-        DragGesture(minimumDistance: 4)
-            .onChanged { v in
-                if draggingID == nil {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { draggingID = task.uid }
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                }
-                dragOffset = v.translation.height
-            }
-            .onEnded { v in
-                finishDrag(in: items, finalOffset: v.translation.height)
-            }
-    }
-
-    private func neighborOffset(_ task: TaskItem, in items: [TaskItem]) -> CGFloat {
-        guard let draggedID = draggingID,
-              task.uid != draggedID,
-              let draggedIdx = items.firstIndex(where: { $0.uid == draggedID }),
-              let taskIdx = items.firstIndex(where: { $0.uid == task.uid }) else {
-            return 0
-        }
-        let rowH: CGFloat = 78
-        let steps = Int((dragOffset / rowH).rounded())
-        let targetIdx = max(0, min(items.count - 1, draggedIdx + steps))
-        if taskIdx > draggedIdx && taskIdx <= targetIdx { return -rowH }
-        if taskIdx < draggedIdx && taskIdx >= targetIdx { return rowH }
-        return 0
-    }
-
-    private func finishDrag(in items: [TaskItem], finalOffset: CGFloat) {
-        guard let draggedID = draggingID,
-              let draggedIdx = items.firstIndex(where: { $0.uid == draggedID }) else {
-            withAnimation(.spring(response: 0.35)) { draggingID = nil; dragOffset = 0 }
-            return
-        }
-        let rowH: CGFloat = 78
-        let steps = Int((finalOffset / rowH).rounded())
-        let targetIdx = max(0, min(items.count - 1, draggedIdx + steps))
-        var reordered = items
-        let moved = reordered.remove(at: draggedIdx)
-        reordered.insert(moved, at: targetIdx)
-        // Commit new order and reset drag state in a single animation so SwiftUI
-        // collapses the offset-based visual position into the real layout position.
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-            for (i, task) in reordered.enumerated() { task.sortOrder = i }
-            draggingID = nil
-            dragOffset = 0
-        }
+    /// Moves the timeline to the day the focused (searched-for) task is due.
+    private func pageToFocusedTask(_ id: UUID?) {
+        guard let id, let due = allTasks.first(where: { $0.uid == id })?.dueDate else { return }
+        if isSelecting { cancelSelection() }
+        let cal = Calendar.current
+        let offset = cal.dateComponents([.day], from: cal.startOfDay(for: Date()),
+                                        to: cal.startOfDay(for: due)).day ?? 0
+        guard offset != timelineDayOffset else { return }
+        withAnimation(.easeInOut(duration: 0.3)) { timelineDayOffset = offset }
     }
 
     // MARK: Multi-select helpers
@@ -759,6 +248,40 @@ struct InboxView: View {
         for task in toDelete { onDelete(task) }
     }
 
+    /// Open the folder sheet for the current selection.
+    private func startGroupSelected() {
+        let sel = tasks.filter { selectedIDs.contains($0.uid) }
+        guard !sel.isEmpty else { return }
+        pendingGroupTasks = sel
+        showGroupSheet = true
+    }
+
+    /// Create a folder from the pending selection and drop the selected tasks in.
+    private func createGroup(name: String) {
+        guard !pendingGroupTasks.isEmpty else { return }
+        // Colour is automatic: the next sky→navy shade in sequence.
+        let group = TaskGroup(name: name)
+        group.shade = FolderShade.next(FolderShade.taskGroupsKey)
+        group.sortOrder = (allTasks.compactMap { $0.group?.sortOrder }.max() ?? -1) + 1
+        context.insert(group)
+        addPendingTasks(to: group)
+    }
+
+    /// Drop the pending selection into an existing folder.
+    private func addToGroup(_ group: TaskGroup) {
+        guard !pendingGroupTasks.isEmpty else { return }
+        addPendingTasks(to: group)
+    }
+
+    private func addPendingTasks(to group: TaskGroup) {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+            for task in pendingGroupTasks { task.group = group }
+        }
+        try? context.save()
+        pendingGroupTasks = []
+        cancelSelection()
+    }
+
 }
 
 // MARK: - Brain Dump sheet
@@ -766,210 +289,6 @@ struct InboxView: View {
 // The Brain Dump engine + UI now live in BrainDumpSheet.swift (shared by the
 // Inbox and Notes). The inbox presents it with a `.tasks` context.
 
-
-// MARK: - Layout picker sheet
-
-private struct LayoutPickerSheet: View {
-    @Binding var selection: String
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var scheme
-    @Environment(Appearance.self) private var appearance
-    @AppStorage("membership_plan") private var membershipPlan = ""
-    @AppStorage("inbox_hide_completed") private var hideCompleted = false
-    @AppStorage("inbox_hide_notes") private var hideNotes = false
-    @AppStorage("inbox_hide_reschedule") private var hideReschedule = false
-    @AppStorage("inbox_sort_by") private var sortBy = "created"
-
-    @State private var showMembershipPromo = false
-
-    private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
-    private var isPro: Bool { membershipPlan == "pro" }
-
-    private let sortOptions: [(String, String)] = [
-        ("created", "Date Created"),
-        ("due", "Due Date"),
-        ("priority", "Priority"),
-    ]
-
-    private var sortLabel: String {
-        sortOptions.first { $0.0 == sortBy }?.1 ?? "Date Created"
-    }
-
-    private func displayToggleRow(icon: String, label: String, color: Color, binding: Binding<Bool>) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 30, height: 30)
-                .background(color, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            Text(label)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(palette.text)
-            Spacer()
-            Toggle("", isOn: binding)
-                .labelsHidden()
-                .tint(palette.primary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 13)
-        .background(palette.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
-    }
-
-    // (layout, name, icon, description, requiresPro)
-    private let options: [(InboxLayout, String, String, String, Bool)] = [
-        (.timeline, "Timeline", "calendar.day.timeline.left",     "Swipe through days one at a time",  false),
-        (.inbox,    "Inbox",    "list.bullet.rectangle.portrait", "Task list grouped by date sections", true),
-        (.calendar, "Calendar", "calendar",                       "Month view with task dots and day detail", true),
-    ]
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 12) {
-                ForEach(options, id: \.0.rawValue) { layout, name, icon, desc, requiresPro in
-                    let locked = requiresPro && !isPro
-                    let isSelected = selection == layout.rawValue && !locked
-                    Button {
-                        if locked {
-                            showMembershipPromo = true
-                        } else {
-                            selection = layout.rawValue
-                            dismiss()
-                        }
-                    } label: {
-                        HStack(spacing: 16) {
-                            Image(systemName: icon)
-                                .font(.system(size: 20, weight: .medium))
-                                .foregroundStyle(locked ? palette.textSec.opacity(0.4) : (isSelected ? palette.primary : palette.textSec))
-                                .frame(width: 44, height: 44)
-                                .background(
-                                    locked ? palette.hover.opacity(0.6) : (isSelected ? palette.primaryLight : palette.hover),
-                                    in: Circle()
-                                )
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text(name)
-                                        .font(.system(size: 16, weight: .semibold))
-                                        .foregroundStyle(locked ? palette.text.opacity(0.4) : palette.text)
-                                    if locked {
-                                        Text("PRO")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundStyle(palette.primary)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(palette.primaryLight, in: Capsule())
-                                    }
-                                }
-                                Text(desc)
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(locked ? palette.textSec.opacity(0.4) : palette.textSec)
-                            }
-                            Spacer()
-                            if locked {
-                                Image(systemName: "lock.fill")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(palette.textPh)
-                            } else if isSelected {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 14, weight: .bold))
-                                    .foregroundStyle(palette.primary)
-                            }
-                        }
-                        .padding(16)
-                        .background(palette.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                                .strokeBorder(
-                                    isSelected ? palette.primary : palette.border,
-                                    lineWidth: isSelected ? 1.5 : 1
-                                )
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                // DISPLAY section
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("DISPLAY")
-                        .font(.system(size: 11, weight: .bold))
-                        .tracking(0.9)
-                        .foregroundStyle(palette.textSec)
-                        .padding(.horizontal, 4)
-
-                    VStack(spacing: 8) {
-                        displayToggleRow(icon: "eye.slash", label: "Hide Completed Tasks", color: palette.primary, binding: $hideCompleted)
-                        displayToggleRow(icon: "note.text", label: "Hide Notes", color: Color(hex: 0xF97316), binding: $hideNotes)
-                        displayToggleRow(icon: "calendar.badge.exclamationmark", label: "Hide Overdue Banner", color: Palette.danger, binding: $hideReschedule)
-                    }
-                }
-
-                // SORT section
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("SORT")
-                        .font(.system(size: 11, weight: .bold))
-                        .tracking(0.9)
-                        .foregroundStyle(palette.textSec)
-                        .padding(.horizontal, 4)
-
-                    HStack(spacing: 12) {
-                        Image(systemName: "arrow.up.arrow.down")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 30, height: 30)
-                            .background(Color(hex: 0x8B5CF6), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        Text("Sort By")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(palette.text)
-                        Spacer()
-                        Menu {
-                            ForEach(sortOptions, id: \.0) { key, label in
-                                Button {
-                                    sortBy = key
-                                } label: {
-                                    if sortBy == key {
-                                        Label(label, systemImage: "checkmark")
-                                    } else {
-                                        Text(label)
-                                    }
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text(sortLabel)
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(palette.textSec)
-                                Image(systemName: "chevron.up.chevron.down")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(palette.textSec)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 13)
-                    .background(palette.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
-                }
-
-                Spacer()
-            }
-            .padding(20)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(palette.bg)
-            .navigationTitle("Layout")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }.fontWeight(.semibold)
-                }
-            }
-        }
-        .tint(palette.primary)
-        .preferredColorScheme(appearance.preferredColorScheme)
-        .sheet(isPresented: $showMembershipPromo) {
-            MembershipPromoView()
-        }
-    }
-}
 
 // MARK: - Timeline layout
 
@@ -981,43 +300,35 @@ private struct InboxTimelineView: View {
     @Binding var isSelecting: Bool
     @Binding var selectedIDs: Set<UUID>
     @Binding var draggingID: UUID?
-    @Binding var dragOffset: CGFloat
     @Binding var dayOffset: Int
     var onToggleSelect: (TaskItem) -> Void
 
     // Day-paging slide offset. Local @State so a drag never re-renders the parent.
     @State private var swipeDelta: CGFloat = 0
+    // Measured content height of the current day page — the container sizes to it
+    // (capped) so it adapts as tasks / subtask lists expand and collapse.
+    @State private var contentHeight: CGFloat = 170
 
     private let cal = Calendar.current
     private var today: Date { cal.startOfDay(for: Date()) }
 
-    // The task list is capped at this many rows; beyond that it scrolls internally.
-    private let maxVisibleRows = 6
-    private let rowStride: CGFloat = 78
-
-    /// Number of active (incomplete, non-trashed) tasks due on `date`.
-    private func activeRowCount(for date: Date) -> Int {
-        tasks.filter { t in
-            guard let due = t.dueDate else { return false }
-            return cal.isDate(due, inSameDayAs: date) && !t.isTrashed && !t.completed
-        }.count
-    }
-
-    /// Height of the capped list region — grows with tasks up to `maxVisibleRows`,
-    /// then stays fixed (the list scrolls). Empty days get a compact placeholder.
-    private func listHeight(for date: Date) -> CGFloat {
-        let rows = activeRowCount(for: date)
-        if rows == 0 { return 170 }
-        return CGFloat(min(rows, maxVisibleRows)) * rowStride + 20
-    }
 
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let curDate = cal.date(byAdding: .day, value: dayOffset, to: today) ?? today
             // In multi-select the container expands to the full height so there's
-            // room to see where tasks are being reordered; otherwise it stays capped.
-            let listH = isSelecting ? geo.size.height : listHeight(for: curDate)
+            // room to see where tasks are being reordered; otherwise it fits the
+            // measured content (so it grows/shrinks with expanded subtasks), capped
+            // to the available height — minus a bottom gutter so there's always a
+            // strip to swipe on to page days (clearing the add-task handle), even
+            // when a day is packed with tasks.
+            // Keep the list's bottom edge above the floating add-task handle / tab
+            // bar (matching the inbox list's own bottom clearance), so there's
+            // always an uncovered strip to swipe on to page days.
+            let bottomGutter: CGFloat = 132
+            let fitted = min(max(contentHeight, 120), max(200, geo.size.height - bottomGutter))
+            let listH = isSelecting ? geo.size.height : fitted
             VStack(spacing: 0) {
                 // Capped, self-contained vertical-scroll list. Also the filmstrip:
                 // the current page slides out and the adjacent day slides in.
@@ -1035,19 +346,10 @@ private struct InboxTimelineView: View {
                         .offset(x: swipeDelta)
                 }
                 .frame(height: listH)
-                .clipped()
-                // Soft shadow bars along the top and bottom edges — subtle
-                // horizontal gradients that fade into the background, quietly
-                // setting the vertical-scroll task container apart. Everything
-                // below this region pages the day horizontally.
-                .overlay(
-                    VStack(spacing: 0) {
-                        shadowBar(fadingDown: true, width: w)
-                        Spacer(minLength: 0)
-                        shadowBar(fadingDown: false, width: w)
-                    }
-                    .allowsHitTesting(false)
-                )
+                // The task region is flat — no inner-shadow well darkening the
+                // rows; rows soften out at the edges via `timelineScrollFade`.
+                // Everything below this region pages the day.
+                .clipShape(RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
 
                 // Blank area below the list — swipe left/right here to change day.
                 // Isolated from the list, so vertical scrolling is never contested.
@@ -1065,9 +367,14 @@ private struct InboxTimelineView: View {
             if !selecting && draggingID != nil {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                     draggingID = nil
-                    dragOffset = 0
                 }
             }
+        }
+        // Grow/shrink the container as the visible day's content changes (tasks
+        // added/removed, subtasks expanded/collapsed).
+        .onPreferenceChange(TimelinePageHeightKey.self) { h in
+            guard h > 0 else { return }
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { contentHeight = h }
         }
     }
 
@@ -1087,28 +394,9 @@ private struct InboxTimelineView: View {
             isSelecting: $isSelecting,
             selectedIDs: $selectedIDs,
             draggingID: $draggingID,
-            dragOffset: $dragOffset,
             onToggleSelect: onToggleSelect,
-            allTaskCount: tasks.count
-        )
-    }
-
-    /// One soft shadow bar hugging the top (`fadingDown`) or bottom edge of the
-    /// task container. Inset to ~90% of the width and feathered at both ends so
-    /// it reads as a subtle horizontal shadow rather than a hard line.
-    private func shadowBar(fadingDown: Bool, width w: CGFloat) -> some View {
-        let tint = Color.black.opacity(palette.dark ? 0.13 : 0.035)
-        return LinearGradient(
-            colors: fadingDown ? [tint, .clear] : [.clear, tint],
-            startPoint: .top, endPoint: .bottom
-        )
-        .frame(height: 9)
-        .padding(.horizontal, w * 0.05)
-        .mask(
-            LinearGradient(
-                colors: [.clear, .black, .black, .clear],
-                startPoint: .leading, endPoint: .trailing
-            )
+            allTaskCount: tasks.count,
+            reportsHeight: off == dayOffset
         )
     }
 
@@ -1137,10 +425,19 @@ private struct InboxTimelineView: View {
             let direction = tx > 0 ? -1 : 1
             dayOffset += direction
             swipeDelta = (direction == -1 ? -w : w) + tx
-            withAnimation(.spring(response: 0.26, dampingFraction: 0.9)) { swipeDelta = 0 }
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.9)) { swipeDelta = 0 }
         } else {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { swipeDelta = 0 }
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.85)) { swipeDelta = 0 }
         }
+    }
+}
+
+/// Carries the current day page's intrinsic content height up to the timeline
+/// container so it can size to the visible day (collapsed or with subtasks open).
+private struct TimelinePageHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
@@ -1154,59 +451,121 @@ private struct TimelineDayPage: View {
     @Binding var isSelecting: Bool
     @Binding var selectedIDs: Set<UUID>
     @Binding var draggingID: UUID?
-    @Binding var dragOffset: CGFloat
     var onToggleSelect: (TaskItem) -> Void
+    /// Live finger offset of a reorder drag. Local to this page (not a binding up
+    /// to InboxView) so each drag frame only re-renders this list, not the page.
+    @State private var dragOffset: CGFloat = 0
     /// Total task count (changes on add/delete, not on day-switch) — drives the
     /// add/remove row animation without re-animating on every day change.
     var allTaskCount: Int = 0
+    /// Only the current (front) page reports its content height up to the parent,
+    /// so the container can size to the visible day (incl. expanded subtasks).
+    var reportsHeight: Bool = false
     /// True while a task is being swiped (complete/delete) — suppresses the row's
     /// taps/holds so a finger-lift can't also fire them. Local to this page.
     @State private var taskSwiping = false
+    // Tap-and-drag select state for this day page.
+    @State private var dragSel = DragSelector()
+    // Row step (measured once at the start of a reorder) so the drag math stays
+    // stable instead of recomputing from live frames every frame.
+    @State private var dragStride: CGFloat = 78
 
     @AppStorage("inbox_hide_completed") private var hideCompleted = false
     @State private var showCompleted = false
     @State private var showRescheduleFor: TaskItem? = nil
     @State private var multiSelectArm: DispatchWorkItem? = nil
     @State private var suppressTapAction = false
+    // Which task-group folders are expanded (collapsed by default).
+    @State private var expandedGroups: Set<UUID> = []
     // Per-task nonce bumped on swipe-to-complete so the checkbox plays the same
     // completion animation + delayed commit as a tap.
     @State private var completeTokens: [UUID: Int] = [:]
     @Environment(\.modelContext) private var context
+    @Environment(ProjectNavigationState.self) private var projectNavState
+    /// The task being spotlighted after it was picked in search.
+    @State private var highlightID: UUID? = nil
 
     var body: some View {
+        ScrollViewReader { proxy in
+            pageScroll
+                .onAppear { focusSearchedTask(proxy) }
+                .onChange(of: projectNavState.focusTaskID) { _, _ in focusSearchedTask(proxy) }
+                // The Inbox pages to the task's day first; act once it's showing.
+                .onChange(of: date) { _, _ in focusSearchedTask(proxy) }
+        }
+    }
+
+    /// If the task picked in search is on this (front) day: reveal it — opening
+    /// its folder or the Completed section if it's tucked away — scroll it into
+    /// view, and play a brief highlight.
+    private func focusSearchedTask(_ proxy: ScrollViewProxy) {
+        guard reportsHeight, let id = projectNavState.focusTaskID,
+              let task = dayTasks.first(where: { $0.uid == id }) else { return }
+        projectNavState.focusTaskID = nil
+        if task.completed {
+            showCompleted = true
+        } else if let group = task.group {
+            expandedGroups.insert(group.uid)
+        }
+        // Let the search sheet finish closing and the day finish paging in.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(id, anchor: .center) }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            withAnimation(.easeOut(duration: 0.25)) { highlightID = id }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+                guard highlightID == id else { return }
+                withAnimation(.easeOut(duration: 0.5)) { highlightID = nil }
+            }
+        }
+    }
+
+    private var pageScroll: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // Tasks
-                let sorted = dayTasks.sorted {
+                // Tasks — manual order (sortOrder, then newest), with pinned tasks
+                // floated to the top. The partition is stable, and the loose list
+                // and each folder are filtered from it, so a pinned task tops the
+                // Inbox list or its own folder.
+                let sorted = sortPinnedFirst(dayTasks.sorted {
                     if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
                     return $0.createdAt > $1.createdAt
-                }
+                })
                 let activeTasks = sorted.filter { !$0.completed }
                 let completedDayTasks = sorted.filter { $0.completed && !$0.isNote }
                 let hasVisible = !activeTasks.isEmpty || (!completedDayTasks.isEmpty && !hideCompleted)
 
                 if !hasVisible {
-                    VStack(spacing: 10) {
-                        Image(systemName: "moon.zzz")
-                            .font(.system(size: 36))
-                            .foregroundStyle(palette.border)
-                        Text("No tasks due this day")
-                            .font(.system(size: 15))
-                            .foregroundStyle(palette.textSec)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 60)
+                    // Shared empty state (with Evry), matching Habits and Notes.
+                    EmptyStateView(
+                        title: "Nothing due this day",
+                        text: isToday ? "Swipe up on the handle below to add a task." : "Enjoy the free day.",
+                        palette: palette
+                    )
+                    .padding(.top, 28)
+                    .transition(.opacity)
                 } else {
+                    let ungrouped = activeTasks.filter { $0.group == nil }
+                    let groupSections = groupedSections(activeTasks)
                     if !activeTasks.isEmpty {
                         VStack(spacing: 8) {
-                            ForEach(activeTasks) { task in
-                                timelineRow(task, in: activeTasks)
+                            // Loose tasks reorder among themselves.
+                            ForEach(ungrouped) { task in
+                                timelineRow(task, in: ungrouped)
+                            }
+                            // Grouped tasks live inside collapsible folders.
+                            ForEach(groupSections, id: \.group.uid) { section in
+                                groupFolder(section.group, members: section.members)
                             }
                         }
-                        .padding(.horizontal, 12)
+                        // Same 20pt page margin as the title and every other tab.
+                        .padding(.horizontal, 20)
                         .padding(.top, 12)
-                        // Animate rows in/out when a task is added or removed.
-                        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: allTaskCount)
+                        // When this list first appears (the day's first task,
+                        // replacing the empty state) it enters like a row does.
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.97, anchor: .top)),
+                            removal: .opacity
+                        ))
                     }
 
                     if !completedDayTasks.isEmpty && !hideCompleted {
@@ -1216,31 +575,160 @@ private struct TimelineDayPage: View {
                             HStack(spacing: 4) {
                                 SectionLabel(text: "Completed (\(completedDayTasks.count))", palette: palette)
                                 Image(systemName: "chevron.down")
-                                    .font(.system(size: 10, weight: .bold))
+                                    .font(.nunito(size: 11, weight: .bold))
                                     .foregroundStyle(palette.textSec)
                                     .rotationEffect(.degrees(showCompleted ? 180 : 0))
+                                    .accessibilityHidden(true)
                                 Spacer()
                             }
+                            // A taller, full-width hit area so the toggle is easy to
+                            // tap without catching the first completed row.
+                            .padding(.vertical, 4)
+                            .frame(minHeight: EvrySpace.tap)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityHint(showCompleted ? "Hides completed tasks" : "Shows completed tasks")
                         .padding(.horizontal, 20)
                         .padding(.top, 8)
+                        .timelineScrollFade()
                         if showCompleted {
                             VStack(spacing: 8) {
                                 ForEach(completedDayTasks) { task in
                                     timelineRow(task, in: completedDayTasks)
                                 }
                             }
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, 20)
+                            // Breathing room below the toggle so the first row isn't
+                            // crowding the header text.
+                            .padding(.top, 12)
                         }
                     }
                 }
             }
             .padding(.bottom, 12)
             .frame(maxWidth: .infinity, minHeight: 10, alignment: .top)
+            // Animate rows in/out when a task is added or removed. Lives on this
+            // always-present container (not the list itself) so the very first
+            // task — which swaps the empty state for the list — animates too.
+            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: allTaskCount)
+            // Pinning / unpinning glides the row to (or from) the top.
+            .animation(EvryMotion.settle, value: pinnedIDs)
+            // Report the intrinsic content height so the container can grow/shrink
+            // to fit (e.g. when a task's subtasks expand). Only the front page emits.
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: TimelinePageHeightKey.self,
+                        value: reportsHeight ? proxy.size.height : 0
+                    )
+                }
+            )
         }
-        .scrollDisabled(draggingID != nil)
-        .scrollIndicators(.automatic)
+        // Lock vertical scroll while reordering or mid swipe-to-complete/delete so
+        // the container doesn't scroll under an active horizontal swipe.
+        .scrollDisabled(draggingID != nil || taskSwiping || dragSel.isActive)
+        .onChange(of: isSelecting) { _, selecting in if !selecting { dragOffset = 0 } }
+        // Leading, accent-coloured indicator instead of the grey system one.
+        .evryScrollIndicator(palette)
+        .coordinateSpace(.named("dragSelect"))
+        .onPreferenceChange(SelectRowFrameKey.self) { dragSel.frames = $0 }
+    }
+
+    /// The day's pinned task ids — drives the pin/unpin move animation.
+    private var pinnedIDs: Set<UUID> { Set(dayTasks.filter(\.pinned).map(\.uid)) }
+
+    // MARK: Task groups
+
+    /// The day's grouped tasks, bucketed by folder in folder sort order.
+    private func groupedSections(_ active: [TaskItem]) -> [(group: TaskGroup, members: [TaskItem])] {
+        let withGroup = active.filter { $0.group != nil }
+        var order: [UUID] = []
+        for t in withGroup where !order.contains(t.group!.uid) { order.append(t.group!.uid) }
+        return order.compactMap { id -> (group: TaskGroup, members: [TaskItem])? in
+            guard let group = withGroup.first(where: { $0.group?.uid == id })?.group else { return nil }
+            return (group, withGroup.filter { $0.group?.uid == id })
+        }
+        .sorted { $0.group.sortOrder < $1.group.sortOrder }
+    }
+
+    /// A collapsible folder holding grouped tasks, marked with its sky/navy shade.
+    @ViewBuilder
+    private func groupFolder(_ group: TaskGroup, members: [TaskItem]) -> some View {
+        let expanded = expandedGroups.contains(group.uid)
+        let tint = group.tint(palette)
+        // Opens like the "Completed" section: an easeInOut reveal of the members
+        // below the header (no drawer/tuck).
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    if expanded { expandedGroups.remove(group.uid) } else { expandedGroups.insert(group.uid) }
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "folder.fill")
+                        .font(.nunito(size: 18))
+                        .foregroundStyle(tint)
+                        .frame(width: 38, height: 38)
+                        .background(tint.opacity(0.15), in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(group.name.isEmpty ? "Folder" : group.name)
+                            .font(.evryLabel)
+                            .foregroundStyle(palette.text)
+                        Text("\(members.count) task\(members.count == 1 ? "" : "s")")
+                            .font(.nunito(size: 13))
+                            .foregroundStyle(palette.textSec)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.nunito(size: 12, weight: .bold))
+                        .foregroundStyle(palette.textSec)
+                        .rotationEffect(.degrees(expanded ? 0 : -90))
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, EvrySpace.gutter)
+                .padding(.vertical, 12)
+                // Flat like the task rows: white fill + hairline, no shadow.
+                .evryField(palette)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button(role: .destructive) { ungroup(members) } label: {
+                    Label("Ungroup", systemImage: "folder.badge.minus")
+                }
+            }
+            .timelineScrollFade()
+
+            if expanded {
+                VStack(spacing: 8) {
+                    ForEach(members) { task in
+                        timelineRow(task, in: members)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // Not indented — instead a faint rail in the folder's colour runs
+                // down the page margin, continuous along every task in the folder.
+                .background(alignment: .leading) {
+                    Capsule()
+                        .fill(tint.opacity(0.45))
+                        .frame(width: 3)
+                        .offset(x: -11)
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    /// Detach the given tasks from their folder (and delete a now-empty folder).
+    private func ungroup(_ members: [TaskItem]) {
+        let group = members.first?.group
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+            for task in members { task.group = nil }
+        }
+        if let group, (group.tasks ?? []).isEmpty { context.delete(group) }
+        try? context.save()
     }
 
     /// A task row with the full inbox interaction set: swipe to complete/delete,
@@ -1255,11 +743,12 @@ private struct TimelineDayPage: View {
         // order, so non-dragged rows shift to open a gap under the hovered spot.
         let plan = draggingID.map { reorderPlan(draggedID: $0, in: items, offset: dragOffset) }
         let inGroup = plan?.group.contains { $0.uid == task.uid } ?? false
+        let stride = dragStride
         let neighborShift: CGFloat = {
             guard let plan, !inGroup,
                   let newIdx = plan.newItems.firstIndex(where: { $0.uid == task.uid }),
                   let origIdx = items.firstIndex(where: { $0.uid == task.uid }) else { return 0 }
-            return CGFloat(newIdx - origIdx) * 78
+            return CGFloat(newIdx - origIdx) * stride
         }()
         // Selected rows gather into a contiguous stack under the finger; everyone
         // else steps to its previewed slot.
@@ -1270,12 +759,12 @@ private struct TimelineDayPage: View {
                   let oi = items.firstIndex(where: { $0.uid == task.uid }),
                   let od = items.firstIndex(where: { $0.uid == draggedID })
             else { return neighborShift }
-            return dragOffset + CGFloat((od - oi) + (gi - gd)) * 78
+            return dragOffset + CGFloat((od - oi) + (gi - gd)) * stride
         }()
         let elevated = inGroup
         SwipeActionRow(
             leadingAction: task.isNote || task.completed ? nil : SwipeActionRow.Action(
-                label: "Done", icon: "checkmark", color: Palette.success,
+                label: "Done", icon: "checkmark", color: Palette.doneFill,
                 action: { completeTokens[task.uid, default: 0] += 1 }
             ),
             trailingAction: SwipeActionRow.Action(
@@ -1316,25 +805,39 @@ private struct TimelineDayPage: View {
                 isSelecting: isSelecting,
                 isSelected: selectedIDs.contains(task.uid),
                 onSelect: { rowTap { onToggleSelect(task) } },
+                onDragSelect: { loc in
+                    applyDragSelect(&dragSel, anchor: task, location: loc,
+                                    ordered: items, selected: &selectedIDs)
+                },
+                onDragSelectEnd: { dragSel.end() },
                 hideDueDate: true,
                 centered: true,
-                cornerRadius: 26,
+                cornerRadius: EvryRadius.card,
                 completeToken: completeTokens[task.uid] ?? 0
             )
         }
-        .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
-        .scaleEffect(isSelf ? 1.04 : 1.0)
-        .shadow(color: elevated ? .black.opacity(0.2) : .clear, radius: elevated ? 14 : 0, y: elevated ? 6 : 0)
-        .offset(y: yOff)
-        .zIndex(elevated ? 1 : 0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isSelf)
-        // Only the stepped neighbour offset is animated — the finger-follow stays direct.
-        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: neighborShift)
+        // Insertion stays gentle; removal (delete) shrinks + fades away — a clear
+        // but quiet exit, deliberately softer than the completion burst.
+        .transition(.asymmetric(
+            insertion: .opacity.combined(with: .scale(scale: 0.97, anchor: .top)),
+            removal: .opacity.combined(with: .scale(scale: 0.82, anchor: .center))
+        ))
+        // Search spotlight: a navy outline (the focus-ring treatment) with a faint
+        // glow, fading out after a moment — the row itself is left untouched.
+        .overlay {
+            RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous)
+                .strokeBorder(palette.primary, lineWidth: 2)
+                .shadow(color: palette.primary.opacity(0.25), radius: 3)
+                .opacity(highlightID == task.uid ? 1 : 0)
+                .allowsHitTesting(false)
+        }
+        .id(task.uid)
         // Multi-select reorder handle (trailing) — drag to reorder the selection.
+        // Attached BEFORE .offset so the handle travels with the row as it moves.
         .overlay(alignment: .trailing) {
             if isSelecting {
                 Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.nunito(size: 16, weight: .semibold))
                     .foregroundStyle(elevated ? palette.primary : palette.textSec)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
@@ -1342,6 +845,16 @@ private struct TimelineDayPage: View {
                     .padding(.trailing, 6)
             }
         }
+        .scaleEffect(isSelf ? 1.04 : 1.0)
+        // Rows are flat at rest; only rows being dragged get a very subtle lift
+        // (navy-tinted; black only in dark mode). `elevated` is only true mid-drag.
+        .shadow(color: elevated ? (palette.dark ? Color.black : .evryNavy).opacity(palette.dark ? 0.3 : 0.08) : .clear,
+                radius: elevated ? 10 : 0, y: elevated ? 4 : 0)
+        .offset(y: yOff)
+        .zIndex(elevated ? 1 : 0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isSelf)
+        // Only the stepped neighbour offset is animated — the finger-follow stays direct.
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: neighborShift)
         .popover(isPresented: Binding(
             get: { showRescheduleFor?.uid == task.uid },
             set: { if !$0 { showRescheduleFor = nil } }
@@ -1383,14 +896,7 @@ private struct TimelineDayPage: View {
         // Rows soften into a blur — and shrink slightly — as they scroll past the
         // top/bottom edges of the day list, so tasks fade out rather than
         // hard-clipping at the container.
-        .scrollTransition(.interactive, axis: .vertical) { content, phase in
-            content
-                .blur(radius: abs(phase.value) * 1.8)
-                .opacity(1 - abs(phase.value) * 0.35)
-                // Eased so rows stay near full size, then shrink faster right at
-                // the edge as they exit.
-                .scaleEffect(1 - pow(abs(phase.value), 2.5) * 0.2)
-        }
+        .timelineScrollFade()
     }
 
     private func rowTap(_ action: () -> Void) {
@@ -1401,9 +907,15 @@ private struct TimelineDayPage: View {
     /// Drag gesture for the multi-select reorder handle. Dragging a selected
     /// row moves the whole selection; dragging an unselected one moves just it.
     private func reorderHandleGesture(_ task: TaskItem, in items: [TaskItem]) -> some Gesture {
-        DragGesture(minimumDistance: 4)
+        // Measured in the list's fixed coordinate space. The handle rides on the
+        // row it's dragging, so in its own (moving) space every offset change fed
+        // back into the next translation — the row jittered under the finger.
+        DragGesture(minimumDistance: 4, coordinateSpace: .named("dragSelect"))
             .onChanged { v in
                 if draggingID == nil {
+                    // Snapshot the true row step once, so the live preview and the
+                    // drop use the same stable value (no per-frame recompute jitter).
+                    dragStride = measuredStride()
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { draggingID = task.uid }
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 }
@@ -1414,12 +926,22 @@ private struct TimelineDayPage: View {
             }
     }
 
+    /// The smallest on-screen step between adjacent rows (from the drag-select
+    /// frames). Using the minimum ignores the large gaps across folder/section
+    /// headers, so it reflects a single row's true height + spacing.
+    private func measuredStride() -> CGFloat {
+        let ys = dragSel.frames.values.map(\.midY).sorted()
+        guard ys.count >= 2 else { return 78 }
+        let gaps = zip(ys.dropFirst(), ys).map { $0 - $1 }.filter { $0 > 8 }
+        return gaps.min() ?? 78
+    }
+
     /// The previewed ordering for the current drag: the dragged task — plus the
     /// rest of the selection if it's selected — treated as a contiguous block
     /// inserted at the hovered position. Non-group items keep their relative
     /// order. Used both for the live shift and the final drop.
     private func reorderPlan(draggedID: UUID, in items: [TaskItem], offset: CGFloat) -> (newItems: [TaskItem], group: [TaskItem]) {
-        let rowH: CGFloat = 78
+        let rowH = dragStride
         guard let d = items.firstIndex(where: { $0.uid == draggedID }) else { return (items, []) }
         let step = Int((offset / rowH).rounded())
         let target = max(0, min(items.count - 1, d + step))
@@ -1427,7 +949,9 @@ private struct TimelineDayPage: View {
         let group = movesGroup ? items.filter { selectedIDs.contains($0.uid) } : [items[d]]
         let groupIDs = Set(group.map(\.uid))
         let rest = items.enumerated().filter { !groupIDs.contains($0.element.uid) }
-        let insertAt = rest.filter { $0.offset < target }.count
+        // Dragging down lands *after* the hovered row (so the last slot is
+        // reachable); dragging up lands before it.
+        let insertAt = rest.filter { target > d ? $0.offset <= target : $0.offset < target }.count
         var newItems = rest.map(\.element)
         newItems.insert(contentsOf: group, at: min(insertAt, newItems.count))
         return (newItems, group)
@@ -1446,10 +970,10 @@ private struct TimelineDayPage: View {
     private func rescheduleMenu(for task: TaskItem) -> some View {
         VStack(spacing: 0) {
             rescheduleRow(label: "Tomorrow", icon: "arrow.right", date: addDays(Date(), 1), task: task)
-            Divider()
-            rescheduleRow(label: "This Weekend", icon: "beach.umbrella", date: TaskActions.nextWeekdayDate(6), task: task)
-            Divider()
-            rescheduleRow(label: "Next Week", icon: "calendar", date: TaskActions.nextWeekdayDate(1), task: task)
+            Rectangle().fill(palette.border).frame(height: 1)
+            rescheduleRow(label: "This weekend", icon: "beach.umbrella", date: TaskActions.nextWeekdayDate(6), task: task)
+            Rectangle().fill(palette.border).frame(height: 1)
+            rescheduleRow(label: "Next week", icon: "calendar", date: TaskActions.nextWeekdayDate(1), task: task)
         }
         .frame(width: 220)
         .padding(.vertical, 4)
@@ -1467,766 +991,176 @@ private struct TimelineDayPage: View {
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: icon)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.nunito(size: 15, weight: .semibold))
                     .foregroundStyle(palette.primary)
                     .frame(width: 22)
+                    .accessibilityHidden(true)
                 Text(label)
-                    .font(.system(size: 15))
+                    .font(.evryBody)
                     .foregroundStyle(palette.text)
                 Spacer()
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 11)
+            .frame(minHeight: EvrySpace.tap)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
+}
 
-    private func neighborOffset(_ task: TaskItem, in items: [TaskItem]) -> CGFloat {
-        guard let draggedID = draggingID,
-              task.uid != draggedID,
-              let draggedIdx = items.firstIndex(where: { $0.uid == draggedID }),
-              let taskIdx   = items.firstIndex(where: { $0.uid == task.uid }) else { return 0 }
-        let rowH: CGFloat = 78
-        let steps  = Int((dragOffset / rowH).rounded())
-        let target = max(0, min(items.count - 1, draggedIdx + steps))
-        if taskIdx > draggedIdx && taskIdx <= target { return -rowH }
-        if taskIdx < draggedIdx && taskIdx >= target { return  rowH }
-        return 0
-    }
+// MARK: - Shared drag-select
 
-    private func finishDrag(in items: [TaskItem], finalOffset: CGFloat) {
-        guard let draggedID = draggingID,
-              let draggedIdx = items.firstIndex(where: { $0.uid == draggedID }) else {
-            withAnimation(.spring(response: 0.35)) { draggingID = nil; dragOffset = 0 }
-            return
-        }
-        let rowH: CGFloat = 78
-        let steps  = Int((finalOffset / rowH).rounded())
-        let target = max(0, min(items.count - 1, draggedIdx + steps))
-        var reordered = items
-        let moved = reordered.remove(at: draggedIdx)
-        reordered.insert(moved, at: target)
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-            for (i, t) in reordered.enumerated() { t.sortOrder = i }
-            draggingID = nil
-            dragOffset = 0
-        }
+/// Tap-and-drag multi-select shared by every inbox layout: extends `selected`
+/// to cover the rows between the drag's anchor and the finger's row, with light
+/// haptics on start and each change.
+private func applyDragSelect(_ selector: inout DragSelector,
+                             anchor: TaskItem, location: CGPoint,
+                             ordered: [TaskItem], selected: inout Set<UUID>) {
+    let began = !selector.isActive
+    let newSel = selector.selection(anchor: anchor, location: location,
+                                    ordered: ordered, current: selected)
+    if began { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+    if newSel != selected {
+        selected = newSel
+        UISelectionFeedbackGenerator().selectionChanged()
     }
 }
 
-// MARK: - Calendar layout
+// MARK: - New task-group sheet
 
-private struct InboxCalendarLayout: View {
-    let tasks: [TaskItem]
+/// Names a new folder for the selected tasks. Its colour is automatic (the next
+/// sky→navy shade), previewed here.
+private struct NewTaskGroupSheet: View {
+    let taskCount: Int
     let palette: Palette
-    let onEdit: (TaskItem) -> Void
-    let onDelete: (TaskItem) -> Void
-    @Binding var isSelecting: Bool
-    @Binding var selectedIDs: Set<UUID>
-    @Binding var draggingID: UUID?
-    @Binding var dragOffset: CGFloat
-    @Binding var displayMonth: Date
-    var onToggleSelect: (TaskItem) -> Void
+    var onCreate: (String) -> Void
+    var onAddToExisting: (TaskGroup) -> Void
 
-    @Environment(\.modelContext) private var context
-    @Environment(CalendarService.self) private var calendarService
-    @State private var selectedDay: Date = .now
-    @AppStorage("inbox_hide_completed") private var hideCompleted = false
-    @State private var showCalCompleted = false
-    @State private var calendarExpanded = false
-    @State private var dragProgress: CGFloat = 0
-    // Horizontal paging (swipe the calendar by week / month) — filmstrip style:
-    // the adjacent page is rendered alongside and slides in as the current slides out.
-    @State private var swipeDelta: CGFloat = 0
-    @State private var swipeAxis: Axis? = nil
-    @State private var pendingChange: Task<Void, Never>? = nil
-    @State private var pendingDirection: Int = 0
-    @State private var suppressDaySelect = false
-    @State private var gridWidth: CGFloat = 320
-    // Day paging in the tasks area — Timeline-style filmstrip (finger-following,
-    // adjacent day slides in from off-screen).
-    @State private var daySwipeDelta: CGFloat = 0
-    @State private var daySwipeAxis: Axis? = nil
-    @State private var dayPendingChange: Task<Void, Never>? = nil
-    @State private var dayPendingDirection: Int = 0
+    @Environment(\.dismiss) private var dismiss
+    @Environment(Appearance.self) private var appearance
 
-    private let cal = Calendar.current
-    private let weekdayLabels = ["S", "M", "T", "W", "T", "F", "S"]
-    private var dueTasks: [TaskItem] { tasks.filter { $0.dueDate != nil && !$0.isNote } }
-
-    private var weekRows: [[Date?]] { weekRows(for: displayMonth) }
-
-    private func weekRows(for month: Date) -> [[Date?]] {
-        let days = gridDays(for: month)
-        return stride(from: 0, to: days.count, by: 7).map { i in
-            Array(days[i..<min(i+7, days.count)])
-        }
+    @Query(sort: \TaskGroup.sortOrder) private var allGroups: [TaskGroup]
+    /// Only folders that still hold tasks — an empty folder is never offered.
+    private var groups: [TaskGroup] {
+        allGroups.filter { !(($0.tasks ?? []).filter { !$0.isTrashed }).isEmpty }
     }
 
-    /// Days of the week that contains `date` (Sunday-first).
-    private func weekDays(containing date: Date) -> [Date] {
-        let comps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date)
-        guard let start = cal.date(from: comps) else { return [] }
-        return (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: start) }
-    }
+    @State private var name = ""
 
-    /// The week / month one step in either direction — used to render the
-    /// adjacent filmstrip page. `dir` is -1 (previous), 0 (current), +1 (next).
-    private func pageWeekDays(_ dir: Int) -> [Date] {
-        weekDays(containing: cal.date(byAdding: .day, value: dir * 7, to: selectedDay) ?? selectedDay)
-    }
+    /// The shade the new folder will be given.
+    private var tint: Color { palette.folderColor(shade: FolderShade.peek(FolderShade.taskGroupsKey)) }
 
-    private func pageMonth(_ dir: Int) -> Date {
-        cal.date(byAdding: .month, value: dir, to: displayMonth) ?? displayMonth
-    }
-
-    private var currentWeekIndex: Int {
-        weekRows.firstIndex { week in
-            week.compactMap { $0 }.contains { cal.isDate($0, inSameDayAs: selectedDay) }
-        } ?? 0
-    }
-
-    private var cellRowHeight: CGFloat { 52 }
-    private var collapsedGridHeight: CGFloat { 50 }
-    private var expandedGridHeight: CGFloat { CGFloat(weekRows.count) * cellRowHeight - 2 }
-    private var currentGridHeight: CGFloat { pageHeight(0) }
-
-    /// Fully-expanded height of a given month's grid (5- vs 6-row months differ).
-    private func expandedHeight(for month: Date) -> CGFloat {
-        CGFloat(weekRows(for: month).count) * cellRowHeight - 2
-    }
-
-    /// Height of a single filmstrip page for the current expand progress.
-    private func pageHeight(_ dir: Int) -> CGFloat {
-        collapsedGridHeight + (expandedHeight(for: pageMonth(dir)) - collapsedGridHeight) * dragProgress
-    }
-
-    /// Container height: interpolates from the current page's height toward the
-    /// incoming page's height as you swipe, so months with different row counts
-    /// grow/shrink smoothly (and land seamlessly when the page change commits).
-    private var containerGridHeight: CGFloat {
-        guard swipeDelta != 0, gridWidth > 0 else { return pageHeight(0) }
-        let dir = swipeDelta < 0 ? 1 : -1
-        let progress = min(1, abs(swipeDelta) / gridWidth)
-        return pageHeight(0) + (pageHeight(dir) - pageHeight(0)) * progress
-    }
-    private var gridYOffset: CGFloat {
-        -CGFloat(currentWeekIndex) * cellRowHeight * (1 - dragProgress)
-    }
-
-    private var currentWeekDays: [Date] { weekDays(containing: selectedDay) }
-
-    private var firstOfMonth: Date {
-        let c = cal.dateComponents([.year, .month], from: displayMonth)
-        return cal.date(from: c) ?? displayMonth
-    }
-
-    private var lastOfMonth: Date {
-        cal.date(byAdding: DateComponents(month: 1, second: -1), to: firstOfMonth) ?? firstOfMonth
-    }
-
-    private var gridDays: [Date?] { gridDays(for: displayMonth) }
-
-    private func gridDays(for month: Date) -> [Date?] {
-        let first = cal.date(from: cal.dateComponents([.year, .month], from: month)) ?? month
-        let leadingPad = cal.component(.weekday, from: first) - 1
-        let count = cal.range(of: .day, in: .month, for: first)!.count
-        var days: [Date?] = Array(repeating: nil, count: leadingPad)
-        for d in 0..<count { days.append(cal.date(byAdding: .day, value: d, to: first)) }
-        while days.count % 7 != 0 { days.append(nil) }
-        return days
-    }
-
-    // The EventKit query and per-day dot computations are expensive, so they're
-    // cached and rebuilt only when the month / selection / task set changes —
-    // never during a drag, which re-evaluates the body on every frame.
-    @State private var cachedEvents: [CalendarEvent] = []
-    @State private var dotCache: [Date: [Color]] = [:]
-    @State private var eventDotCache: [Date: [Color]] = [:]
-
-    private func dayTasks(_ day: Date) -> [TaskItem] {
-        dueTasks.filter { cal.isDate($0.dueDate!, inSameDayAs: day) }
-    }
-
-    private func calendarEvents(on day: Date) -> [CalendarEvent] {
-        cachedEvents.filter { cal.isDate($0.startDate, inSameDayAs: day) }
-    }
-
-    private func dotColors(for day: Date) -> [Color] {
-        dotCache[cal.startOfDay(for: day)] ?? []
-    }
-
-    private func eventDotColors(for day: Date) -> [Color] {
-        eventDotCache[cal.startOfDay(for: day)] ?? []
-    }
-
-    /// Recomputes the event query and per-day dot/event colour lookups for every
-    /// day that could be shown — the current month/week plus the adjacent
-    /// months/weeks, so a filmstrip page slides in with its dots already drawn.
-    private func rebuildCaches() {
-        let rangeStart = cal.date(from: cal.dateComponents([.year, .month], from: pageMonth(-1))) ?? firstOfMonth
-        let nextFirst = cal.date(from: cal.dateComponents([.year, .month], from: pageMonth(1))) ?? lastOfMonth
-        let rangeEnd = cal.date(byAdding: DateComponents(month: 1, second: -1), to: nextFirst) ?? lastOfMonth
-        let events = calendarService.events(from: rangeStart, to: rangeEnd)
-        let dotPalette: [Color] = [palette.primary, Color(hex: 0x22C55E), Color(hex: 0xEC4899), Color(hex: 0xF97316)]
-
-        var dots: [Date: [Color]] = [:]
-        var eventDots: [Date: [Color]] = [:]
-        let allDays = gridDays(for: pageMonth(-1)) + gridDays(for: displayMonth) + gridDays(for: pageMonth(1))
-        let allWeeks = pageWeekDays(-1) + currentWeekDays + pageWeekDays(1)
-        let days = Set((allDays.compactMap { $0 } + allWeeks).map { cal.startOfDay(for: $0) })
-        for day in days {
-            dots[day] = dueTasks
-                .filter { cal.isDate($0.dueDate!, inSameDayAs: day) }
-                .prefix(4)
-                .map { t in
-                    var h = 0
-                    for s in t.uid.uuidString.unicodeScalars { h = Int(s.value) &+ ((h << 5) &- h) }
-                    return dotPalette[abs(h) % dotPalette.count]
-                }
-            eventDots[day] = events
-                .filter { cal.isDate($0.startDate, inSameDayAs: day) }
-                .prefix(3)
-                .map(\.calendarColor)
-        }
-        cachedEvents = events
-        dotCache = dots
-        eventDotCache = eventDots
-    }
-
-    // MARK: Paging
-
-    /// Move back a week (collapsed) or a month (expanded). Shared by the arrow
-    /// buttons and the horizontal swipe.
-    private func pageBackward() {
-        if calendarExpanded {
-            displayMonth = cal.date(byAdding: .month, value: -1, to: displayMonth) ?? displayMonth
-        } else {
-            selectedDay = cal.date(byAdding: .day, value: -7, to: selectedDay) ?? selectedDay
-            displayMonth = cal.date(from: cal.dateComponents([.year, .month], from: selectedDay)) ?? displayMonth
-        }
-    }
-
-    private func pageForward() {
-        if calendarExpanded {
-            displayMonth = cal.date(byAdding: .month, value: 1, to: displayMonth) ?? displayMonth
-        } else {
-            selectedDay = cal.date(byAdding: .day, value: 7, to: selectedDay) ?? selectedDay
-            displayMonth = cal.date(from: cal.dateComponents([.year, .month], from: selectedDay)) ?? displayMonth
-        }
-    }
-
-    /// Selecting a day only sticks for a direct tap — a horizontal swipe over
-    /// the grid must not change the highlighted day.
-    private func selectDay(_ day: Date) {
-        guard !suppressDaySelect else { return }
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { selectedDay = day }
-    }
-
-    /// One filmstrip page (`dir` = -1 previous / 0 current / +1 next), rendering
-    /// the week row and month grid for that reference so adjacent pages can slide
-    /// in alongside the current one.
-    @ViewBuilder
-    private func calendarPage(_ dir: Int) -> some View {
-        let weekDays = pageWeekDays(dir)
-        let rows = weekRows(for: pageMonth(dir))
-        ZStack(alignment: .top) {
-            // Collapsed week row
-            HStack(spacing: 0) {
-                ForEach(Array(weekDays.enumerated()), id: \.offset) { _, day in
-                    InboxDayCell(
-                        day: day,
-                        isToday: cal.isDateInToday(day),
-                        isSelected: cal.isDate(day, inSameDayAs: selectedDay),
-                        dots: dotColors(for: day),
-                        eventDots: eventDotColors(for: day),
-                        palette: palette
-                    ) { selectDay(day) }
-                }
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 50, alignment: .top)
-            .opacity(Double(1 - dragProgress))
-
-            // Expanded month grid (non-lazy so partial-drag heights don't glitch)
-            VStack(spacing: 2) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, week in
-                    HStack(spacing: 0) {
-                        ForEach(Array(week.enumerated()), id: \.offset) { _, day in
-                            if let day {
-                                InboxDayCell(
-                                    day: day,
-                                    isToday: cal.isDateInToday(day),
-                                    isSelected: cal.isDate(day, inSameDayAs: selectedDay),
-                                    dots: dotColors(for: day),
-                                    eventDots: eventDotColors(for: day),
-                                    palette: palette
-                                ) { selectDay(day) }
-                            } else {
-                                Color.clear.frame(maxWidth: .infinity, minHeight: 50)
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 8)
-            .offset(y: dir == 0 ? gridYOffset : 0)
-            .opacity(Double(dragProgress))
-        }
-        .frame(height: pageHeight(dir), alignment: .top)
-        .clipped()
-    }
-
-    /// Horizontal swipe → page by week (collapsed) or month (expanded). The
-    /// current and adjacent pages slide together like a scroll wheel; on release
-    /// it snaps to a full page, then swaps content seamlessly.
-    private var pager: some Gesture {
-        DragGesture(minimumDistance: 10)
-            .onChanged { v in
-                let dx = v.translation.width, dy = v.translation.height
-                if swipeAxis == nil {
-                    // A new swipe started before the previous commit fired — finalize it.
-                    if pendingChange != nil {
-                        pendingChange?.cancel()
-                        commitPending()
-                    }
-                    swipeDelta = 0
-                    guard abs(dx) > 8 || abs(dy) > 8 else { return }
-                    swipeAxis = abs(dx) > abs(dy) ? .horizontal : .vertical
-                    if swipeAxis == .horizontal { suppressDaySelect = true }
-                }
-                guard swipeAxis == .horizontal else { return }
-                swipeDelta = dx
-            }
-            .onEnded { v in
-                defer {
-                    swipeAxis = nil
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { suppressDaySelect = false }
-                }
-                guard swipeAxis == .horizontal else {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { swipeDelta = 0 }
-                    return
-                }
-                let dx = v.translation.width
-                let threshold = gridWidth * 0.25
-                if abs(dx) > threshold || abs(v.velocity.width) > 400 {
-                    let forward = dx < 0
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.9)) {
-                        swipeDelta = forward ? -gridWidth : gridWidth
-                    }
-                    pendingDirection = forward ? 1 : -1
-                    pendingChange = Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 240_000_000)
-                        commitPending()
-                    }
-                } else {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { swipeDelta = 0 }
-                }
-            }
-    }
-
-    /// Commits a pending page change: the adjacent page (already animated to
-    /// centre) becomes the current page, and the offset resets with no visible jump.
-    private func commitPending() {
-        guard pendingDirection != 0 else { return }
-        if pendingDirection > 0 { pageForward() } else { pageBackward() }
-        pendingDirection = 0
-        pendingChange = nil
-        swipeDelta = 0
-    }
-
-    /// Timeline-style day filmstrip: the current day's tasks and the adjacent
-    /// day's tasks slide together, and it fills the whole lower region so a swipe
-    /// anywhere (not just on a task) pages the day.
-    private var dayFilmstrip: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            ZStack(alignment: .top) {
-                // Adjacent day slides in from off-screen as the current slides out.
-                if daySwipeDelta != 0 {
-                    let dir = daySwipeDelta < 0 ? 1 : -1
-                    dayPanel(for: cal.date(byAdding: .day, value: dir, to: selectedDay) ?? selectedDay)
-                        .frame(width: w)
-                        .offset(x: daySwipeDelta < 0 ? w + daySwipeDelta : -w + daySwipeDelta)
-                }
-                dayPanel(for: selectedDay)
-                    .frame(width: w)
-                    .offset(x: daySwipeDelta)
-            }
-            .clipped()
-            .simultaneousGesture(daySwipeGesture(width: w))
-        }
-    }
-
-    private func daySwipeGesture(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 10)
-            .onChanged { v in
-                let dx = v.translation.width, dy = v.translation.height
-                if daySwipeAxis == nil {
-                    if dayPendingChange != nil {
-                        dayPendingChange?.cancel()
-                        commitDayPending()
-                    }
-                    daySwipeDelta = 0
-                    guard abs(dx) > 8 || abs(dy) > 8 else { return }
-                    daySwipeAxis = abs(dx) > abs(dy) ? .horizontal : .vertical
-                }
-                guard daySwipeAxis == .horizontal else { return }
-                daySwipeDelta = dx
-            }
-            .onEnded { v in
-                defer { daySwipeAxis = nil }
-                guard daySwipeAxis == .horizontal else {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { daySwipeDelta = 0 }
-                    return
-                }
-                let dx = v.translation.width
-                if abs(dx) > width * 0.25 || abs(v.velocity.width) > 400 {
-                    let forward = dx < 0
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
-                        daySwipeDelta = forward ? -width : width
-                    }
-                    dayPendingDirection = forward ? 1 : -1
-                    dayPendingChange = Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 240_000_000)
-                        commitDayPending()
-                    }
-                } else {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { daySwipeDelta = 0 }
-                }
-            }
-    }
-
-    private func commitDayPending() {
-        guard dayPendingDirection != 0 else { return }
-        selectedDay = cal.date(byAdding: .day, value: dayPendingDirection, to: selectedDay) ?? selectedDay
-        displayMonth = cal.date(from: cal.dateComponents([.year, .month], from: selectedDay)) ?? displayMonth
-        dayPendingDirection = 0
-        dayPendingChange = nil
-        daySwipeDelta = 0
-    }
-
-    /// One day's task/event list (a vertically-scrolling filmstrip page).
-    @ViewBuilder
-    private func dayPanel(for date: Date) -> some View {
-        let selected = dayTasks(date)
-        let selectedEvents = calendarEvents(on: date)
-        let activeSorted = selected
-            .filter { !$0.completed }
-            .sorted {
-                if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
-                return $0.createdAt > $1.createdAt
-            }
-        let completedSorted = selected
-            .filter { $0.completed && !$0.isNote }
-            .sorted { $0.createdAt > $1.createdAt }
-
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(date.formatted(.dateTime.weekday(.wide).month(.wide).day()).uppercased())
-                    .font(.system(size: 11, weight: .bold))
-                    .tracking(0.8)
-                    .foregroundStyle(palette.textSec)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 14)
-                    .padding(.bottom, 12)
-
-                if !selectedEvents.isEmpty {
-                    VStack(spacing: 8) {
-                        ForEach(selectedEvents) { event in
-                            EventRow(
-                                event: event,
-                                palette: palette,
-                                isImported: calendarService.importedEventIDs.contains(event.id)
-                            ) {
-                                calendarService.importEvent(event, context: context)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
-                }
-
-                if activeSorted.isEmpty && completedSorted.isEmpty && selectedEvents.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "calendar.badge.checkmark")
-                            .font(.system(size: 28)).foregroundStyle(palette.border)
-                        Text("No tasks due this day")
-                            .font(.system(size: 14)).foregroundStyle(palette.textSec)
-                    }
-                    .frame(maxWidth: .infinity).padding(.vertical, 28)
-                } else {
-                    VStack(spacing: 8) {
-                        ForEach(activeSorted) { task in
-                            TaskRowView(
-                                task: task,
-                                palette: palette,
-                                onToggle: {
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                        TaskActions.toggle(task, context: context)
-                                    }
-                                },
-                                onEdit: { onEdit(task) },
-                                onDelete: { onDelete(task) },
-                                onToggleSubtask: { subtask in
-                                    if let idx = task.subtasks.firstIndex(where: { $0.id == subtask.id }) {
-                                        var updated = task.subtasks
-                                        updated[idx].completed.toggle()
-                                        task.subtasks = updated
-                                    }
-                                },
-                                isSelecting: isSelecting,
-                                isSelected: selectedIDs.contains(task.uid),
-                                onSelect: { onToggleSelect(task) },
-                                compact: true,
-                                cornerRadius: 26
-                            )
-                            .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
-                            .onLongPressGesture(minimumDuration: 0.5, maximumDistance: 10) {
-                                withAnimation(.spring(response: 0.3)) {
-                                    isSelecting = true
-                                    selectedIDs.insert(task.uid)
-                                }
-                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            }
-                        }
-
-                        if !hideCompleted && !completedSorted.isEmpty {
-                            Button {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                    showCalCompleted.toggle()
-                                }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: showCalCompleted ? "chevron.down" : "chevron.right")
-                                        .font(.system(size: 11, weight: .semibold))
-                                    Text("Completed (\(completedSorted.count))")
-                                        .font(.system(size: 13, weight: .medium))
-                                    Spacer()
-                                }
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Existing folders — tap one to drop the selection straight in.
+                    if !groups.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Add to a folder")
+                                .font(.evrySmall)
                                 .foregroundStyle(palette.textSec)
-                                .padding(.top, 4)
-                            }
-                            .buttonStyle(.plain)
-
-                            if showCalCompleted {
-                                ForEach(completedSorted) { task in
-                                    TaskRowView(
-                                        task: task,
-                                        palette: palette,
-                                        onToggle: {
-                                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                                TaskActions.toggle(task, context: context)
-                                            }
-                                        },
-                                        onEdit: { onEdit(task) },
-                                        onDelete: { onDelete(task) },
-                                        onToggleSubtask: { subtask in
-                                            if let idx = task.subtasks.firstIndex(where: { $0.id == subtask.id }) {
-                                                var updated = task.subtasks
-                                                updated[idx].completed.toggle()
-                                                task.subtasks = updated
-                                            }
-                                        },
-                                        isSelecting: isSelecting,
-                                        isSelected: selectedIDs.contains(task.uid),
-                                        onSelect: { onToggleSelect(task) },
-                                        compact: true,
-                                        cornerRadius: 26
-                                    )
-                                    .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
-                                }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    // Animate rows in/out when a task is added or removed.
-                    .animation(.spring(response: 0.4, dampingFraction: 0.8), value: tasks.count)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.bottom, 130)
-        }
-        .scrollDisabled(daySwipeAxis == .horizontal)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-                // Weekday labels (month/year now lives in the page header)
-                HStack(spacing: 0) {
-                    ForEach(0..<7, id: \.self) { i in
-                        Text(weekdayLabels[i])
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(palette.textSec)
-                            .frame(maxWidth: .infinity)
-                    }
-                }
-                .padding(.horizontal, 8).padding(.top, 8).padding(.bottom, 4)
-
-                // Grid + drag handle
-                VStack(spacing: 0) {
-                    ZStack(alignment: .top) {
-                        // Adjacent page slides in from off-screen as the current slides out.
-                        if swipeDelta != 0 {
-                            let dir = swipeDelta < 0 ? 1 : -1
-                            calendarPage(dir)
-                                .frame(width: gridWidth)
-                                .offset(x: swipeDelta < 0 ? gridWidth + swipeDelta : -gridWidth + swipeDelta)
-                        }
-                        // Current page follows the finger.
-                        calendarPage(0)
-                            .frame(width: gridWidth)
-                            .offset(x: swipeDelta)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .top)
-                    .frame(height: containerGridHeight, alignment: .top)
-                    .clipped()
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear
-                                .onAppear { gridWidth = geo.size.width }
-                                .onChange(of: geo.size.width) { _, w in gridWidth = w }
-                        }
-                    )
-                    // Swipe the calendar horizontally → previous/next week (collapsed)
-                    // or month (expanded).
-                    .simultaneousGesture(pager)
-
-                    Capsule()
-                        .fill(palette.border)
-                        .frame(width: 32, height: 3)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .contentShape(Rectangle())
-                        .gesture(
-                            // Global coordinate space: the capsule itself moves as the
-                            // grid grows/shrinks, so measuring in local space feeds the
-                            // capsule's own movement back into the translation and jitters.
-                            DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                                .onChanged { v in
-                                    let range = expandedGridHeight - collapsedGridHeight
-                                    guard range > 0 else { return }
-                                    // Map the drag a bit faster than 1:1 with the height so
-                                    // a full pull opens/closes it (0.8 ≈ ~80% of the grid
-                                    // height covers the whole range).
-                                    let travel = range * 0.8
-                                    let startProgress = calendarExpanded ? 1.0 : 0.0
-                                    dragProgress = max(0, min(1, startProgress + v.translation.height / travel))
-                                }
-                                .onEnded { v in
-                                    let isTap = abs(v.translation.height) < 8 && abs(v.translation.width) < 8
-                                    let shouldExpand: Bool
-                                    if isTap {
-                                        shouldExpand = !calendarExpanded
-                                    } else {
-                                        let velocity = v.predictedEndTranslation.height - v.translation.height
-                                        shouldExpand = dragProgress > 0.45 || velocity > 150
-                                    }
-                                    withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
-                                        calendarExpanded = shouldExpand
-                                        dragProgress = shouldExpand ? 1 : 0
-                                        if shouldExpand {
-                                            displayMonth = cal.date(from: cal.dateComponents([.year, .month], from: selectedDay)) ?? displayMonth
-                                        } else if !cal.isDate(selectedDay, equalTo: displayMonth, toGranularity: .month) {
-                                            // Collapsing while viewing a different month than the selected
-                                            // day → jump to that month's first day so the week row matches.
-                                            selectedDay = firstOfMonth
+                            VStack(spacing: 8) {
+                                ForEach(groups) { group in
+                                    let gTint = group.tint(palette)
+                                    let count = (group.tasks ?? []).filter { !$0.isTrashed }.count
+                                    Button {
+                                        onAddToExisting(group)
+                                        dismiss()
+                                    } label: {
+                                        HStack(spacing: 12) {
+                                            Image(systemName: "folder.fill")
+                                                .font(.nunito(size: 16))
+                                                .foregroundStyle(gTint)
+                                                .frame(width: 34, height: 34)
+                                                .background(gTint.opacity(0.15), in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
+                                                .accessibilityHidden(true)
+                                            Text(group.name.isEmpty ? "Folder" : group.name)
+                                                .font(.nunito(size: 16, weight: .semibold))
+                                                .foregroundStyle(palette.text)
+                                            Spacer()
+                                            Text("\(count) task\(count == 1 ? "" : "s")")
+                                                .font(.nunito(size: 13))
+                                                .foregroundStyle(palette.textSec)
+                                            Image(systemName: "plus")
+                                                .font(.nunito(size: 12, weight: .bold))
+                                                .foregroundStyle(palette.text)
+                                                .accessibilityHidden(true)
                                         }
+                                        .padding(.horizontal, EvrySpace.gutter)
+                                        .padding(.vertical, 10)
+                                        .frame(minHeight: EvrySpace.storeHeight)
+                                        .evryField(palette, cornerRadius: EvryRadius.field)
                                     }
+                                    .buttonStyle(PressScaleStyle())
+                                    .accessibilityHint("Adds the selected tasks to this folder")
                                 }
-                        )
+                            }
+                        }
+
+                        Text("Or create a new one")
+                            .font(.evrySmall)
+                            .foregroundStyle(palette.textSec)
+                    }
+
+                    // Preview
+                    HStack(spacing: 14) {
+                        Image(systemName: "folder.fill")
+                            .font(.nunito(size: 22))
+                            .foregroundStyle(tint)
+                            .frame(width: 52, height: 52)
+                            .background(tint.opacity(0.16), in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(name.isEmpty ? "New folder" : name)
+                                .font(.evryTitle)
+                                .foregroundStyle(palette.text)
+                            Text("\(taskCount) task\(taskCount == 1 ? "" : "s")")
+                                .font(.nunito(size: 13))
+                                .foregroundStyle(palette.textSec)
+                        }
+                        Spacer()
+                    }
+
+                    TextField("Folder name", text: $name)
+                        .evryTextField(palette)
                 }
-
-                Divider().background(palette.border)
-
-                // Day tasks — Timeline-style horizontal day paging that fills the
-                // region, so a swipe anywhere (not just on a task) pages the day.
-                dayFilmstrip
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(20)
             }
-            .onAppear {
-                calendarService.refreshStatus()
-                rebuildCaches()
+            .background(palette.bg)
+            .navigationTitle("Group tasks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create") {
+                        onCreate(name.trimmingCharacters(in: .whitespaces))
+                        dismiss()
+                    }
+                    .font(.evryLabel)
+                }
             }
-            // Rebuild only on meaningful changes — not on every drag frame.
-            .onChange(of: displayMonth) { _, _ in rebuildCaches() }
-            .onChange(of: selectedDay) { _, _ in rebuildCaches() }
-            .onChange(of: tasks.count) { _, _ in rebuildCaches() }
-    }
-
-    private func neighborOffset(_ task: TaskItem, in items: [TaskItem]) -> CGFloat {
-        guard let draggedID = draggingID,
-              task.uid != draggedID,
-              let draggedIdx = items.firstIndex(where: { $0.uid == draggedID }),
-              let taskIdx   = items.firstIndex(where: { $0.uid == task.uid }) else { return 0 }
-        let rowH: CGFloat = 78
-        let steps  = Int((dragOffset / rowH).rounded())
-        let target = max(0, min(items.count - 1, draggedIdx + steps))
-        if taskIdx > draggedIdx && taskIdx <= target { return -rowH }
-        if taskIdx < draggedIdx && taskIdx >= target { return  rowH }
-        return 0
-    }
-
-    private func finishDrag(in items: [TaskItem], finalOffset: CGFloat) {
-        guard let draggedID = draggingID,
-              let draggedIdx = items.firstIndex(where: { $0.uid == draggedID }) else {
-            withAnimation(.spring(response: 0.35)) { draggingID = nil; dragOffset = 0 }
-            return
         }
-        let rowH: CGFloat = 78
-        let steps  = Int((finalOffset / rowH).rounded())
-        let target = max(0, min(items.count - 1, draggedIdx + steps))
-        var reordered = items
-        let moved = reordered.remove(at: draggedIdx)
-        reordered.insert(moved, at: target)
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-            for (i, t) in reordered.enumerated() { t.sortOrder = i }
-            draggingID = nil
-            dragOffset = 0
+        .tint(palette.primary)
+        .preferredColorScheme(appearance.preferredColorScheme)
+    }
+}
+
+// MARK: - Timeline scroll fade
+
+private extension View {
+    /// Softens a timeline element into a blur + slight shrink + fade as it scrolls
+    /// past the top/bottom edges of the day list — matching how task rows exit.
+    func timelineScrollFade() -> some View {
+        scrollTransition(.interactive, axis: .vertical) { content, phase in
+            content
+                .blur(radius: abs(phase.value) * 1.8)
+                .opacity(1 - abs(phase.value) * 0.35)
+                .scaleEffect(1 - pow(abs(phase.value), 2.5) * 0.2)
         }
     }
 }
 
-private struct InboxDayCell: View {
-    let day: Date
-    let isToday: Bool
-    let isSelected: Bool
-    let dots: [Color]
-    var eventDots: [Color] = []
-    let palette: Palette
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 2) {
-                ZStack {
-                    if isSelected { Circle().fill(palette.primary).frame(width: 30, height: 30) }
-                    else if isToday { Circle().fill(palette.primaryLight).frame(width: 30, height: 30) }
-                    Text("\(Calendar.current.component(.day, from: day))")
-                        .font(.system(size: 13, weight: isToday || isSelected ? .bold : .regular))
-                        .foregroundStyle(isSelected ? palette.onPrimary : isToday ? palette.primary : palette.text)
-                }
-                .frame(width: 34, height: 34)
-                HStack(spacing: 2) {
-                    ForEach(Array(dots.enumerated()), id: \.offset) { _, color in
-                        Circle()
-                            .fill(isSelected ? palette.onPrimary.opacity(0.6) : color)
-                            .frame(width: 4, height: 4)
-                    }
-                }
-                .frame(height: 5)
-                HStack(spacing: 2) {
-                    ForEach(Array(eventDots.enumerated()), id: \.offset) { _, color in
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(isSelected ? palette.onPrimary.opacity(0.5) : color)
-                            .frame(width: 4, height: 4)
-                    }
-                }
-                .frame(height: 5)
-            }
-            .frame(height: 50).frame(maxWidth: .infinity).contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}

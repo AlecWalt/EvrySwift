@@ -51,31 +51,41 @@ final class LiveSpeechInput {
 
     private func startRecording() {
         guard let recognizer, recognizer.isAvailable else { return }
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.record, mode: .measurement, options: .duckOthers)
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch { return }
-
-        let req = SFSpeechAudioBufferRecognitionRequest()
-        req.shouldReportPartialResults = true
-        self.request = req
-
-        let node = engine.inputNode
-        node.installTap(onBus: 0, bufferSize: 1024, format: node.outputFormat(forBus: 0)) { [weak self] buf, _ in
-            self?.request?.append(buf)
-            self?.updateLevel(buf)
-        }
-        do { try engine.start() } catch { stop(); return }
-        isListening = true
-
-        task = recognizer.recognitionTask(with: req) { [weak self] result, err in
+        // Activating the audio session + starting the engine blocks for tens of
+        // milliseconds; doing it on the main thread hitches the start-listening
+        // animation. Run it off-main and flip `isListening` back on the main queue.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            if let r = result {
-                DispatchQueue.main.async { self.transcript = r.bestTranscription.formattedString }
+            do {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.record, mode: .measurement, options: .duckOthers)
+                try session.setActive(true, options: .notifyOthersOnDeactivation)
+            } catch { return }
+
+            let req = SFSpeechAudioBufferRecognitionRequest()
+            req.shouldReportPartialResults = true
+
+            let node = self.engine.inputNode
+            node.installTap(onBus: 0, bufferSize: 1024, format: node.outputFormat(forBus: 0)) { [weak self] buf, _ in
+                req.append(buf)
+                self?.updateLevel(buf)
             }
-            if err != nil || result?.isFinal == true {
-                DispatchQueue.main.async { self.stop() }
+            do { try self.engine.start() } catch { self.stop(); return }
+
+            let task = recognizer.recognitionTask(with: req) { [weak self] result, err in
+                guard let self else { return }
+                if let r = result {
+                    DispatchQueue.main.async { self.transcript = r.bestTranscription.formattedString }
+                }
+                if err != nil || result?.isFinal == true {
+                    DispatchQueue.main.async { self.stop() }
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.request = req
+                self.task = task
+                self.isListening = true
             }
         }
     }

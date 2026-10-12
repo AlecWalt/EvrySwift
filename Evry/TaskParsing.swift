@@ -30,7 +30,7 @@ func isOverdueDate(_ date: Date?) -> Bool {
     return startOfDay(date) < startOfDay(Date())
 }
 
-// MARK: - Date category (drives chip color coding)
+// MARK: - Date category (drives chip weight and the overdue glyph)
 
 enum DateCategory {
     case overdue, today, tomorrow, week, nextweek, later
@@ -54,8 +54,6 @@ private let weekdayFormatter: DateFormatter = {
     f.dateFormat = "EEEE"
     return f
 }()
-
-private let iso8601Formatter = ISO8601DateFormatter()
 
 /// "Today", "Tomorrow", "Friday", "Next Friday", "Jan 15" — plus
 /// " at 3:00 PM" when the date carries a time component.
@@ -146,14 +144,15 @@ private func followingWeekday(_ target: Int) -> Date {
     addDays(thisWeekday(target), 7)
 }
 
-/// The upcoming Saturday — unless today is already the weekend (Saturday or
-/// Sunday), in which case it skips to the *following* weekend's Saturday.
+/// The upcoming Saturday. On Sunday, `thisWeekday(6)` already resolves to the
+/// approaching Saturday (6 days out), so no skip is needed. Only on Saturday —
+/// where the weekend is today — do we skip to the following weekend's Saturday.
 /// Shared by the typed "weekend"/"next weekend" keyword and the swipe-left
 /// schedule gesture so both entry points always agree.
 func nextWeekend() -> Date {
     let todayIdx = Calendar.current.component(.weekday, from: Date()) - 1 // 0=Sun … 6=Sat
-    var saturday = thisWeekday(6) // upcoming Saturday (could be today)
-    if todayIdx == 0 || todayIdx == 6 {
+    var saturday = thisWeekday(6) // upcoming Saturday (today if it's Saturday)
+    if todayIdx == 6 {
         saturday = addDays(saturday, 7)
     }
     return saturday
@@ -172,15 +171,14 @@ private func resolveMonthDay(_ month: String, _ day: Int) -> Date {
 }
 
 // Most-specific first — same ordering as the webapp's DATE_PATTERNS.
+// NOTE: "today", "tomorrow", and "(next) weekend" are intentionally NOT typed-
+// parse patterns. Those dates are set only through the swipe-to-schedule
+// gestures now, which resolve them directly in `resolveDateKeyword(_:)`. Leaving
+// them out here means typing those words keeps them verbatim in the task title.
 private let datePatterns: [DatePattern] = [
-    // "weekend" / "next weekend" — resolved by the shared nextWeekend() rule.
-    // Listed before "next week" so "next weekend" isn't shadowed.
-    DatePattern(regex: rx(#"\b(?:next\s+)?weekend\b"#)) { _ in nextWeekend() },
     DatePattern(regex: rx(#"\bnext\s+week\b"#)) { _ in addDays(Date(), 7) },
     DatePattern(regex: rx("\\bnext\\s+(\(weekdayWords))\\b")) { g in followingWeekday(weekdayIndex(g[1])) },
     DatePattern(regex: rx("\\bthis\\s+(\(weekdayWords))\\b")) { g in thisWeekday(weekdayIndex(g[1])) },
-    DatePattern(regex: rx(#"\b(?:tod|today)\b"#)) { _ in startOfDay(Date()) },
-    DatePattern(regex: rx(#"\b(?:tom|tmr|tomorrow)\b"#)) { _ in addDays(Date(), 1) },
     DatePattern(regex: rx("\\b(\(weekdayWords))\\b")) { g in nextWeekday(weekdayIndex(g[1])) },
     DatePattern(regex: rx("\\b(\(monthWords))\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b")) { g in
         resolveMonthDay(g[1], Int(g[2]) ?? 1)
@@ -262,6 +260,15 @@ private extension NSRegularExpression {
 /// This is the single source of truth for what a keyword means, so typed input
 /// and the swipe-to-schedule gestures never drift apart.
 func resolveDateKeyword(_ keyword: String) -> Date? {
+    // Today / Tomorrow / Next Weekend are set only via the swipe-to-schedule
+    // gestures now, so they're resolved here directly rather than as typed-parse
+    // patterns (see the note on `datePatterns`).
+    switch keyword.lowercased() {
+    case "today":        return startOfDay(Date())
+    case "tomorrow":     return addDays(Date(), 1)
+    case "next weekend": return nextWeekend()
+    default: break
+    }
     for pattern in datePatterns {
         if let m = pattern.regex.firstGroups(in: keyword) {
             return pattern.resolve(m.groups)
@@ -307,7 +314,16 @@ func parseTaskInput(_ raw: String) -> ParsedTask {
 
     if let time {
         let base = date ?? startOfDay(Date())
-        date = Calendar.current.date(bySettingHour: time.hours, minute: time.minutes, second: 0, of: base)
+        var resolved = Calendar.current.date(
+            bySettingHour: time.hours, minute: time.minutes, second: 0, of: base
+        ) ?? base
+        // A time given with no explicit date defaults to today — but if that time
+        // has already passed, roll it to the same time tomorrow. An explicit date
+        // (e.g. "friday 3pm") always wins and is never rolled forward.
+        if date == nil, resolved <= Date() {
+            resolved = Calendar.current.date(byAdding: .day, value: 1, to: resolved) ?? resolved
+        }
+        date = resolved
     }
 
     return ParsedTask(
@@ -323,42 +339,40 @@ func parseTaskInput(_ raw: String) -> ParsedTask {
 /// rendered by the text view itself (keeping the caret aligned) rather than a
 /// separate overlay.
 func attributedTaskInputNS(_ raw: String, palette: Palette, fontSize: CGFloat) -> NSAttributedString {
-    let base = UIFont.systemFont(ofSize: fontSize)
-    let semibold = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
+    // Nunito to match the rest of the app, falling back to the system font until
+    // the font files are bundled.
+    let base = UIFont(name: "Nunito-Regular", size: fontSize) ?? .systemFont(ofSize: fontSize)
+    let bold = UIFont(name: "Nunito-Bold", size: fontSize) ?? .systemFont(ofSize: fontSize, weight: .bold)
     let result = NSMutableAttributedString(
         string: raw,
         attributes: [.font: base, .foregroundColor: UIColor(palette.text)]
     )
 
-    func apply(_ swiftRange: Range<String.Index>, color: UIColor, background: UIColor? = nil) {
+    // Every recognised keyword reads the same way: bold ink on a sky-soft wash.
+    // The brand has no per-meaning hues, so tags, priorities, times and dates are
+    // told apart by their own words ("#family", "!high", "3pm"), not colour.
+    let ink = UIColor(palette.text)
+    let wash = UIColor(palette.skySoft)
+    func apply(_ swiftRange: Range<String.Index>) {
         let nr = NSRange(swiftRange, in: raw)
-        result.addAttribute(.foregroundColor, value: color, range: nr)
-        result.addAttribute(.font, value: semibold, range: nr)
-        if let background { result.addAttribute(.backgroundColor, value: background, range: nr) }
+        result.addAttributes([.foregroundColor: ink, .font: bold, .backgroundColor: wash], range: nr)
     }
 
-    for range in tagPattern.allRanges(in: raw) { apply(range, color: UIColor(palette.primary)) }
+    for range in tagPattern.allRanges(in: raw) { apply(range) }
 
-    for (regex, value) in priorityPatterns {
-        let color: UIColor
-        switch value {
-        case .high:   color = UIColor(Palette.danger)
-        case .medium: color = UIColor(Palette.warning)
-        case .low:    color = UIColor(Palette.success)
-        case .normal: color = UIColor(palette.text)
-        }
-        for range in regex.allRanges(in: raw) { apply(range, color: color) }
+    for (regex, _) in priorityPatterns {
+        for range in regex.allRanges(in: raw) { apply(range) }
     }
 
     for pattern in timePatterns {
         if let match = pattern.regex.allRanges(in: raw).first {
-            apply(match, color: UIColor(palette.primary), background: UIColor(palette.primaryLight))
+            apply(match)
             break
         }
     }
     for pattern in datePatterns {
         if let match = pattern.regex.allRanges(in: raw).first {
-            apply(match, color: UIColor(palette.primary), background: UIColor(palette.primaryLight))
+            apply(match)
             break
         }
     }

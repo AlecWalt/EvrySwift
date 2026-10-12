@@ -28,12 +28,23 @@ struct EvryApp: App {
     @State private var pomodoro = PomodoroModel()
     @State private var calendarService = CalendarService()
     @State private var tourCoordinator = TourCoordinator()
+    @State private var membershipRouter = MembershipRouter()
+
+    init() {
+        // Register the bundled Nunito font files so `.font(.nunito(...))` resolves.
+        AppFonts.register()
+        // Brand the system tab bar (sky-soft current tab, navy glyphs, Nunito labels).
+        EvryTabBarAppearance.apply()
+    }
 
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             TaskItem.self,
+            TaskGroup.self,
             Note.self,
             Folder.self,
+            Habit.self,
+            HabitEntry.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
@@ -62,6 +73,10 @@ struct EvryApp: App {
                 .environment(pomodoro)
                 .environment(calendarService)
                 .environment(tourCoordinator)
+                .environment(membershipRouter)
+                // The one ink colour: navy in light, sky in dark (== palette.primary).
+                // Nothing else in the app sets an accent.
+                .tint(Color(light: .evryNavy, dark: .evrySky))
                 .preferredColorScheme(appearance.preferredColorScheme)
         }
         .modelContainer(sharedModelContainer)

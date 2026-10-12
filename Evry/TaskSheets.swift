@@ -2,8 +2,10 @@
 //  TaskSheets.swift
 //  Evry
 //
-//  AddTaskSheet — the quick-add bottom sheet: natural-language title field
-//  with live parse chips, optional notes, fixed-amber submit button.
+//  AddTaskSheet — the quick-add bottom card: natural-language title field
+//  with live keyword highlighting, optional notes / checklist and location,
+//  swipe-to-schedule. Styled with the Evry tokens (white panel, navy ink,
+//  sky highlights) — meaning is carried by icons and words, never hue.
 //  EditTaskSheet — full task editor (title, notes, date, priority, repeat,
 //  tags, project, pin, subtasks) plus duplicate/snooze/delete actions.
 //
@@ -15,6 +17,13 @@ import SwiftData
 import UIKit
 
 // MARK: - Add sheet
+
+/// One editable row of the quick-add checklist (a draft subtask before save).
+private struct ChecklistDraftItem: Identifiable, Equatable {
+    let id = UUID()
+    var text: String = ""
+    var completed: Bool = false
+}
 
 struct AddTaskSheet: View {
     @Environment(\.modelContext) private var context
@@ -38,8 +47,23 @@ struct AddTaskSheet: View {
     @State private var locationSearchTask: Task<Void, Never>? = nil
     @State private var locationProvider = CurrentLocationProvider()
     @State private var titleFocused: Bool = false
+    // Drives a visible upward glide as the card (and keyboard) come in.
+    @State private var appeared = false
+    @State private var grabberLit = true
+    /// Brief dip-and-spring when a task is added with Return (the swipes move
+    /// the whole card; the keyboard button gets this subtle bounce instead).
+    @State private var returnBounce: CGFloat = 0
+    // Tap-and-hold the card to flag the new task high priority (a gesture-based
+    // alternative to typing "!high").
+    @State private var isHighPriority = false
+    // Checklist mode: the description turns from a free-text notes box into an
+    // editable checkbox list (saved as the task's subtasks) — good for e.g. a
+    // grocery list. Type an item, hit return to drop to the next checkbox.
+    @State private var listMode = false
+    @State private var listItems: [ChecklistDraftItem] = []
     @FocusState private var notesFocused: Bool
     @FocusState private var locationFocused: Bool
+    @FocusState private var focusedListItem: UUID?
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
     private var parsed: ParsedTask? { text.trimmingCharacters(in: .whitespaces).isEmpty ? nil : parseTaskInput(text) }
@@ -47,7 +71,7 @@ struct AddTaskSheet: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             // Transparent tap-catcher — the live app stays visible behind the card.
-            Color.black.opacity(0.001)
+            Color.evryNavy.opacity(0.001)
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture { closeSheet() }
@@ -64,15 +88,37 @@ struct AddTaskSheet: View {
             onDismiss: { closeSheet() }
         ) {
         VStack(spacing: 0) {
+            // Arrives lit in the accent as the swipe-up pill "lands" as this
+            // card's grabber, then settles to the neutral grabber color.
             Capsule()
-                .fill(palette.border)
-                .frame(width: 36, height: 4)
+                .fill(grabberLit ? palette.primary : palette.border)
+                .frame(width: grabberLit ? 56 : 36, height: 4)
+                .shadow(color: palette.primary.opacity(grabberLit ? 0.45 : 0), radius: 5)
                 .padding(.top, 10)
                 .padding(.bottom, 4)
 
+            if isHighPriority {
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.nunito(size: 12, weight: .bold))
+                        .accessibilityHidden(true)
+                    Text("High priority")
+                        .font(.evryCaption)
+                }
+                .foregroundStyle(palette.text)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(palette.skySoft, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.evrySky, lineWidth: 1))
+                .padding(.bottom, 6)
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
+
             HStack(spacing: 8) {
                 HighlightedTaskTextField(
-                    placeholder: "Add task… tod, #tag, !high",
+                    // Return files the task under today; typed dates like "fri"
+                    // or "next week" (or a swipe of the card) pick another day.
+                    placeholder: "Add task… fri, #tag, !high",
                     text: $text,
                     palette: palette,
                     autoFocus: true,
@@ -81,11 +127,10 @@ struct AddTaskSheet: View {
                 )
                 .padding(.horizontal, 16)
                 .padding(.vertical, 16)
-                .background(palette.hover, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 30, style: .continuous)
-                        .strokeBorder(titleFocused ? palette.primary : palette.border, lineWidth: 1.5)
-                )
+                // High priority thickens the ring (the badge above says why) —
+                // no red, the words and weight carry it.
+                .modifier(QuickAddFieldChrome(palette: palette, focused: titleFocused,
+                                              emphasised: isHighPriority))
 
                 if !showNotes {
                     Button {
@@ -94,13 +139,13 @@ struct AddTaskSheet: View {
                         }
                     } label: {
                         Image(systemName: "note.text")
-                            .font(.system(size: 15))
-                            .foregroundStyle(palette.textSec)
-                            .frame(width: 36, height: 36)
-                            .background(palette.hover, in: Circle())
-                            .overlay(Circle().strokeBorder(palette.border, lineWidth: 1.5))
+                            .font(.nunito(size: 16, weight: .semibold))
+                            .foregroundStyle(palette.text)
+                            .frame(width: EvrySpace.tap, height: EvrySpace.tap)
+                            .evryButtonFace(palette, in: Circle())
                     }
                     .buttonStyle(PressScaleStyle())
+                    .accessibilityLabel("Add notes")
                 }
 
                 if !showLocation {
@@ -111,19 +156,21 @@ struct AddTaskSheet: View {
                         locationQuery = location
                     } label: {
                         Image(systemName: location.isEmpty ? "mappin" : "mappin.circle.fill")
-                            .font(.system(size: 15))
-                            .foregroundStyle(location.isEmpty ? palette.textSec : palette.primary)
-                            .frame(width: 36, height: 36)
-                            .background(location.isEmpty ? palette.hover : palette.primaryLight, in: Circle())
-                            .overlay(Circle().strokeBorder(location.isEmpty ? palette.border : palette.primary.opacity(0.4), lineWidth: 1.5))
+                            .font(.nunito(size: 16, weight: .semibold))
+                            .foregroundStyle(palette.text)
+                            .frame(width: EvrySpace.tap, height: EvrySpace.tap)
+                            .evryButtonFace(palette, in: Circle())
                     }
                     .buttonStyle(PressScaleStyle())
+                    .accessibilityLabel(location.isEmpty ? "Add a location" : "Change location")
                 }
             }
             .animation(.spring(response: 0.25, dampingFraction: 0.8), value: parsed == nil)
             .padding(.horizontal, 14)
             .padding(.top, 10)
-            .padding(.bottom, parsed != nil || showNotes ? 0 : 16)
+            // Closing padding only when the title row is the last thing in the
+            // card, so every field-to-field gap is the same 8pt.
+            .padding(.bottom, parsed != nil || showNotes || showLocation || !location.isEmpty ? 0 : 16)
 
             if parsed != nil && !showNotes {
                 swipeHint
@@ -135,36 +182,86 @@ struct AddTaskSheet: View {
 
             if showNotes {
                 HStack(alignment: .top, spacing: 8) {
-                    TextField("Add notes…", text: $notes, axis: .vertical)
-                        .font(.system(size: 14))
-                        .foregroundStyle(palette.text)
-                        .lineLimit(3...6)
-                        .focused($notesFocused)
-                    // Collapse arrow, matching the location picker.
-                    Button {
-                        // Move focus back to the title so the keyboard stays up
-                        // instead of dismissing when the notes field is removed.
-                        titleFocused = true
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showNotes = false }
-                    } label: {
-                        Image(systemName: "chevron.up")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(palette.textSec)
-                            .frame(width: 28, height: 28)
-                            .background(palette.hover, in: Circle())
+                    // Content: free-text notes, or an editable checkbox list.
+                    if listMode {
+                        VStack(spacing: 8) {
+                            // Iterate values (not `$listItems`) and bind each field
+                            // by id — a binding-based ForEach can index-crash when the
+                            // array is cleared mid-fling on swipe-to-schedule.
+                            ForEach(listItems) { item in
+                                HStack(spacing: 10) {
+                                    Button {
+                                        toggleListItem(item.id)
+                                        UISelectionFeedbackGenerator().selectionChanged()
+                                    } label: {
+                                        doneGlyph(item.completed, palette: palette, size: 18)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(item.completed ? "Done" : "Not done")
+                                    // Multiline (axis) so Return inserts a newline
+                                    // and keeps the keyboard up; we intercept that
+                                    // newline to advance to the next checkbox.
+                                    TextField("List item…", text: listItemBinding(item.id), axis: .vertical)
+                                        .font(.nunito(size: 15))
+                                        .foregroundStyle(palette.text)
+                                        .focused($focusedListItem, equals: item.id)
+                                        .onChange(of: item.text) { _, newValue in
+                                            listReturn(id: item.id, text: newValue)
+                                        }
+                                }
+                                // New rows slide/fade in from the top as they're added.
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        TextField("Add notes…", text: $notes, axis: .vertical)
+                            .font(.nunito(size: 15))
+                            .foregroundStyle(palette.text)
+                            .lineLimit(3...6)
+                            .focused($notesFocused)
                     }
-                    .buttonStyle(.plain)
+
+                    // Trailing controls: turn into a checklist, and collapse.
+                    VStack(spacing: 6) {
+                        Button { toggleListMode() } label: {
+                            Image(systemName: listMode ? "text.alignleft" : "checklist")
+                                .font(.nunito(size: 12, weight: .bold))
+                                .foregroundStyle(palette.text)
+                                .frame(width: 28, height: 28)
+                                .background(listMode ? Palette.doneFill : palette.skySoft, in: Circle())
+                                .contentShape(Circle().inset(by: -8))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(listMode ? "Switch to notes" : "Switch to a checklist")
+
+                        // Collapse arrow, matching the location picker.
+                        Button {
+                            // Move focus back to the title so the keyboard stays up
+                            // instead of dismissing when the field is removed.
+                            titleFocused = true
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showNotes = false }
+                        } label: {
+                            Image(systemName: "chevron.up")
+                                .font(.nunito(size: 12, weight: .bold))
+                                .foregroundStyle(palette.text)
+                                .frame(width: 28, height: 28)
+                                .background(palette.skySoft, in: Circle())
+                                .contentShape(Circle().inset(by: -8))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Hide notes")
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(palette.hover, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .strokeBorder(notesFocused ? palette.primary : palette.border, lineWidth: 1.5)
-                )
+                .modifier(QuickAddFieldChrome(palette: palette,
+                                              focused: notesFocused || focusedListItem != nil))
                 .padding(.horizontal, 14)
                 .padding(.top, 8)
-                .padding(.bottom, location.isEmpty ? 16 : 0)
+                // Closing padding only when nothing follows — with the location
+                // field/chip below, the 8pt gap matches Title → Description.
+                .padding(.bottom, location.isEmpty && !showLocation ? 16 : 0)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
@@ -172,10 +269,11 @@ struct AddTaskSheet: View {
                 VStack(spacing: 8) {
                     HStack(spacing: 8) {
                         Image(systemName: "mappin.circle.fill")
-                            .font(.system(size: 15))
-                            .foregroundStyle(palette.primary)
-                        TextField("Search location…", text: $locationQuery)
-                            .font(.system(size: 15))
+                            .font(.nunito(size: 15))
+                            .foregroundStyle(palette.text)
+                            .accessibilityHidden(true)
+                        TextField("Search for a place…", text: $locationQuery)
+                            .font(.evryBody)
                             .foregroundStyle(palette.text)
                             .focused($locationFocused)
                             .autocorrectionDisabled()
@@ -186,10 +284,12 @@ struct AddTaskSheet: View {
                                 locationResults = []
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 15))
-                                    .foregroundStyle(palette.textPh)
+                                    .font(.nunito(size: 15))
+                                    .foregroundStyle(palette.textMuted)
+                                    .contentShape(Circle().inset(by: -10))
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Clear search")
                         }
                         Button {
                             // Move focus back to the title so the keyboard stays up
@@ -198,20 +298,18 @@ struct AddTaskSheet: View {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showLocation = false }
                         } label: {
                             Image(systemName: "chevron.up")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(palette.textSec)
+                                .font(.nunito(size: 12, weight: .bold))
+                                .foregroundStyle(palette.text)
                                 .frame(width: 28, height: 28)
-                                .background(palette.hover, in: Circle())
+                                .background(palette.skySoft, in: Circle())
+                                .contentShape(Circle().inset(by: -8))
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Hide location search")
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(palette.hover, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 24, style: .continuous)
-                            .strokeBorder(locationFocused ? palette.primary : palette.border, lineWidth: 1.5)
-                    )
+                    .modifier(QuickAddFieldChrome(palette: palette, focused: locationFocused))
 
                     if !locationResults.isEmpty {
                         VStack(spacing: 0) {
@@ -222,20 +320,21 @@ struct AddTaskSheet: View {
                                 } label: {
                                     HStack(spacing: 12) {
                                         ZStack {
-                                            Circle().fill(palette.primaryLight).frame(width: 32, height: 32)
-                                            Image(systemName: "mappin.circle.fill")
-                                                .font(.system(size: 15))
-                                                .foregroundStyle(palette.primary)
+                                            Circle().fill(palette.skySoft).frame(width: 32, height: 32)
+                                            Image(systemName: "mappin")
+                                                .font(.nunito(size: 14, weight: .bold))
+                                                .foregroundStyle(palette.text)
                                         }
+                                        .accessibilityHidden(true)
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(item.name ?? "Unknown")
-                                                .font(.system(size: 14, weight: .medium))
+                                            Text(item.name ?? "Unnamed place")
+                                                .font(.nunito(size: 15, weight: .semibold))
                                                 .foregroundStyle(palette.text)
                                                 .lineLimit(1)
                                             let subtitle = mapItemSubtitle(item)
                                             if !subtitle.isEmpty {
                                                 Text(subtitle)
-                                                    .font(.system(size: 12))
+                                                    .font(.nunito(size: 12))
                                                     .foregroundStyle(palette.textSec)
                                                     .lineLimit(1)
                                             }
@@ -244,16 +343,17 @@ struct AddTaskSheet: View {
                                     }
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 9)
+                                    .frame(minHeight: EvrySpace.tap)
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 if i < shown.count - 1 {
-                                    Divider().padding(.leading, 56)
+                                    Rectangle().fill(palette.border).frame(height: 1).padding(.leading, 56)
                                 }
                             }
                         }
-                        .background(palette.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+                        .evryField(palette, cornerRadius: EvryRadius.field)
+                        .clipShape(RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
                     }
                 }
                 .padding(.horizontal, 14)
@@ -265,10 +365,11 @@ struct AddTaskSheet: View {
             if !location.isEmpty && !showLocation {
                 HStack(spacing: 6) {
                     Image(systemName: "mappin.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundStyle(palette.primary)
+                        .font(.nunito(size: 13))
+                        .foregroundStyle(palette.text)
+                        .accessibilityHidden(true)
                     Text(location)
-                        .font(.system(size: 13))
+                        .font(.nunito(size: 14, weight: .semibold))
                         .foregroundStyle(palette.text)
                         .lineLimit(1)
                     Spacer(minLength: 0)
@@ -276,16 +377,19 @@ struct AddTaskSheet: View {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { location = "" }
                     } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(palette.textSec)
-                            .padding(5)
-                            .background(palette.hover, in: Circle())
+                            .font(.nunito(size: 10, weight: .bold))
+                            .foregroundStyle(palette.text)
+                            .frame(width: 22, height: 22)
+                            .background(palette.card, in: Circle())
+                            .contentShape(Circle().inset(by: -11))
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Remove location")
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
-                .background(palette.primaryLight, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(palette.primary.opacity(0.3), lineWidth: 1))
+                .background(palette.skySoft, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.evrySky, lineWidth: 1))
                 .padding(.horizontal, 14)
                 .padding(.top, 8)
                 .padding(.bottom, 16)
@@ -296,19 +400,32 @@ struct AddTaskSheet: View {
         }
         // Card background lives inside the swipe surface so the whole card
         // (not just its contents) travels when flung.
-        .background(palette.card, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+        .background(palette.card, in: RoundedRectangle(cornerRadius: EvryRadius.panel, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: EvryRadius.panel, style: .continuous)
+            .strokeBorder(palette.hairline, lineWidth: 1))
+        .contentShape(RoundedRectangle(cornerRadius: EvryRadius.panel, style: .continuous))
+        // Tap-and-hold anywhere on the card to toggle high priority.
+        .onLongPressGesture(minimumDuration: 0.35) {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                isHighPriority.toggle()
+            }
+        }
         .padding(.horizontal, 10)
         .padding(.bottom, 10)
-        .shadow(color: .black.opacity(0.16), radius: 22, y: 8)
-        // App-colored backing that bleeds straight down behind the keyboard so
-        // that region reads as the normal app background instead of the black
-        // window. Kept inside the swipe surface (with the card) so it travels
-        // with the card during a fling/reentry rather than being left behind.
-        .background(palette.bg.ignoresSafeArea())
+        .evryShadowLift(palette)
         } // ScheduleSwipeCard
         // Resolve the card at its ideal (compact) height so the text view sizes to
         // its content instead of filling the whole overlay.
         .fixedSize(horizontal: false, vertical: true)
+        // Grows up out of the swipe-up pill: rises and scales from the bottom
+        // edge with a touch of overshoot, timed with the keyboard rising.
+        .scaleEffect(x: appeared ? 1 : 0.82, y: appeared ? 1 : 0.6, anchor: .bottom)
+        .offset(y: appeared ? 0 : 70)
+        .opacity(appeared ? 1 : 0)
+        // Return-to-add bounce.
+        .scaleEffect(1 - returnBounce * 0.004, anchor: .bottom)
+        .offset(y: returnBounce)
         } // ZStack
         .onAppear {
             // Explicitly claim first responder on every presentation. `autoFocus`
@@ -317,6 +434,11 @@ struct AddTaskSheet: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 titleFocused = true
             }
+            // Spring the card up as it appears (and the keyboard rises with it).
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.72)) {
+                appeared = true
+            }
+            withAnimation(.easeInOut(duration: 0.45).delay(0.35)) { grabberLit = false }
         }
         .onChange(of: showNotes) { _, newValue in
             if newValue {
@@ -324,6 +446,11 @@ struct AddTaskSheet: View {
                     notesFocused = true
                 }
             }
+        }
+        // Leaving the checklist (e.g. tapping into the title or location field)
+        // drops the blank row(s) left at the end of the list.
+        .onChange(of: focusedListItem) { _, focused in
+            if focused == nil && listMode { trimTrailingEmptyListItems() }
         }
         .onChange(of: showLocation) { _, newValue in
             if newValue {
@@ -375,25 +502,33 @@ struct AddTaskSheet: View {
 
     // Compact legend teaching the swipe-to-schedule directions.
     private var swipeHint: some View {
-        HStack(spacing: 14) {
+        // Directions are told apart by their arrows and words, not colour.
+        HStack(spacing: 10) {
             Text("Swipe to schedule")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(palette.textPh)
+                .font(.nunito(size: 12, weight: .semibold))
+                .foregroundStyle(palette.textMuted)
+                .lineLimit(1)
             Spacer(minLength: 0)
-            swipeHintItem(icon: "arrow.up", label: "Today", color: palette.primary)
-            swipeHintItem(icon: "arrow.right", label: "Tmrw", color: Palette.success)
-            swipeHintItem(icon: "arrow.left", label: "Wknd", color: Color(hex: 0x8B5CF6))
+            swipeHintItem(icon: "arrow.up", label: "Today")
+            swipeHintItem(icon: "arrow.right", label: "Tomorrow")
+            swipeHintItem(icon: "arrow.left", label: "Weekend")
         }
+        .minimumScaleFactor(0.85)
     }
 
-    private func swipeHintItem(icon: String, label: String, color: Color) -> some View {
+    private func swipeHintItem(icon: String, label: String) -> some View {
         HStack(spacing: 3) {
             Image(systemName: icon)
-                .font(.system(size: 9, weight: .bold))
+                .font(.nunito(size: 10, weight: .bold))
+                .accessibilityHidden(true)
             Text(label)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.evryCaption)
+                .lineLimit(1)
         }
-        .foregroundStyle(color)
+        .foregroundStyle(palette.text)
+        .fixedSize()
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Swipe \(icon == "arrow.up" ? "up" : icon == "arrow.right" ? "right" : "left") for \(label.lowercased())")
     }
 
     /// Closes the overlay, dismissing the keyboard immediately so it animates
@@ -403,6 +538,86 @@ struct AddTaskSheet: View {
         isPresented = false
     }
 
+    /// Toggles the description between free-text notes and a checkbox list,
+    /// carrying the content across so switching never loses what was typed.
+    private func toggleListMode() {
+        if !listMode {
+            // Seed the list from any existing notes lines, plus a trailing empty
+            // row ready for the next item.
+            let lines = notes
+                .split(whereSeparator: { $0 == "\n" })
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            listItems = lines.map { ChecklistDraftItem(text: $0) } + [ChecklistDraftItem()]
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { listMode = true }
+            let target = listItems.last?.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { focusedListItem = target }
+        } else {
+            // Fold the list back into notes (one item per line).
+            notes = listItems
+                .map { $0.text.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { listMode = false }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { notesFocused = true }
+        }
+    }
+
+    /// Removes empty rows from the end of the checklist, keeping one row if the
+    /// list would otherwise be left with none.
+    private func trimTrailingEmptyListItems() {
+        var trimmed = listItems
+        while trimmed.count > 1,
+              let last = trimmed.last,
+              last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            trimmed.removeLast()
+        }
+        guard trimmed.count != listItems.count else { return }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { listItems = trimmed }
+    }
+
+    /// Safe id-based binding to a list item's text (returns "" if the row was
+    /// removed), so the field never reads a stale index during teardown.
+    private func listItemBinding(_ id: UUID) -> Binding<String> {
+        Binding(
+            get: { listItems.first(where: { $0.id == id })?.text ?? "" },
+            set: { newValue in
+                if let i = listItems.firstIndex(where: { $0.id == id }) {
+                    listItems[i].text = newValue
+                }
+            }
+        )
+    }
+
+    private func toggleListItem(_ id: UUID) {
+        if let i = listItems.firstIndex(where: { $0.id == id }) {
+            listItems[i].completed.toggle()
+        }
+    }
+
+    /// A newline typed in a list row means "next checkbox". Because the field is
+    /// multiline, the keyboard never resigns — we just split off the new row and
+    /// move focus to it (any text after the caret carries into the new item).
+    private func listReturn(id: UUID, text: String) {
+        guard text.contains("\n"), let idx = listItems.firstIndex(where: { $0.id == id }) else { return }
+        let comps = text.components(separatedBy: "\n")
+        let head = comps[0]
+        let tail = comps.dropFirst().joined(separator: "\n")
+        // Return on an already-empty row: just strip the newline, don't add a row.
+        if head.trimmingCharacters(in: .whitespaces).isEmpty && tail.isEmpty {
+            listItems[idx].text = ""
+            return
+        }
+        let newItem = ChecklistDraftItem(text: tail)
+        // Animate the row sliding in and the container growing to fit it. Focus
+        // moves in the same update so the keyboard stays put.
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+            listItems[idx].text = head
+            listItems.insert(newItem, at: idx + 1)
+        }
+        focusedListItem = newItem.id
+    }
+
     /// `overrideDate` is supplied by the swipe-to-schedule gesture and wins over
     /// any date parsed from the typed keywords.
     private func submit(overrideDate: Date? = nil) {
@@ -410,25 +625,52 @@ struct AddTaskSheet: View {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         let task = TaskItem(
             title: parsed.title,
-            dueDate: overrideDate ?? parsed.date ?? defaultDate,
+            // Return with no typed date lands on today.
+            dueDate: overrideDate ?? parsed.date ?? defaultDate ?? startOfDay(Date()),
             tags: parsed.tags,
-            priority: parsed.priority,
-            notes: notes.trimmingCharacters(in: .whitespacesAndNewlines),
+            // A long-press high-priority flag wins over the parsed priority.
+            priority: isHighPriority ? .high : parsed.priority,
+            // In list mode the description lives in subtasks, not the notes field.
+            notes: listMode ? "" : notes.trimmingCharacters(in: .whitespacesAndNewlines),
             location: location
         )
+        if listMode {
+            task.subtasks = listItems.compactMap {
+                let t = $0.text.trimmingCharacters(in: .whitespaces)
+                return t.isEmpty ? nil : SubtaskData(title: t, completed: $0.completed)
+            }
+        }
         withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) {
             context.insert(task)
         }
         NotificationService.schedule(task)
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+        // Move first responder straight to the title field FIRST so the keyboard
+        // never drops — otherwise, in list mode, collapsing the checklist section
+        // resigns its field and the keyboard closes while the card stays up.
+        text = ""
+        notes = ""
+        location = ""
+        titleFocused = true
+        let resetForm = {
             showNotes = false
+            listMode = false
+            isHighPriority = false
         }
-        DispatchQueue.main.async {
-            text = ""
-            notes = ""
-            location = ""
-            titleFocused = true
+        if overrideDate != nil {
+            // Swiped away — the card is off-screen, so reset instantly. An
+            // animated reset here would drag the fields across the screen as the
+            // fresh card rises from the bottom.
+            var instant = Transaction()
+            instant.disablesAnimations = true
+            withTransaction(instant, resetForm)
+        } else {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85), resetForm)
+            // Added with Return: the card stays put, so give it a subtle
+            // dip-and-spring to confirm the add.
+            withAnimation(.spring(response: 0.12, dampingFraction: 0.7)) { returnBounce = 6 }
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.45).delay(0.1)) { returnBounce = 0 }
         }
+        listItems = []
     }
 }
 
@@ -443,9 +685,9 @@ struct EditTaskSheet: View {
     @Bindable var task: TaskItem
     var onDelete: (TaskItem) -> Void
 
-    @State private var hasDate: Bool = false
     @State private var newSubtask = ""
     @State private var tagsText = ""
+    @FocusState private var subtaskFieldFocused: Bool
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
@@ -454,35 +696,35 @@ struct EditTaskSheet: View {
             Form {
                 Section {
                     TextField("Title", text: $task.title, axis: .vertical)
-                        .font(.system(size: 16.5))
+                        .font(.evryTitle)
                     TextField("Notes", text: $task.notes, axis: .vertical)
-                        .font(.system(size: 14))
+                        .font(.evryBody)
+                        .foregroundStyle(palette.textSec)
                         .lineLimit(2...8)
                 }
+                .listRowBackground(palette.card)
 
                 if !task.isNote {
                     Section {
-                        Toggle("Due date", isOn: $hasDate.animation())
-                            .tint(palette.primary)
-                        if hasDate {
-                            DatePicker(
-                                "Date",
-                                selection: Binding(
-                                    get: { task.dueDate ?? startOfDay(Date()) },
-                                    set: { task.dueDate = $0 }
-                                )
+                        // Every task has a due date, so there's no "no date" option.
+                        DatePicker(
+                            "Due date",
+                            selection: Binding(
+                                get: { task.dueDate ?? startOfDay(Date()) },
+                                set: { task.dueDate = $0 }
                             )
-                            Picker("Repeat", selection: Binding(
-                                get: { task.recurrence },
-                                set: { task.recurrence = $0 }
-                            )) {
-                                Text("Never").tag(RecurrenceFreq?.none)
-                                ForEach(RecurrenceFreq.allCases) { freq in
-                                    Text(freq.label).tag(RecurrenceFreq?.some(freq))
-                                }
+                        )
+                        Picker("Repeat", selection: Binding(
+                            get: { task.recurrence },
+                            set: { task.recurrence = $0 }
+                        )) {
+                            Text("Never").tag(RecurrenceFreq?.none)
+                            ForEach(RecurrenceFreq.allCases) { freq in
+                                Text(freq.label).tag(RecurrenceFreq?.some(freq))
                             }
                         }
                     }
+                    .listRowBackground(palette.card)
 
                     Section {
                         Picker("Priority", selection: Binding(
@@ -495,7 +737,7 @@ struct EditTaskSheet: View {
                         }
                         .pickerStyle(.segmented)
 
-                        TextField("Tags (comma separated)", text: $tagsText)
+                        TextField("Tags, separated by commas", text: $tagsText)
                             .autocorrectionDisabled()
                             #if !os(macOS)
                             .textInputAutocapitalization(.never)
@@ -510,17 +752,18 @@ struct EditTaskSheet: View {
                         Toggle("Pinned", isOn: $task.pinned)
                             .tint(palette.primary)
                     }
+                    .listRowBackground(palette.card)
 
-                    Section("Subtasks") {
+                    Section {
                         ForEach(task.subtasks) { subtask in
                             HStack {
                                 Button {
                                     setSubtask(subtask, completed: !subtask.completed)
                                 } label: {
-                                    Image(systemName: subtask.completed ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(subtask.completed ? Palette.success : palette.border)
+                                    doneGlyph(subtask.completed, palette: palette, size: 20)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel(subtask.completed ? "Done" : "Not done")
                                 Text(subtask.title)
                                     .strikethrough(subtask.completed, color: palette.textPh)
                                     .foregroundStyle(subtask.completed ? palette.textSec : palette.text)
@@ -532,14 +775,25 @@ struct EditTaskSheet: View {
 
                         HStack {
                             TextField("Add subtask…", text: $newSubtask)
+                                .focused($subtaskFieldFocused)
+                                .submitLabel(.next)
+                                // Return commits the subtask and keeps the field
+                                // focused so the next one can be typed right away.
                                 .onSubmit(addSubtask)
-                            Button(action: addSubtask) {
+                            // The plus just opens/focuses the field, same as tapping it.
+                            Button { subtaskFieldFocused = true } label: {
                                 Image(systemName: "plus.circle.fill")
                                     .foregroundStyle(palette.primary)
                             }
-                            .disabled(newSubtask.trimmingCharacters(in: .whitespaces).isEmpty)
+                            .accessibilityLabel("Add subtask")
                         }
+                    } header: {
+                        Text("Subtasks")
+                            .font(.evrySmall)
+                            .foregroundStyle(palette.textSec)
+                            .textCase(nil)
                     }
+                    .listRowBackground(palette.card)
 
                     Section {
                         Button {
@@ -560,35 +814,31 @@ struct EditTaskSheet: View {
                             dismiss()
                             onDelete(task)
                         } label: {
-                            Label("Delete", systemImage: "trash")
+                            Label("Delete task", systemImage: "trash")
                         }
                     }
+                    .listRowBackground(palette.card)
                 }
             }
-            .navigationTitle("Edit Task")
+            .font(.evryBody)
+            .foregroundStyle(palette.text)
+            .scrollContentBackground(.hidden)
+            .background(palette.bg)
+            .navigationTitle("Edit task")
             #if !os(macOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
-                        .fontWeight(.semibold)
+                        .font(.evryLabel)
                 }
             }
         }
         .tint(palette.primary)
         .onAppear {
-            hasDate = task.dueDate != nil
+            if task.dueDate == nil { task.dueDate = startOfDay(Date()) }
             tagsText = task.tags.joined(separator: ", ")
-        }
-        .onChange(of: hasDate) {
-            if !hasDate {
-                task.dueDate = nil
-                task.recurrence = nil
-            } else if task.dueDate == nil {
-                task.dueDate = startOfDay(Date())
-            }
-            NotificationService.schedule(task)
         }
         .onChange(of: task.dueDate) {
             NotificationService.schedule(task)
@@ -606,6 +856,48 @@ struct EditTaskSheet: View {
         guard !title.isEmpty else { return }
         task.subtasks.append(SubtaskData(title: title))
         newSubtask = ""
+        // Keep the keyboard up and the field active so the user can immediately
+        // type another subtask.
+        subtaskFieldFocused = true
+    }
+}
+
+// MARK: - Shared sheet chrome (private to this file)
+
+/// FormField chrome for the quick-add fields: white fill, 1.5pt navy-20 border
+/// that turns full navy when focused, radius-card corners (these fields grow to
+/// several lines, so they take the card radius rather than the 16pt field one).
+/// `emphasised` (high priority) thickens the ring instead of tinting it.
+private struct QuickAddFieldChrome: ViewModifier {
+    let palette: Palette
+    var focused: Bool
+    var emphasised = false
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous)
+        content
+            .background(palette.card, in: shape)
+            .overlay(
+                shape.strokeBorder(
+                    focused || emphasised ? palette.text : (palette.dark ? Color.evryWhite35 : .evryNavy20),
+                    lineWidth: emphasised ? 2.5 : 1.5)
+            )
+    }
+}
+
+/// The done/not-done glyph for checklist rows: the sky check disc with a navy
+/// tick when done, a navy-60 ring when not.
+@ViewBuilder
+private func doneGlyph(_ done: Bool, palette: Palette, size: CGFloat) -> some View {
+    if done {
+        Image(systemName: "checkmark.circle.fill")
+            .font(.nunito(size: size))
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(palette.onSky, Palette.doneFill)
+    } else {
+        Image(systemName: "circle")
+            .font(.nunito(size: size))
+            .foregroundStyle(palette.textPh)
     }
 }
 
@@ -648,14 +940,15 @@ struct LocationPickerSheet: View {
                     HStack(spacing: 14) {
                         ZStack {
                             Circle()
-                                .fill(palette.primaryLight)
+                                .fill(palette.skySoft)
                                 .frame(width: 38, height: 38)
-                            Image(systemName: "mappin.circle.fill")
-                                .font(.system(size: 18))
-                                .foregroundStyle(palette.primary)
+                            Image(systemName: "mappin")
+                                .font(.nunito(size: 16, weight: .bold))
+                                .foregroundStyle(palette.text)
                         }
+                        .accessibilityHidden(true)
                         Text("Search for a place or address")
-                            .font(.system(size: 15))
+                            .font(.evryBody)
                             .foregroundStyle(palette.textSec)
                     }
                     .listRowBackground(Color.clear)
@@ -664,14 +957,15 @@ struct LocationPickerSheet: View {
                     HStack(spacing: 14) {
                         ZStack {
                             Circle()
-                                .fill(palette.hover)
+                                .fill(palette.skySoft)
                                 .frame(width: 38, height: 38)
                             Image(systemName: "magnifyingglass")
-                                .font(.system(size: 16))
-                                .foregroundStyle(palette.textSec)
+                                .font(.nunito(size: 16, weight: .bold))
+                                .foregroundStyle(palette.text)
                         }
-                        Text("No results for \"\(query)\"")
-                            .font(.system(size: 15))
+                        .accessibilityHidden(true)
+                        Text("Nothing matches “\(query)” yet. Try a different name or address.")
+                            .font(.evryBody)
                             .foregroundStyle(palette.textSec)
                     }
                     .listRowBackground(Color.clear)
@@ -685,20 +979,21 @@ struct LocationPickerSheet: View {
                             HStack(spacing: 14) {
                                 ZStack {
                                     Circle()
-                                        .fill(palette.primaryLight)
+                                        .fill(palette.skySoft)
                                         .frame(width: 38, height: 38)
-                                    Image(systemName: "mappin.circle.fill")
-                                        .font(.system(size: 17))
-                                        .foregroundStyle(palette.primary)
+                                    Image(systemName: "mappin")
+                                        .font(.nunito(size: 16, weight: .bold))
+                                        .foregroundStyle(palette.text)
                                 }
+                                .accessibilityHidden(true)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(item.name ?? "Unknown")
-                                        .font(.system(size: 15, weight: .medium))
+                                    Text(item.name ?? "Unnamed place")
+                                        .font(.nunito(size: 16, weight: .semibold))
                                         .foregroundStyle(palette.text)
                                     let subtitle = mapItemSubtitle(item)
                                     if !subtitle.isEmpty {
                                         Text(subtitle)
-                                            .font(.system(size: 12))
+                                            .font(.nunito(size: 12))
                                             .foregroundStyle(palette.textSec)
                                             .lineLimit(1)
                                     }
@@ -713,9 +1008,11 @@ struct LocationPickerSheet: View {
                 }
             }
             .listStyle(.plain)
-            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search location…")
+            .scrollContentBackground(.hidden)
+            .background(palette.bg)
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search for a place…")
             .onChange(of: query) { _, new in scheduleSearch(new) }
-            .navigationTitle("Add Location")
+            .navigationTitle("Add a location")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

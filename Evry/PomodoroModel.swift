@@ -12,14 +12,29 @@ import Foundation
 import Observation
 import UIKit
 
+/// Per-day focus minutes, accumulated as work sessions complete. Read by the
+/// daily recap. Keyed by calendar day; old entries are cheap to leave in place.
+enum FocusLog {
+    private static func key(_ date: Date) -> String {
+        "focus_min_" + AccomplishmentsStore.dateKey(date)
+    }
+    static func add(minutes: Int, on date: Date = Date()) {
+        let k = key(date)
+        UserDefaults.standard.set(UserDefaults.standard.integer(forKey: k) + minutes, forKey: k)
+    }
+    static func minutes(on date: Date) -> Int {
+        UserDefaults.standard.integer(forKey: key(date))
+    }
+}
+
 enum PomodoroPhase: String, Codable {
     case work, shortBreak, longBreak
 
     var label: String {
         switch self {
         case .work: "Focus"
-        case .shortBreak: "Short Break"
-        case .longBreak: "Long Break"
+        case .shortBreak: "Short break"
+        case .longBreak: "Long break"
         }
     }
 
@@ -27,8 +42,8 @@ enum PomodoroPhase: String, Codable {
     var statusLabel: String {
         switch self {
         case .work: "Focusing"
-        case .shortBreak: "Short Break"
-        case .longBreak: "Long Break"
+        case .shortBreak: "Short break"
+        case .longBreak: "Long break"
         }
     }
 }
@@ -45,8 +60,8 @@ struct PomodoroPreset: Identifiable, Equatable {
 
     static let all: [PomodoroPreset] = [
         PomodoroPreset(key: "classic", label: "Classic",     workMin: 25, shortBreakMin: 5,  longBreakMin: 15, sessionsUntilLongBreak: 4),
-        PomodoroPreset(key: "short",   label: "Short Focus", workMin: 15, shortBreakMin: 5,  longBreakMin: 10, sessionsUntilLongBreak: 4),
-        PomodoroPreset(key: "deep",    label: "Deep Work",   workMin: 45, shortBreakMin: 15, longBreakMin: 30, sessionsUntilLongBreak: 2),
+        PomodoroPreset(key: "short",   label: "Short focus", workMin: 15, shortBreakMin: 5,  longBreakMin: 10, sessionsUntilLongBreak: 4),
+        PomodoroPreset(key: "deep",    label: "Deep work",   workMin: 45, shortBreakMin: 15, longBreakMin: 30, sessionsUntilLongBreak: 2),
     ]
 
     static func byKey(_ key: String) -> PomodoroPreset {
@@ -87,6 +102,8 @@ final class PomodoroModel {
     @ObservationIgnored private var timer: Timer?
 
     private static let storageKey = "pomodoro_state_v1"
+    private static let encoder = JSONEncoder()
+    private static let decoder = JSONDecoder()
 
     init() {
         load()
@@ -179,6 +196,8 @@ final class PomodoroModel {
     private func advancePhase() -> Bool {
         if phase == .work {
             completedSessions += 1
+            // Log the just-finished focus block for the daily recap.
+            FocusLog.add(minutes: preset.workMin)
             if targetSessions > 0 && completedSessions >= targetSessions {
                 running = false
                 phaseEndAt = nil
@@ -239,14 +258,14 @@ final class PomodoroModel {
             completedSessions: completedSessions,
             targetSessions: targetSessions
         )
-        if let data = try? JSONEncoder().encode(snapshot) {
+        if let data = try? Self.encoder.encode(snapshot) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)
         }
     }
 
     private func load() {
         guard let data = UserDefaults.standard.data(forKey: Self.storageKey),
-              let snapshot = try? JSONDecoder().decode(PomodoroSnapshot.self, from: data) else { return }
+              let snapshot = try? Self.decoder.decode(PomodoroSnapshot.self, from: data) else { return }
         preset = PomodoroPreset.byKey(snapshot.presetKey)
         phase = snapshot.phase
         running = snapshot.running

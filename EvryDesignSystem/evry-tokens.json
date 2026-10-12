@@ -1,0 +1,161 @@
+{
+  "name": "Evry",
+  "version": 1,
+  "meta": {
+    "source": "github",
+    "repo": "AlecWalt/EvrySite",
+    "ref": "claude/design-system-extraction-s9vtmh@50845df",
+    "package": ".",
+    "paths": {
+      "tokens": ["app/globals.css"],
+      "fonts": ["app/layout.tsx"],
+      "assets": ["public/mascot/plain-icon.png", "public/mascot/evry.png", "assets/evry-mascot.png", "app/icon.png", "app/apple-icon.png", "components/ui/ToolIcon.tsx", "components/ui/primitives.tsx"],
+      "docs": ["README.md", "scripts/check-terms.mjs"]
+    },
+    "components": {
+      "Button": "app/globals.css (.btn), components/ui/primitives.tsx (ButtonLink)",
+      "StoreButtons": "components/ui/StoreButtons.tsx",
+      "Card": "app/globals.css (.card, .card-hover)",
+      "Section": "components/ui/primitives.tsx (Section)",
+      "Eyebrow": "components/ui/primitives.tsx (Eyebrow)",
+      "SectionHeading": "components/ui/primitives.tsx (SectionHeading)",
+      "TextLink": "app/globals.css (.link)",
+      "Bullet": "components/ui/primitives.tsx (Bullet), app/globals.css (.prose-evry ul)",
+      "Check": "components/ui/primitives.tsx (Check)",
+      "PlaceholderTag": "components/ui/primitives.tsx (PlaceholderTag)",
+      "ToolIcon": "components/ui/ToolIcon.tsx",
+      "EvryBubble": "components/mascot/EvryBubble.tsx",
+      "FaqList": "components/sections/FaqList.tsx",
+      "FormField": "components/sections/ContactForm.tsx",
+      "PricingTier": "components/sections/PricingTiers.tsx",
+      "CtaBand": "components/sections/CtaBand.tsx",
+      "Logo": "components/layout/Logo.tsx",
+      "Mascot": "components/mascot/Mascot.tsx"
+    },
+    "synced": "2026-10-11"
+  },
+  "color": {
+    "themes": [{ "id": "light", "name": "Light" }],
+    "tokens": [
+      { "name": "white", "value": "#ffffff", "usage": "The 60 of the 60-30-10 palette: page backgrounds, cards, form fields. Also the label colour on navy fills." },
+      { "name": "sky", "value": "#b0e6ff", "usage": "The 30: alternating sections, highlights, bullets, check discs, the featured-plan badge and the button on navy. Never text on white (1.35:1); navy on sky reads at 11.7:1." },
+      { "name": "navy", "value": "#162339", "usage": "The 10: all text, primary buttons, the footer and CTA band, key icons, the focus ring. 15.7:1 on white, 11.7:1 on sky." },
+      { "name": "sky-soft", "value": "#e3f6ff", "usage": "Resolved from color-mix(in srgb, sky 35%, white). Hover fill for secondary buttons, eyebrow pills, Evry's speech bubble, the FAQ plus disc." },
+      { "name": "sky-mist", "value": "#f1fbff", "usage": "Resolved from color-mix(in srgb, sky 18%, white). The faintest tint: the 'mist' section tone, FAQ summary hover, the suggestion panel in the hero mockup." },
+      { "name": "navy-soft", "value": "#283a51", "usage": "Resolved from color-mix(in srgb, navy 88%, sky). Primary button hover only." },
+      { "name": "navy-80", "value": "rgba(22, 35, 57, 0.8)", "usage": "Secondary copy: lead paragraphs, card body, FAQ answers. 8.3:1 on white, 6.8:1 on sky." },
+      { "name": "navy-75", "value": "rgba(22, 35, 57, 0.75)", "usage": "The lightest text allowed: captions, price periods, '(optional)' hints. 7.0:1 on white, 5.9:1 on sky. Never go lighter for text." },
+      { "name": "navy-60", "value": "rgba(22, 35, 57, 0.6)", "usage": "Form placeholder text only. 4.27:1 on white: below AA 4.5:1 as the source has it; flagged, keep placeholders as hints and never as the only label." },
+      { "name": "navy-40", "value": "rgba(22, 35, 57, 0.4)", "usage": "Dashed border of the placeholder tag." },
+      { "name": "navy-30", "value": "rgba(22, 35, 57, 0.3)", "usage": "Resting underline of text links (turns full navy on hover)." },
+      { "name": "navy-28", "value": "rgba(22, 35, 57, 0.28)", "usage": "Secondary button border on hover." },
+      { "name": "navy-20", "value": "rgba(22, 35, 57, 0.2)", "usage": "Resting border of text fields and selects (1.5:1 on white: below the 3:1 control-border floor in the source; the field turns full navy on focus and on error)." },
+      { "name": "navy-16", "value": "rgba(22, 35, 57, 0.16)", "usage": "Secondary button border at rest. Also the 15% ring on small 'Not now' chips." },
+      { "name": "navy-08", "value": "rgba(22, 35, 57, 0.08)", "usage": "Card hairline border." },
+      { "name": "white-85", "value": "rgba(255, 255, 255, 0.85)", "usage": "Body copy on navy (CTA band, featured plan). 11.7:1 on navy." },
+      { "name": "white-80", "value": "rgba(255, 255, 255, 0.8)", "usage": "Muted text on navy (price period on the featured plan). 10.5:1 on navy." },
+      { "name": "white-60", "value": "rgba(255, 255, 255, 0.6)", "usage": "Ghost-light button border on hover." },
+      { "name": "white-35", "value": "rgba(255, 255, 255, 0.35)", "usage": "Ghost-light button border at rest, on navy." },
+      { "name": "white-10", "value": "rgba(255, 255, 255, 0.1)", "usage": "Ghost-light button hover fill, on navy." },
+      { "name": "sky-glow", "value": "rgba(176, 230, 255, 0.55)", "usage": "Centre of the soft radial glow behind the hero (fades to sky at 0). On the navy CTA band the same glow runs at 0.16." },
+      { "name": "page", "value": "{white}", "usage": "Alias: the page background." },
+      { "name": "ink", "value": "{navy}", "usage": "Alias: default text colour on white, sky, sky-soft and sky-mist." },
+      { "name": "focus-ring", "value": "{navy}", "usage": "Alias: 3px solid outline, 3px offset, on every light surface." },
+      { "name": "focus-ring-on-navy", "value": "{sky}", "usage": "Alias: the focus ring inside navy areas (.on-navy). 11.7:1 on navy." }
+    ]
+  },
+  "type": {
+    "fonts": [],
+    "families": {
+      "sans": "Nunito, ui-sans-serif, system-ui, sans-serif"
+    },
+    "groups": [
+      {
+        "name": "Headlines",
+        "family": "sans",
+        "styles": [
+          { "name": "text-display", "fontSize": "72px", "lineHeight": 1.08, "letterSpacing": "-0.02em", "fontWeight": 800, "sample": "One calm place for everything.", "usage": "The page's one h1. Fluid: clamp(2.5rem, 1.8rem + 3vw, 4.5rem), 40px at 375px wide to 72px at 1440px." },
+          { "name": "text-h2", "fontSize": "48px", "lineHeight": 1.15, "letterSpacing": "-0.015em", "fontWeight": 800, "sample": "Four tools, one connected day", "usage": "Section headings and the CTA band. Fluid: clamp(2rem, 1.65rem + 1.5vw, 3rem), 32px to 48px." },
+          { "name": "text-h3", "fontSize": "28px", "lineHeight": 1.2, "fontWeight": 700, "sample": "Pro", "usage": "Card and plan titles, h2 inside blog posts. Fluid: clamp(1.375rem, 1.24rem + 0.56vw, 1.75rem), 22px to 28px." },
+          { "name": "text-title", "fontSize": "19px", "lineHeight": 1.3, "fontWeight": 600, "sample": "Ready for a calmer day?", "usage": "Small titles inside cards and tool tiles." }
+        ]
+      },
+      {
+        "name": "Text",
+        "family": "sans",
+        "styles": [
+          { "name": "text-lead", "fontSize": "20px", "lineHeight": 1.6, "fontWeight": 400, "sample": "Tasks, habits, notes, and your calendar live together in Evry.", "usage": "The paragraph under a heading, in navy-80. Fluid: clamp(1.125rem, 1.08rem + 0.2vw, 1.25rem), 18px to 20px." },
+          { "name": "text-body", "fontSize": "16px", "lineHeight": 1.6, "fontWeight": 400, "sample": "Build routines at your own pace.", "usage": "All running text. Bold (700) for labels, FAQ questions and button text." },
+          { "name": "text-bubble", "fontSize": "15px", "lineHeight": 1.625, "fontWeight": 400, "sample": "I found a free slot at 2:00 for “Write report.” Add it?", "usage": "Speech bubbles (EvryBubble md). The sm bubble is 13px / 1.375." },
+          { "name": "text-sm", "fontSize": "14px", "lineHeight": 1.43, "fontWeight": 700, "sample": "Why Evry?", "usage": "Eyebrows, field errors, the small print under pricing (at 400)." },
+          { "name": "text-xs", "fontSize": "12px", "lineHeight": 1.33, "fontWeight": 700, "sample": "More help from Evry", "usage": "Badges, placeholder tags, store-button sublabels (600)." }
+        ]
+      },
+      {
+        "name": "Brand",
+        "family": "sans",
+        "styles": [
+          { "name": "text-wordmark", "fontSize": "24px", "lineHeight": 1, "letterSpacing": "0.03em", "fontWeight": 800, "sample": "Evry", "usage": "The wordmark beside the plain mark in the header and footer. Always the word Evry, capital E." },
+          { "name": "text-price", "fontSize": "48px", "lineHeight": 1, "letterSpacing": "-0.025em", "fontWeight": 800, "sample": "$6", "usage": "Plan prices, followed by the period in 16px 600 navy-75." }
+        ]
+      }
+    ]
+  },
+  "spacing": {
+    "tokens": [
+      { "name": "space-container", "value": "1216px", "usage": "max-width of .container-page (76rem). Also the CTA band's max width." },
+      { "name": "space-gutter", "value": "16px", "usage": "Page side padding below 768px." },
+      { "name": "space-gutter-md", "value": "32px", "usage": "Page side padding from 768px." },
+      { "name": "space-section", "value": "64px", "usage": "Vertical padding of every Section (.section-y) below 1024px." },
+      { "name": "space-section-lg", "value": "112px", "usage": "Vertical padding of every Section from 1024px." },
+      { "name": "space-heading", "value": "40px", "usage": "Gap under a SectionHeading (56px from 1024px)." },
+      { "name": "space-grid", "value": "24px", "usage": "Gap between cards in a grid, and between form rows." },
+      { "name": "space-card", "value": "28px", "usage": "Inner padding of plan cards (36px from 640px). Forms: 24px, 36px from 640px." },
+      { "name": "space-btn-x", "value": "24px", "usage": "Button side padding." },
+      { "name": "space-btn-y", "value": "12px", "usage": "Button vertical padding." },
+      { "name": "space-btn-height", "value": "48px", "usage": "Minimum button height." },
+      { "name": "space-tap", "value": "44px", "usage": "Smallest tap target anywhere (header logo, nav links). Checked by check:widths." },
+      { "name": "space-store-height", "value": "56px", "usage": "Minimum height of an app store button and FAQ summary row." },
+      { "name": "space-scroll-offset", "value": "96px", "usage": "scroll-padding-top, so anchors clear the sticky header." }
+    ]
+  },
+  "radius": {
+    "tokens": [
+      { "name": "radius-pill", "value": "9999px", "usage": "Buttons, eyebrows, badges, chips, placeholder tags, bullets." },
+      { "name": "radius-band", "value": "40px", "usage": "The navy CTA band." },
+      { "name": "radius-panel", "value": "32px", "usage": "Plan cards and other large panels." },
+      { "name": "radius-card", "value": "24px", "usage": "Cards, FAQ items, forms, blog covers." },
+      { "name": "radius-field", "value": "16px", "usage": "Text fields, selects, store buttons, speech bubbles, inset panels (rounded-2xl)." },
+      { "name": "radius-tile", "value": "12px", "usage": "Tool icon tiles (rounded-xl). The Notes tile cuts its top-right corner to 5.6px." },
+      { "name": "radius-focus", "value": "8px", "usage": "Corner of the focus outline." },
+      { "name": "radius-tail", "value": "6px", "usage": "The speech-bubble corner that points at the speaker (bottom-left for Evry, bottom-right for you)." }
+    ]
+  },
+  "shadow": {
+    "tokens": [
+      { "name": "shadow-soft", "value": "0 1px 2px rgba(22, 35, 57, 0.05), 0 8px 24px -8px rgba(22, 35, 57, 0.12)", "usage": "Resting card." },
+      { "name": "shadow-lift", "value": "0 2px 4px rgba(22, 35, 57, 0.06), 0 18px 40px -12px rgba(22, 35, 57, 0.2)", "usage": "Hovered card, open FAQ item, featured plan." },
+      { "name": "shadow-device", "value": "0 30px 60px -20px rgba(22, 35, 57, 0.35), 0 0 0 1px rgba(22, 35, 57, 0.06)", "usage": "Phone mockups." },
+      { "name": "shadow-btn", "value": "0 6px 16px -6px rgba(22, 35, 57, 0.45)", "usage": "Primary button at rest." },
+      { "name": "shadow-btn-hover", "value": "0 10px 22px -8px rgba(22, 35, 57, 0.5)", "usage": "Primary button on hover." },
+      { "name": "shadow-mascot", "value": "0 18px 24px rgba(22, 35, 57, 0.18)", "usage": "Applied as filter: drop-shadow() under the floating hero mascot, so it follows the star's outline." }
+    ]
+  },
+  "duration": {
+    "tokens": [
+      { "name": "duration-hover", "value": "200ms", "usage": "Buttons and links: transform, shadow, colour." },
+      { "name": "duration-card", "value": "250ms", "usage": "Card lift on hover." },
+      { "name": "duration-pop", "value": "500ms", "usage": "Items popping in (week plan, tools, Meet Evry)." },
+      { "name": "duration-reveal", "value": "700ms", "usage": "Scroll reveal: fade plus a 14px rise." },
+      { "name": "duration-float", "value": "6s", "usage": "The mascot's float loop: 10px up and -1.5deg at the midpoint." },
+      { "name": "duration-blink", "value": "5.5s", "usage": "The mascot's blink loop." }
+    ]
+  },
+  "easing": {
+    "tokens": [
+      { "name": "ease-settle", "value": "cubic-bezier(0.2, 0.8, 0.2, 1)", "usage": "The house curve: reveals, pops, demo transitions. Fast out, soft landing." },
+      { "name": "ease-spring", "value": "cubic-bezier(0.3, 1.4, 0.5, 1)", "usage": "Playful overshoot: mascot tilt, squish, hints." },
+      { "name": "ease-bounce", "value": "cubic-bezier(0.3, 1.6, 0.5, 1)", "usage": "Rating stars' hover bump." }
+    ]
+  }
+}

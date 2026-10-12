@@ -20,6 +20,8 @@ enum TaskActions {
 
         if completing {
             NotificationService.cancel(task.uid)
+            // Finishing a folder's last open task removes the folder.
+            pruneGroupIfFinished(task.group, context: context)
         } else {
             NotificationService.schedule(task)
         }
@@ -44,6 +46,28 @@ enum TaskActions {
     static func delete(_ task: TaskItem) {
         task.deletedAt = Date()
         NotificationService.cancel(task.uid)
+        // Deleting a folder's last open task removes the folder.
+        if let context = task.modelContext {
+            pruneGroupIfFinished(task.group, context: context)
+        }
+    }
+
+    /// Deletes a task-group folder once none of its tasks are left open (every
+    /// one completed or deleted). The nullify rule detaches the finished tasks,
+    /// so they stay in the Completed section / trash as loose tasks.
+    static func pruneGroupIfFinished(_ group: TaskGroup?, context: ModelContext) {
+        guard let group else { return }
+        let open = (group.tasks ?? []).contains { !$0.completed && !$0.isTrashed }
+        guard !open else { return }
+        context.delete(group)
+    }
+
+    /// Sweeps any folders already left with no open tasks (e.g. finished before
+    /// the auto-remove rule existed).
+    static func pruneFinishedGroups(context: ModelContext) {
+        guard let groups = try? context.fetch(FetchDescriptor<TaskGroup>()) else { return }
+        for group in groups { pruneGroupIfFinished(group, context: context) }
+        try? context.save()
     }
 
     static func restore(_ task: TaskItem) {
@@ -82,6 +106,22 @@ enum TaskActions {
         copy.recurrence = task.recurrence
         copy.subtasks = task.subtasks.map { SubtaskData(title: $0.title) }
         context.insert(copy)
+    }
+
+    /// Tasks always have a due date. Any saved before that rule (e.g. added
+    /// with Return when it didn't date them) are moved onto today so they show
+    /// up in the Inbox instead of being stranded out of sight.
+    static func assignMissingDueDates(context: ModelContext) {
+        let descriptor = FetchDescriptor<TaskItem>(
+            predicate: #Predicate<TaskItem> { $0.dueDate == nil }
+        )
+        guard let undated = try? context.fetch(descriptor), !undated.isEmpty else { return }
+        let today = Calendar.current.startOfDay(for: Date())
+        for task in undated {
+            task.dueDate = today
+            NotificationService.schedule(task)
+        }
+        try? context.save()
     }
 
     /// Purge trashed tasks older than the 30-day retention window.

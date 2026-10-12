@@ -18,6 +18,9 @@ struct CalendarEvent: Identifiable {
     let isAllDay: Bool
     let calendarTitle: String
     let calendarColor: Color
+    /// The live EKEvent this was built from — carried through so a tap can edit
+    /// the exact event directly, without fragile identifier re-resolution.
+    var ekEvent: EKEvent? = nil
 }
 
 struct CalendarInfo: Identifiable {
@@ -47,13 +50,13 @@ final class CalendarService {
         case .notDetermined:
             return "Connect your calendar to see Apple, Google, and Outlook events alongside your tasks."
         case .denied, .restricted:
-            return "Calendar access was denied. Enable it in Settings → Privacy & Security → Calendars."
+            return "Calendar access is turned off. You can turn it on in Settings → Privacy & Security → Calendars."
         case .fullAccess:
             return "Connected"
         case .writeOnly:
-            return "Full access is required. Enable it in Settings → Privacy & Security → Calendars."
+            return "Evry needs full calendar access to show your events. Please turn it on in Settings → Privacy & Security → Calendars."
         @unknown default:
-            return "Unable to determine calendar access."
+            return "We couldn’t check calendar access. Please try again in a moment."
         }
     }
 
@@ -124,15 +127,21 @@ final class CalendarService {
         guard !active.isEmpty else { return [] }
         let predicate = store.predicateForEvents(withStart: start, end: end, calendars: active)
         return store.events(matching: predicate).map { ek in
-            let cgColor = ek.calendar?.cgColor ?? CGColor(gray: 0.5, alpha: 1)
+            // No calendar colour → the brand sky rather than a stray grey.
+            let cgColor = ek.calendar?.cgColor ?? UIColor(Color.evrySky).cgColor
             return CalendarEvent(
-                id: ek.eventIdentifier ?? UUID().uuidString,
+                // Prefer the event identifier, but fall back to the always-present
+                // calendarItemIdentifier so events whose eventIdentifier is nil
+                // (some imported/subscribed calendars) still resolve for editing —
+                // rather than a throwaway UUID that could never be looked up.
+                id: ek.eventIdentifier ?? ek.calendarItemIdentifier,
                 title: ek.title ?? "Untitled",
                 startDate: ek.startDate,
                 endDate: ek.endDate,
                 isAllDay: ek.isAllDay,
                 calendarTitle: ek.calendar?.title ?? "",
-                calendarColor: Color(UIColor(cgColor: cgColor))
+                calendarColor: Color(UIColor(cgColor: cgColor)),
+                ekEvent: ek
             )
         }.sorted { $0.startDate < $1.startDate }
     }
@@ -148,14 +157,33 @@ final class CalendarService {
     /// Robustly resolves the `EKEvent` for a tapped item. `event(withIdentifier:)`
     /// returns nil for some imported/subscribed calendar events, so fall back to
     /// scanning that day's events and matching the identifier.
-    func editableEvent(id: String, near date: Date) -> EKEvent? {
+    func editableEvent(id: String, title: String? = nil, near date: Date) -> EKEvent? {
+        // 1. The usual path — resolves events keyed by their eventIdentifier.
         if let e = store.event(withIdentifier: id) { return e }
+        // 2. Events whose eventIdentifier is nil are keyed by calendarItemIdentifier;
+        //    resolve those with the API that actually accepts that identifier.
+        if let item = store.calendarItem(withIdentifier: id) as? EKEvent { return item }
         guard isAuthorized else { return nil }
+        // 3. Scan a few days around the tapped time — wide enough to catch all-day,
+        //    multi-day, and timezone-boundary occurrences whose start was clamped to
+        //    a different day.
         let cal = Calendar.current
-        let start = cal.startOfDay(for: date)
-        let end = cal.date(byAdding: .day, value: 1, to: start) ?? date
+        let start = cal.date(byAdding: .day, value: -3, to: cal.startOfDay(for: date)) ?? date
+        let end = cal.date(byAdding: .day, value: 4, to: cal.startOfDay(for: date)) ?? date
         let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
-        return store.events(matching: predicate).first { $0.eventIdentifier == id }
+        let matches = store.events(matching: predicate)
+        // 3a. Match on either identifier EventKit exposes.
+        if let byID = matches.first(where: { $0.eventIdentifier == id || $0.calendarItemIdentifier == id }) {
+            return byID
+        }
+        // 3b. Final fallback — identifiers can differ between the cached snapshot and
+        //     a fresh query (e.g. synced calendars); match by title + start instead.
+        if let title {
+            return matches.first {
+                $0.title == title && abs($0.startDate.timeIntervalSince(date)) < 60
+            }
+        }
+        return nil
     }
 
     func importEvent(_ event: CalendarEvent, context: ModelContext) {
@@ -165,6 +193,31 @@ final class CalendarService {
         importedEventIDs.insert(event.id)
         UserDefaults.standard.set(Array(importedEventIDs), forKey: "evry_imported_event_ids")
     }
+
+    /// Saves a timed event to the default calendar (used by press-and-drag
+    /// creation on the day timeline). Returns false if not authorized or the save fails.
+    @discardableResult
+    func createEvent(title: String, start: Date, end: Date) -> Bool {
+        guard isAuthorized else { return false }
+        let event = EKEvent(eventStore: store)
+        event.title = title
+        event.startDate = start
+        event.endDate = end
+        event.calendar = store.defaultCalendarForNewEvents
+        do { try store.save(event, span: .thisEvent); return true } catch { return false }
+    }
+
+    /// Moves/resizes an existing event (just this occurrence of a repeating one).
+    @discardableResult
+    func reschedule(_ event: EKEvent, start: Date, end: Date) -> Bool {
+        guard isAuthorized, event.calendar?.allowsContentModifications ?? false else { return false }
+        event.startDate = start
+        event.endDate = end
+        do { try store.save(event, span: .thisEvent); return true } catch { return false }
+    }
+
+    /// Colour of the calendar new events go into (for the draft block preview).
+    var defaultCalendarColor: CGColor? { store.defaultCalendarForNewEvents?.cgColor }
 
     @discardableResult
     func saveAccomplishment(date: Date, title: String, notes: String) -> Bool {

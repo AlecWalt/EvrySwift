@@ -13,12 +13,11 @@
 import SwiftUI
 import SwiftData
 import EventKit
-import EventKitUI
+import UIKit
 
 struct CalendarTabView: View {
     let palette: Palette
     var onEdit: (TaskItem) -> Void
-    var onDelete: (TaskItem) -> Void
 
     @Environment(\.modelContext) private var context
     @Environment(\.colorScheme) private var scheme
@@ -27,26 +26,55 @@ struct CalendarTabView: View {
 
     @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
 
-    @AppStorage("membership_plan") private var membershipPlan = ""
-
     @State private var mode: CalMode = .month
-    @State private var showProPromo = false
     @State private var displayMonth = Calendar.current.startOfDay(for: .now)
     @State private var selectedDay = Calendar.current.startOfDay(for: .now)
     @State private var dayEvents: [CalendarEvent] = []
     /// Preloaded per-day dot colors (events + tasks) so scrolling the month list
     /// is an O(1) lookup — no EventKit query or filtering mid-scroll.
     @State private var dotCache: [Date: [Color]] = [:]
-    @State private var showAdd = false
-    @State private var addSession = 0
     /// Native paging scroll positions (day timeline / week number strip).
     @State private var dayScrollID: Int?
     @State private var weekScrollID: Int?
     /// Vertical scroll positions for the month list and the year list.
     @State private var monthScrollID: Int? = 0
     @State private var yearScrollID: Int? = Calendar.current.component(.year, from: .now)
-    /// The calendar event currently being edited (via the system event editor).
+    /// Live scroll phase of the month list — month-change haptics only fire while
+    /// the user is actually scrolling, never on programmatic positioning.
+    @State private var monthScrollPhase: ScrollPhase = .idle
+    /// Bumped once per month crossed while scrolling (drives the haptic tick).
+    @State private var monthHapticTick = 0
+    /// The calendar event currently being edited (via the Evry event editor).
     @State private var editingEvent: EditableEvent?
+    /// An event being created by press-and-drag on the day timeline, then named
+    /// in place.
+    @State private var draft: EventDraft?
+    @State private var draftTitle = ""
+    @FocusState private var draftFocused: Bool
+    /// An existing event being dragged to a new time or resized from an edge.
+    @State private var adjusting: EventAdjust?
+
+    private struct EventAdjust: Equatable {
+        enum Mode { case move, start, end }
+        let mode: Mode
+        let eventID: String
+        let event: EKEvent
+        let day: Date
+        /// Move: how far the finger sat below the event's start when picked up.
+        let grabOffset: TimeInterval
+        var start: Date
+        var end: Date
+    }
+
+    private struct EventDraft: Equatable {
+        var day: Date
+        /// Where the press landed (snapped) — the drag stretches from here.
+        var anchor: Date
+        var start: Date
+        var end: Date
+        /// Released: the block now shows a text field for the name.
+        var naming = false
+    }
 
     private struct EditableEvent: Identifiable {
         let id = UUID()
@@ -68,7 +96,6 @@ struct CalendarTabView: View {
         allTasks.filter { !$0.isTrashed && !$0.isNote && $0.dueDate != nil }
     }
 
-    private var isPro: Bool { membershipPlan == "pro" }
     private var needsConnect: Bool { !calendarService.isAuthorized && !calendarService.accessDenied }
 
     // MARK: Paging index math
@@ -114,12 +141,6 @@ struct CalendarTabView: View {
         return (y - 20)...(y + 20)
     }
 
-    // MARK: Derived dates
-
-    private var addDefaultDate: Date {
-        cal.date(bySettingHour: 9, minute: 0, second: 0, of: selectedDay) ?? selectedDay
-    }
-
     // MARK: Body
 
     var body: some View {
@@ -129,16 +150,10 @@ struct CalendarTabView: View {
                 .padding(.top, 20)
                 .padding(.bottom, 10)
 
-            if mode != .year {
-                if !isPro {
-                    proBanner
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 8)
-                } else if needsConnect {
-                    connectBanner
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 8)
-                }
+            if mode != .year, needsConnect {
+                connectBanner
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
             }
 
             switch mode {
@@ -149,37 +164,48 @@ struct CalendarTabView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.bg)
-        .overlay(alignment: .bottom) {
-            if showAdd {
-                AddTaskSheet(isPresented: $showAdd, defaultDate: addDefaultDate)
-                    .id(addSession)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
         .sheet(item: $editingEvent) { wrapper in
-            EventEditView(store: calendarService.eventStore, event: wrapper.event, tint: palette.primary) {
-                // Clear the binding so SwiftUI actually dismisses the sheet — the
-                // system editor's own dismiss left it presented, so the confirm
-                // button appeared to do nothing.
+            EventEditorView(palette: palette, store: calendarService.eventStore, event: wrapper.event) { changed in
                 editingEvent = nil
+                guard changed else { return }
+                // The editor saves synchronously, but the store caches event
+                // objects — drop the cache so the re-query reads the new
+                // time/length rather than a stale copy.
+                calendarService.eventStore.reset()
                 rebuildDotCache()
                 rebuildDayEvents()
             }
-            .ignoresSafeArea()
-        }
-        .sheet(isPresented: $showProPromo) { MembershipPromoView() }
-        .animation(.spring(response: 0.4, dampingFraction: 0.86), value: showAdd)
-        .onChange(of: showAdd) { _, open in
-            if open { addSession += 1 } else { rebuildDayEvents(); rebuildDotCache() }
         }
         .onAppear { rebuildDotCache(); rebuildDayEvents() }
+        // If the event being edited disappears from the store (deleted elsewhere,
+        // e.g. on another device), close the editor and refresh the day.
+        .task {
+            for await _ in NotificationCenter.default.notifications(named: .EKEventStoreChanged) {
+                guard let editing = editingEvent,
+                      let id = editing.event.eventIdentifier,           // nil = a new, unsaved event
+                      calendarService.eventStore.event(withIdentifier: id) == nil else { continue }
+                editingEvent = nil
+                try? await Task.sleep(for: .milliseconds(350))
+                calendarService.eventStore.reset()
+                rebuildDotCache()
+                rebuildDayEvents()
+            }
+        }
         .onChange(of: monthScrollID) { _, id in
             // Keep the header year in sync with the visible month (no fetching).
             guard mode == .month, let id else { return }
             let m = monthDate(id)
-            if !cal.isDate(m, equalTo: displayMonth, toGranularity: .month) { displayMonth = m }
+            guard !cal.isDate(m, equalTo: displayMonth, toGranularity: .month) else { return }
+            displayMonth = m
+            // One light tick per month crossed — only while the user is driving
+            // the scroll (finger down or flinging), so jumping to a month from the
+            // year picker / week view or the initial positioning stays silent.
+            if [.tracking, .interacting, .decelerating].contains(monthScrollPhase) {
+                monthHapticTick &+= 1
+            }
         }
         .onChange(of: selectedDay) { _, _ in
+            if draft != nil { commitDraft() }
             rebuildDayEvents()
             let di = dayIndex(selectedDay); if dayScrollID != di { dayScrollID = di }
             let wi = weekIndex(selectedDay); if weekScrollID != wi { weekScrollID = wi }
@@ -202,61 +228,63 @@ struct CalendarTabView: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .top, spacing: 8) {
             switch mode {
             case .week:
-                // Back to the month list, scrolled to the selected day's month.
+                // Selected day is the hero (with an ordinal date line + "Today" pill),
+                // matching the Timeline. The chevron returns to the month list.
                 Button { returnToMonth() } label: {
-                    HStack(spacing: 3) {
+                    HStack(alignment: .top, spacing: 4) {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 20, weight: .bold))
-                        Text(selectedDay.formatted(.dateTime.month(.wide)))
-                            .font(.system(size: 30, weight: .heavy))
+                            .font(.nunito(size: 20, weight: .bold))
+                            .foregroundStyle(palette.primary)
+                            // Match the hero line's height so the chevron centers
+                            // against the title rather than floating to a corner.
+                            .frame(height: 41)
+                        PageTitle(
+                            title: selectedDay.formatted(.dateTime.weekday(.wide)),
+                            subtitle: "\(selectedDay.formatted(.dateTime.month(.wide))) \(selectedDay.ordinalDayString)",
+                            badge: cal.isDateInToday(selectedDay) ? "Today" : nil,
+                            palette: palette
+                        )
                     }
-                    .foregroundStyle(palette.primary)
                 }
                 .buttonStyle(.plain)
             case .month:
-                // The year — tap to open the year picker.
+                // The visible month is the hero, the year its supporting line.
+                // Tap to open the year picker.
                 Button { openYearView() } label: {
-                    HStack(spacing: 3) {
+                    HStack(alignment: .top, spacing: 4) {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 20, weight: .bold))
-                        Text(displayMonth.formatted(.dateTime.year()))
-                            .font(.system(size: 30, weight: .heavy))
-                            .contentTransition(.numericText())
+                            .font(.nunito(size: 20, weight: .bold))
+                            .foregroundStyle(palette.primary)
+                            // Match the hero line's height so the chevron centers
+                            // against the title rather than floating to a corner.
+                            .frame(height: 41)
+                        PageTitle(
+                            title: displayMonth.formatted(.dateTime.month(.wide)),
+                            subtitle: displayMonth.formatted(.dateTime.year()),
+                            palette: palette
+                        )
                     }
-                    .foregroundStyle(palette.primary)
                 }
                 .buttonStyle(.plain)
             case .year:
-                Text("Year")
-                    .font(.system(size: 30, weight: .heavy))
-                    .foregroundStyle(palette.text)
+                PageTitle(title: "Year", palette: palette)
             }
 
             Spacer()
 
-            Menu {
-                Button { showAdd = true } label: {
-                    Label("New Task", systemImage: "checkmark.circle")
-                }
-                Button { addEvent() } label: {
-                    Label("New Event", systemImage: "calendar.badge.plus")
-                }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(palette.onPrimary)
-                    .frame(width: 34, height: 34)
-                    .background(palette.primary, in: Circle())
-            }
+            // Same header button as the Inbox tools and Notes header.
+            HeaderIconButton(systemName: "plus", palette: palette) { addEvent() }
+                .accessibilityLabel("Add event")
+            // Center the add button against the hero title line.
+            .frame(height: 41)
         }
     }
 
-    /// Create a new calendar event on the selected day and open the system editor.
+    /// Create a new calendar event on the selected day and open the event editor.
     private func addEvent() {
-        guard isPro else { showProPromo = true; return }
         if calendarService.isAuthorized {
             presentNewEvent()
         } else {
@@ -275,44 +303,25 @@ struct CalendarTabView: View {
         editingEvent = EditableEvent(event: event)
     }
 
-    /// Calendar integration (connecting external calendars) is Pro-only.
-    private var proBanner: some View {
-        Button { showProPromo = true } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(palette.primary)
-                Text("Calendar sync is a Pro feature — upgrade to see your events here")
-                    .font(.system(size: 13))
-                    .foregroundStyle(palette.text)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(palette.textSec)
-            }
-            .padding(12)
-            .evryCard(palette)
-        }
-        .buttonStyle(.plain)
-    }
-
     private var connectBanner: some View {
         Button {
             Task { await calendarService.requestAccess(); rebuildDotCache(); rebuildDayEvents() }
         } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "calendar.badge.plus")
-                    .font(.system(size: 16))
-                    .foregroundStyle(palette.primary)
-                Text("Connect your calendar to see events here")
-                    .font(.system(size: 13))
+            HStack(spacing: 12) {
+                ToolIcon(tool: .calendar, tile: 32, palette: palette)
+                Text("Connect your calendar to see your events here")
+                    .font(.nunito(size: 15, weight: .semibold))
                     .foregroundStyle(palette.text)
+                    .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(palette.textSec)
+                Image(systemName: "arrow.right")
+                    .font(.nunito(size: 14, weight: .bold))
+                    .foregroundStyle(palette.primary)
+                    .accessibilityHidden(true)
             }
-            .padding(12)
+            .padding(.vertical, 12)
+            .padding(.horizontal, EvrySpace.gutter)
+            .frame(minHeight: EvrySpace.storeHeight)
             .evryCard(palette)
         }
         .buttonStyle(.plain)
@@ -321,7 +330,7 @@ struct CalendarTabView: View {
     // MARK: Year view
 
     /// A scroll-wheel style year picker: it snaps each year to the middle, the
-    /// centered year is enlarged + accent-tinted (the "selected" one), and the
+    /// centered year is enlarged in the ink colour (the "selected" one), and the
     /// rest shrink and fade toward the edges.
     private var yearView: some View {
         GeometryReader { geo in
@@ -338,8 +347,8 @@ struct CalendarTabView: View {
                             }
                         } label: {
                             Text(String(year))
-                                .font(.system(size: 34, weight: .bold))
-                                .foregroundStyle(year == yearScrollID ? palette.primary : palette.text)
+                                .font(.nunito(size: 34, weight: .heavy))
+                                .foregroundStyle(year == yearScrollID ? palette.primary : palette.textSec)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 12)
                                 .contentShape(Rectangle())
@@ -359,6 +368,8 @@ struct CalendarTabView: View {
             .scrollPosition(id: $yearScrollID)
             // Pad so the first/last years can reach the vertical center.
             .contentMargins(.vertical, max(0, geo.size.height / 2 - 34), for: .scrollContent)
+            // A tactile "tick" as each year passes the center while scrolling.
+            .sensoryFeedback(.selection, trigger: yearScrollID)
         }
     }
 
@@ -373,21 +384,27 @@ struct CalendarTabView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 0) {
                     ForEach(monthIndexRange, id: \.self) { mi in
-                        monthSection(monthDate(mi))
+                        monthSection(monthDate(mi), isCurrent: mi == monthScrollID)
                             .id(mi)
                     }
                 }
                 .scrollTargetLayout()
             }
             .scrollPosition(id: $monthScrollID)
+            .onScrollPhaseChange { _, phase in monthScrollPhase = phase }
+            .sensoryFeedback(.selection, trigger: monthHapticTick)
         }
+        .onDisappear { monthScrollPhase = .idle }
     }
 
-    private func monthSection(_ month: Date) -> some View {
+    /// `isCurrent` marks the month the scroll position treats as current (the
+    /// one named in the header) — its title takes the full ink colour.
+    private func monthSection(_ month: Date, isCurrent: Bool) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(month.formatted(.dateTime.month(.wide)))
-                .font(.system(size: 20, weight: .bold))
-                .foregroundStyle(palette.text)
+                .font(.evryH3)
+                .foregroundStyle(isCurrent ? palette.primary : palette.textSec)
+                .animation(.easeInOut(duration: 0.2), value: isCurrent)
                 .padding(.horizontal, 16)
                 .padding(.top, 18)
                 .padding(.bottom, 2)
@@ -420,8 +437,8 @@ struct CalendarTabView: View {
         HStack(spacing: 0) {
             ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, symbol in
                 Text(symbol)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(palette.textSec)
+                    .font(.evryCaption)
+                    .foregroundStyle(palette.textMuted)
                     .frame(maxWidth: .infinity)
             }
         }
@@ -439,15 +456,19 @@ struct CalendarTabView: View {
             VStack(spacing: 4) {
                 ZStack {
                     if isSelected {
-                        Circle().fill(palette.primary).frame(width: 28, height: 28)
+                        Circle().fill(palette.primary).frame(width: 30, height: 30)
+                    } else if isToday {
+                        // Today: a navy (sky in dark) ring — never red.
+                        Circle().strokeBorder(palette.primary, lineWidth: 1.5).frame(width: 30, height: 30)
                     }
                     Text("\(cal.component(.day, from: day))")
-                        .font(.system(size: 15, weight: isToday || isSelected ? .bold : .regular))
+                        .font(.nunito(size: 15, weight: isToday || isSelected ? .heavy : .regular))
                         .foregroundStyle(dayNumberColor(isToday: isToday, isSelected: isSelected))
                 }
-                .frame(height: 28)
+                .frame(height: 30)
 
-                // Up to three simple event/task dots (lighter than dot + line).
+                // Up to three tiny dots: an event keeps its calendar's colour
+                // (the user's data, dot only); tasks are brand ink.
                 HStack(spacing: 3) {
                     ForEach(Array(indicators.enumerated()), id: \.offset) { _, color in
                         Circle().fill(color).frame(width: 5, height: 5)
@@ -465,7 +486,7 @@ struct CalendarTabView: View {
     }
 
     private func dayNumberColor(isToday: Bool, isSelected: Bool) -> Color {
-        if isSelected { return .white }
+        if isSelected { return palette.onPrimary }
         if isToday { return palette.primary }
         return palette.text
     }
@@ -489,16 +510,30 @@ struct CalendarTabView: View {
                 .frame(height: 46)
                 .padding(.bottom, 6)
 
-            Divider()
+            Rectangle().fill(palette.border).frame(height: 1)
 
             let taskCount = timelessTaskCount(for: selectedDay)
             let allDay = allDayEvents(for: selectedDay)
-            if taskCount > 0 || !allDay.isEmpty {
+            let hasSummary = taskCount > 0 || !allDay.isEmpty
+            if hasSummary {
                 topSummaryBar(taskCount: taskCount, events: allDay)
+                    // Slides down + fades in (and back up out) as you page onto
+                    // or off a day that has due tasks / all-day events, with the
+                    // timeline below easing to make room — instead of popping.
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             dayPager
         }
+        .clipped()
+        // Keyed only on the bar's presence, so paging between days never
+        // animates anything else (e.g. the day pager's scroll position).
+        .animation(.spring(response: 0.35, dampingFraction: 0.86), value: hasSummaryBar)
+    }
+
+    /// Whether the selected day shows the top summary row (animation key).
+    private var hasSummaryBar: Bool {
+        timelessTaskCount(for: selectedDay) > 0 || !allDayEvents(for: selectedDay).isEmpty
     }
 
     /// The top row: a "N tasks due" indicator on the left, then all-day events
@@ -507,11 +542,15 @@ struct CalendarTabView: View {
         HStack(spacing: 8) {
             if taskCount > 0 {
                 HStack(spacing: 6) {
-                    Image(systemName: "checklist")
-                        .font(.system(size: 12, weight: .semibold))
+                    Image(EvryTool.tasks.glyph)
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 14, height: 14)
                         .foregroundStyle(palette.primary)
+                        .accessibilityHidden(true)
                     Text("\(taskCount) task\(taskCount == 1 ? "" : "s") due")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.nunito(size: 13, weight: .semibold))
                         .foregroundStyle(palette.textSec)
                         .lineLimit(1)
                 }
@@ -522,26 +561,32 @@ struct CalendarTabView: View {
                     .frame(maxWidth: .infinity)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, EvrySpace.gutter)
+        .padding(.vertical, 4)
         .overlay(alignment: .bottom) { Rectangle().fill(palette.border).frame(height: 1) }
     }
 
     private func allDayEventChip(_ event: CalendarEvent) -> some View {
-        HStack(spacing: 5) {
+        // Sky-soft pill with a sky ring; the calendar's colour survives only as
+        // the tiny leading dot.
+        HStack(spacing: 6) {
             Circle().fill(event.calendarColor).frame(width: 6, height: 6)
             Text(event.title)
-                .font(.system(size: 12, weight: .medium))
+                .font(.nunito(size: 13, weight: .semibold))
                 .foregroundStyle(palette.text)
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(event.calendarColor.opacity(0.16), in: Capsule())
-        .overlay(Capsule().strokeBorder(event.calendarColor.opacity(0.4), lineWidth: 1))
-        .contentShape(Capsule())
-        .onTapGesture { openEventEditor(event.id, near: event.startDate) }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 30)
+        .background(palette.skySoft, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.evrySky, lineWidth: 1))
+        // Grow the hit area toward the tap minimum without changing the layout.
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .onTapGesture { openEventEditor(event.ekEvent, id: event.id, title: event.title, near: event.startDate) }
     }
 
     /// Horizontally-paging strip of date numbers — only the numbers move.
@@ -567,13 +612,16 @@ struct CalendarTabView: View {
                 let isToday = cal.isDateInToday(day)
                 ZStack {
                     if isSelected {
-                        Circle().fill(palette.primary).frame(width: 34, height: 34)
+                        Circle().fill(palette.primary).frame(width: 36, height: 36)
+                    } else if isToday {
+                        Circle().strokeBorder(palette.primary, lineWidth: 1.5).frame(width: 36, height: 36)
                     }
                     Text("\(cal.component(.day, from: day))")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(isSelected ? .white : (isToday ? palette.primary : palette.text))
+                        .font(.nunito(size: 16, weight: isSelected || isToday ? .heavy : .semibold))
+                        .foregroundStyle(isSelected ? palette.onPrimary : palette.text)
                 }
-                .frame(width: 34, height: 34)
+                .frame(width: 36, height: 36)
+                .frame(minHeight: EvrySpace.tap)
                 .frame(maxWidth: .infinity)
                 .contentShape(Rectangle())
                 .onTapGesture { selectDay(day) }
@@ -595,6 +643,8 @@ struct CalendarTabView: View {
         }
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: $dayScrollID)
+        // Don't page days while an event is being stretched or dragged.
+        .scrollDisabled((draft.map { !$0.naming } ?? false) || adjusting != nil)
     }
 
     private func dayPage(_ day: Date) -> some View {
@@ -607,9 +657,43 @@ struct CalendarTabView: View {
                         ForEach(layout(timedBlocks(for: day))) { p in
                             timelineBlock(p, day: day, totalWidth: w)
                         }
+                        // One touch layer over the blocks handles everything:
+                        //  • tap an event → open it (the Buttons beneath remain for VoiceOver)
+                        //  • press-drag an event's middle → move it; its top/bottom
+                        //    edge → change the start/end time
+                        //  • press-hold empty space → create an event, drag to size it
+                        TimelinePressCatcher(
+                            onBegan: { pt in beginPress(at: pt, on: day, width: w) },
+                            onChanged: { pt in
+                                if adjusting != nil { updateAdjust(to: pt.y) } else { updateDraft(to: pt.y) }
+                            },
+                            onEnded: { if adjusting != nil { endAdjust() } else { endDraftDrag() } },
+                            onTap: { pt in tapTimeline(at: pt, on: day, width: w) }
+                        )
+                        .frame(width: w, height: hourHeight * 24)
+                        if cal.isDateInToday(day) {
+                            nowLine(width: w)
+                        }
+                        if let d = draft, cal.isDate(d.day, inSameDayAs: day) {
+                            draftBlock(d, totalWidth: w)
+                                .zIndex(5)
+                        }
                     }
                     .frame(width: w, height: hourHeight * 24, alignment: .topLeading)
                     .padding(.bottom, 130)
+                }
+                // Same leading accent indicator as the Inbox list.
+                .evryScrollIndicator(palette)
+                // Hold still while stretching a new event or dragging one.
+                .scrollDisabled((draft.map { !$0.naming } ?? false) || adjusting != nil)
+                // Once released, bring the new event into view above the keyboard.
+                .onChange(of: draft?.naming) { _, naming in
+                    guard naming == true, let d = draft, cal.isDate(d.day, inSameDayAs: day) else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            proxy.scrollTo(cal.component(.hour, from: d.start), anchor: .center)
+                        }
+                    }
                 }
                 .onAppear {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
@@ -625,12 +709,12 @@ struct CalendarTabView: View {
             ForEach(0..<24, id: \.self) { hour in
                 HStack(alignment: .top, spacing: 6) {
                     Text(hourLabel(hour))
-                        .font(.system(size: 11))
-                        .foregroundStyle(palette.textSec)
+                        .font(.nunito(size: 11, weight: .semibold))
+                        .foregroundStyle(palette.textMuted)
                         .frame(width: leftGutter - 10, alignment: .trailing)
                         .offset(y: -6)
                     Rectangle()
-                        .fill(palette.border.opacity(0.6))
+                        .fill(palette.hairline)
                         .frame(height: 1)
                         .frame(maxWidth: .infinity, alignment: .top)
                 }
@@ -649,6 +733,46 @@ struct CalendarTabView: View {
 
     @ViewBuilder
     private func timelineBlock(_ p: PositionedBlock, day: Date, totalWidth: CGFloat) -> some View {
+        let frame = blockFrame(p, day: day, totalWidth: totalWidth)
+        let x = frame.minX, y = frame.minY, w = frame.width, h = frame.height
+        let lifted = adjusting?.eventID == p.block.eventID && p.block.eventID != nil
+
+        // Tile-radius corners (12), scaled down for short events so they never
+        // collapse into pills; the bar's inset grows with the event so it isn't
+        // cramped against the edges.
+        let radius = min(EvryRadius.tile, max(8, h / 2 - 4))
+        let barInset = min(16, max(5, h * 0.26))
+
+        let label = blockLabel(p.block, compact: h < 40, cornerRadius: radius, barInset: barInset)
+            .frame(width: w, height: h, alignment: .topLeading)
+
+        // IMPORTANT: apply `.offset` to the whole tappable element, NOT inside the
+        // Button's label. `.offset` is layout-neutral, so if it lives inside the
+        // label the Button's hit region stays pinned at the ZStack origin — every
+        // block's tap target then collapses to the same spot and only the top-most
+        // one (z-order) is tappable. Offsetting the Button itself moves its hit
+        // region with it, so each block is independently tappable.
+        Group {
+            if let task = p.block.task {
+                Button { onEdit(task) } label: { label }
+                    .buttonStyle(.plain)
+            } else if let eventID = p.block.eventID {
+                Button { openEventEditor(p.block.ekEvent, id: eventID, title: p.block.title, near: p.block.start) } label: { label }
+                    .buttonStyle(.plain)
+            } else {
+                label
+            }
+        }
+        // Picked up: lift it above its neighbours while it's dragged.
+        .shadow(color: (palette.dark ? Color.black : .evryNavy).opacity(lifted ? (palette.dark ? 0.45 : 0.2) : 0),
+                radius: lifted ? 20 : 0, y: lifted ? 14 : 0)
+        .scaleEffect(lifted ? 1.02 : 1)
+        .zIndex(lifted ? 3 : 0)
+        .offset(x: x, y: y)
+    }
+
+    /// Where a block sits in the day grid (shared by drawing and hit-testing).
+    private func blockFrame(_ p: PositionedBlock, day: Date, totalWidth: CGFloat) -> CGRect {
         let dayStart = cal.startOfDay(for: day)
         let dayEnd = dayStart.addingTimeInterval(86400)
         let s = max(p.block.start, dayStart)
@@ -664,41 +788,67 @@ struct CalendarTabView: View {
         let colW = avail / CGFloat(max(1, p.columnCount))
         let x = gutter + CGFloat(p.column) * colW
         let w = max(0, colW - 3)
-
-        // Rounded corners like the timeline task items, scaled down for short
-        // events so they never collapse into pills; the accent bar's inset grows
-        // with the event so it isn't cramped against the edges.
-        let radius = min(14, max(8, h / 2 - 4))
-        let barInset = min(16, max(5, h * 0.26))
-
-        let content = blockLabel(p.block, compact: h < 40, cornerRadius: radius, barInset: barInset)
-            .frame(width: w, height: h, alignment: .topLeading)
-            .offset(x: x, y: y)
-
-        if let task = p.block.task {
-            Button { onEdit(task) } label: { content }
-                .buttonStyle(.plain)
-        } else if let eventID = p.block.eventID {
-            Button { openEventEditor(eventID, near: p.block.start) } label: { content }
-                .buttonStyle(.plain)
-        } else {
-            content
-        }
+        return CGRect(x: x, y: y, width: w, height: h)
     }
 
-    /// The colored block body — accent bar + title (+ time when there's room).
-    /// Fills the whole block height (the duration) so a 2-hour event is twice as
-    /// tall as a 1-hour one; the accent bar is short and inset so it stays clear
-    /// of the rounded corners.
+    /// The top-most block under a point on the given day, if any.
+    private func block(at point: CGPoint, on day: Date, width: CGFloat) -> (PositionedBlock, CGRect)? {
+        layout(timedBlocks(for: day))
+            .map { ($0, blockFrame($0, day: day, totalWidth: width)) }
+            .last { $0.1.contains(point) }
+    }
+
+    // MARK: Now line
+
+    /// Today's current-time marker: a navy (sky in dark) line across the grid
+    /// with a dot at the gutter and the time in place of the hour label — never
+    /// red. Refreshes every 30s.
+    private func nowLine(width: CGFloat) -> some View {
+        TimelineView(.periodic(from: .now, by: 30)) { timeline in
+            let now = timeline.date
+            let y = CGFloat(now.timeIntervalSince(cal.startOfDay(for: now)) / 3600) * hourHeight
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(palette.primary)
+                    .frame(width: max(0, width - leftGutter - 4), height: 1.5)
+                    .offset(x: leftGutter, y: 3.25)
+                Circle()
+                    .fill(palette.primary)
+                    .frame(width: 8, height: 8)
+                    .offset(x: leftGutter - 4)
+                Text(now.formatted(.dateTime.hour().minute()))
+                    .font(.nunito(size: 11, weight: .heavy))
+                    .foregroundStyle(palette.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .padding(.horizontal, 2)
+                    .background(palette.bg)
+                    .frame(width: leftGutter - 8, alignment: .trailing)
+                    .offset(y: -3)
+            }
+            .offset(y: y - 4)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// The block body — side bar + title (+ time when there's room). Fills the
+    /// whole block height (the duration) so a 2-hour event is twice as tall as a
+    /// 1-hour one; the bar is short and inset so it stays clear of the corners.
+    /// Events and tasks differ by surface, not hue: events sit on sky-soft with
+    /// a sky ring (their calendar's colour survives only as the slim bar); tasks
+    /// are white cards with a navy bar.
     private func blockLabel(_ block: DayBlock, compact: Bool, cornerRadius: CGFloat, barInset: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
+        let isTask = block.task != nil
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return VStack(alignment: .leading, spacing: 1) {
             Text(block.title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.nunito(size: 13, weight: .bold))
                 .foregroundStyle(palette.text)
                 .lineLimit(compact ? 1 : 2)
             if !compact {
                 Text(timeText(block))
-                    .font(.system(size: 10))
+                    .font(.nunito(size: 11))
                     .foregroundStyle(palette.textSec)
             }
         }
@@ -706,31 +856,260 @@ struct CalendarTabView: View {
         .padding(.leading, 22)
         .padding(.trailing, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(block.color.opacity(0.16), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        // Accent bar spans the block height, inset from the edges/corners.
+        .background(isTask ? palette.card : palette.skySoft, in: shape)
+        // The bar spans the block height, inset from the edges/corners.
         .overlay(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 2)
+            Capsule()
                 .fill(block.color)
                 .frame(width: 3)
                 .padding(.vertical, barInset)
                 .padding(.leading, 12)
         }
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .strokeBorder(block.color.opacity(0.4), lineWidth: 1)
-        )
+        .overlay(shape.strokeBorder(isTask ? palette.border : Color.evrySky.opacity(palette.dark ? 0.45 : 1),
+                                    lineWidth: 1))
     }
 
     private func timeText(_ block: DayBlock) -> String {
         if block.start == block.end {
             return block.start.formatted(.dateTime.hour().minute())
         }
-        return "\(block.start.formatted(.dateTime.hour().minute())) – \(block.end.formatted(.dateTime.hour().minute()))"
+        return "\(block.start.formatted(.dateTime.hour().minute()))–\(block.end.formatted(.dateTime.hour().minute()))"
     }
 
     private func hourLabel(_ hour: Int) -> String {
         let date = cal.date(bySettingHour: hour, minute: 0, second: 0, of: selectedDay) ?? selectedDay
         return date.formatted(.dateTime.hour())
+    }
+
+    // MARK: Press-and-drag event creation
+
+    /// The time at a y-offset in the day grid, snapped to 15 minutes.
+    private func timelineTime(y: CGFloat, on day: Date, rounding: FloatingPointRoundingRule) -> Date {
+        let minutes = min(24 * 60, max(0, Double(y / hourHeight) * 60))
+        let snapped = (minutes / 15).rounded(rounding) * 15
+        return cal.startOfDay(for: day).addingTimeInterval(snapped * 60)
+    }
+
+    /// Routes a press on the timeline: on an event → move it (middle) or resize
+    /// it (top/bottom edge); on empty space → start a new event.
+    private func beginPress(at point: CGPoint, on day: Date, width: CGFloat) {
+        if let (p, frame) = block(at: point, on: day, width: width),
+           let id = p.block.eventID, let event = p.block.ekEvent {
+            if draft != nil { commitDraft() }
+            // Read-only calendars (holidays, subscriptions) can't be changed.
+            guard event.calendar?.allowsContentModifications ?? false else {
+                UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                return
+            }
+            let edge = min(14, frame.height * 0.28)
+            let mode: EventAdjust.Mode = point.y <= frame.minY + edge ? .start
+                : (point.y >= frame.maxY - edge ? .end : .move)
+            let fingerTime = timelineTime(y: point.y, on: day, rounding: .toNearestOrAwayFromZero)
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                adjusting = EventAdjust(mode: mode, eventID: id, event: event, day: day,
+                                        grabOffset: fingerTime.timeIntervalSince(p.block.start),
+                                        start: p.block.start, end: p.block.end)
+            }
+            return
+        }
+        // Tasks on the timeline aren't dragged; empty space creates.
+        guard block(at: point, on: day, width: width) == nil else { return }
+        beginDraft(at: point.y, on: day)
+    }
+
+    /// Follows the finger in 15-minute steps, keeping the event within the day
+    /// and at least 15 minutes long.
+    private func updateAdjust(to y: CGFloat) {
+        guard var a = adjusting else { return }
+        let dayStart = cal.startOfDay(for: a.day)
+        let dayEnd = dayStart.addingTimeInterval(86400)
+        let t = timelineTime(y: y, on: a.day, rounding: .toNearestOrAwayFromZero)
+        switch a.mode {
+        case .move:
+            let length = a.end.timeIntervalSince(a.start)
+            var start = t.addingTimeInterval(-a.grabOffset)
+            // Re-snap after the offset so the start lands on a 15-minute mark.
+            let mins = (start.timeIntervalSince(dayStart) / 60 / 15).rounded() * 15
+            start = dayStart.addingTimeInterval(mins * 60)
+            start = min(max(start, dayStart), dayEnd.addingTimeInterval(-length))
+            a.start = start
+            a.end = start.addingTimeInterval(length)
+        case .start:
+            a.start = max(dayStart, min(t, a.end.addingTimeInterval(-900)))
+        case .end:
+            a.end = min(dayEnd, max(t, a.start.addingTimeInterval(900)))
+        }
+        guard a != adjusting else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        withAnimation(.interactiveSpring(response: 0.2, dampingFraction: 0.85)) { adjusting = a }
+    }
+
+    /// Released: save the new time (if it changed) and settle the block.
+    private func endAdjust() {
+        guard let a = adjusting else { return }
+        let changed = a.start != a.event.startDate || a.end != a.event.endDate
+        if changed, calendarService.reschedule(a.event, start: a.start, end: a.end) {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            rebuildDayEvents()
+            rebuildDotCache()
+        }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { adjusting = nil }
+    }
+
+    /// A plain tap: open the event or task under the finger, or finish naming a draft.
+    private func tapTimeline(at point: CGPoint, on day: Date, width: CGFloat) {
+        if draft?.naming == true { commitDraft(); return }
+        guard let (p, _) = block(at: point, on: day, width: width) else { return }
+        if let task = p.block.task {
+            onEdit(task)
+        } else if let id = p.block.eventID {
+            openEventEditor(p.block.ekEvent, id: id, title: p.block.title, near: p.block.start)
+        }
+    }
+
+    /// Hold recognized: a 30-minute event appears where the finger landed.
+    private func beginDraft(at y: CGFloat, on day: Date) {
+        if draft != nil { commitDraft() }
+        guard calendarService.isAuthorized else {
+            Task { await calendarService.requestAccess(); rebuildDotCache(); rebuildDayEvents() }
+            return
+        }
+        let dayEnd = cal.startOfDay(for: day).addingTimeInterval(86400)
+        // Keep a full 30 minutes inside the day.
+        let start = min(timelineTime(y: y, on: day, rounding: .down), dayEnd.addingTimeInterval(-1800))
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        draftTitle = ""
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+            draft = EventDraft(day: day, anchor: start, start: start, end: start.addingTimeInterval(1800))
+        }
+    }
+
+    /// Dragging stretches the event to the finger — downward from the anchor, or
+    /// upward past it — never shorter than 15 minutes.
+    private func updateDraft(to y: CGFloat) {
+        guard var d = draft, !d.naming else { return }
+        let dayStart = cal.startOfDay(for: d.day)
+        let t = timelineTime(y: y, on: d.day, rounding: .toNearestOrAwayFromZero)
+        let minEnd = d.anchor.addingTimeInterval(900)
+        if t >= minEnd {
+            d.start = d.anchor
+            d.end = t
+        } else if t < d.anchor {
+            d.start = max(dayStart, t)
+            d.end = d.anchor.addingTimeInterval(1800)
+        } else {
+            d.start = d.anchor
+            d.end = d.anchor.addingTimeInterval(1800)
+        }
+        guard d != draft else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        withAnimation(.interactiveSpring(response: 0.2, dampingFraction: 0.85)) { draft = d }
+    }
+
+    /// Finger lifted: the block becomes an inline name field with the keyboard up.
+    private func endDraftDrag() {
+        guard var d = draft, !d.naming else { return }
+        d.naming = true
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { draft = d }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { draftFocused = true }
+    }
+
+    /// Saves the named event (an unnamed draft is simply discarded).
+    private func commitDraft() {
+        guard let d = draft else { return }
+        let title = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        draftFocused = false
+        withAnimation(.easeOut(duration: 0.2)) { draft = nil }
+        draftTitle = ""
+        guard d.naming, !title.isEmpty else { return }
+        if calendarService.createEvent(title: title, start: d.start, end: d.end) {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            rebuildDayEvents()
+            rebuildDotCache()
+        }
+    }
+
+    private func cancelDraft() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        draftFocused = false
+        withAnimation(.easeOut(duration: 0.2)) { draft = nil }
+        draftTitle = ""
+    }
+
+    private var draftColor: Color {
+        calendarService.defaultCalendarColor.map { Color(cgColor: $0) } ?? palette.primary
+    }
+
+    /// The new event, drawn like a timeline block: live time range while
+    /// stretching, then a name field in place once released.
+    private func draftBlock(_ d: EventDraft, totalWidth: CGFloat) -> some View {
+        let dayStart = cal.startOfDay(for: d.day)
+        let y = CGFloat(d.start.timeIntervalSince(dayStart) / 3600) * hourHeight
+        let h = max(24, CGFloat(d.end.timeIntervalSince(d.start) / 3600) * hourHeight - 3)
+        let gutter = leftGutter + 2
+        let w = max(0, totalWidth - gutter - 9)
+        let radius = min(EvryRadius.tile, max(8, h / 2 - 4))
+        let range = "\(d.start.formatted(.dateTime.hour().minute()))–\(d.end.formatted(.dateTime.hour().minute()))"
+        let color = draftColor
+
+        return VStack(alignment: .leading, spacing: 1) {
+            if d.naming {
+                TextField("New event", text: $draftTitle)
+                    .font(.nunito(size: 14, weight: .bold))
+                    .foregroundStyle(palette.text)
+                    .tint(palette.primary)
+                    .focused($draftFocused)
+                    .submitLabel(.done)
+                    .onSubmit(commitDraft)
+                    .padding(.trailing, 26)
+            } else {
+                Text("New event")
+                    .font(.nunito(size: 14, weight: .bold))
+                    .foregroundStyle(palette.textSec)
+            }
+            if h >= 40 || !d.naming {
+                Text(range)
+                    .font(.nunito(size: 11, weight: .semibold))
+                    .foregroundStyle(palette.textSec)
+                    .contentTransition(.numericText())
+            }
+        }
+        .padding(.vertical, 4)
+        .padding(.leading, 22)
+        .padding(.trailing, 8)
+        .frame(width: w, height: h, alignment: .topLeading)
+        // The block being made: sky-soft with a full-ink outline (the "focused"
+        // state); the target calendar's colour only as the slim bar.
+        .background(palette.skySoft, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .strokeBorder(palette.primary, lineWidth: 1.5))
+        .overlay(alignment: .leading) {
+            Capsule()
+                .fill(color)
+                .frame(width: 3)
+                .padding(.vertical, min(16, max(5, h * 0.26)))
+                .padding(.leading, 12)
+        }
+        .overlay(alignment: .topTrailing) {
+            if d.naming {
+                Button(action: cancelDraft) {
+                    Image(systemName: "xmark")
+                        .font(.nunito(size: 11, weight: .bold))
+                        .foregroundStyle(palette.text)
+                        .frame(width: 22, height: 22)
+                        .background(palette.card, in: Circle())
+                        .overlay(Circle().strokeBorder(palette.border, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, max(1, min(6, (h - 22) / 2)))
+                .padding(.trailing, 6)
+                .accessibilityLabel("Cancel new event")
+            }
+        }
+        .evryShadowLift(palette)
+        .scaleEffect(d.naming ? 1 : 1.02)
+        .offset(x: gutter, y: y)
     }
 
     // MARK: Blocks
@@ -743,6 +1122,7 @@ struct CalendarTabView: View {
         let end: Date
         let task: TaskItem?
         var eventID: String? = nil
+        var ekEvent: EKEvent? = nil
     }
 
     private struct PositionedBlock: Identifiable {
@@ -757,13 +1137,16 @@ struct CalendarTabView: View {
     private func timedBlocks(for day: Date) -> [DayBlock] {
         var blocks: [DayBlock] = []
         for e in dayEvents where !e.isAllDay && cal.isDate(e.startDate, inSameDayAs: day) {
+            // While an event is being dragged, draw it at its new time.
+            let live = adjusting?.eventID == e.id ? adjusting : nil
             blocks.append(DayBlock(id: "e-\(e.id)", title: e.title, color: e.calendarColor,
-                                   start: e.startDate, end: e.endDate, task: nil, eventID: e.id))
+                                   start: live?.start ?? e.startDate, end: live?.end ?? e.endDate, task: nil,
+                                   eventID: e.id, ekEvent: e.ekEvent))
         }
         for t in dueTasks where cal.isDate(t.dueDate!, inSameDayAs: day) && hasTime(t.dueDate) {
             let start = t.dueDate!
             blocks.append(DayBlock(id: "t-\(t.uid.uuidString)",
-                                   title: t.title.isEmpty ? "Untitled Task" : t.title,
+                                   title: t.title.isEmpty ? "Untitled task" : t.title,
                                    color: palette.primary,
                                    start: start, end: start.addingTimeInterval(3600), task: t))
         }
@@ -864,11 +1247,13 @@ struct CalendarTabView: View {
         selectedDay = cal.startOfDay(for: day)
     }
 
-    /// Open the system event editor for a tapped calendar event (title, time,
-    /// location, notes, and calendar/color are all editable there).
-    private func openEventEditor(_ eventID: String, near date: Date) {
-        guard let ek = calendarService.editableEvent(id: eventID, near: date) else { return }
-        editingEvent = EditableEvent(event: ek)
+    /// Open the Evry event editor for a tapped calendar event.
+    private func openEventEditor(_ ekEvent: EKEvent?, id: String, title: String, near date: Date) {
+        // Prefer the live event carried from the query; fall back to re-resolving
+        // by identifier/title only if it's somehow missing.
+        let resolved = ekEvent ?? calendarService.editableEvent(id: id, title: title, near: date)
+        guard let resolved else { return }
+        editingEvent = EditableEvent(event: resolved)
     }
 
     // MARK: Events
@@ -877,15 +1262,15 @@ struct CalendarTabView: View {
     /// queries EventKit or filters while scrolling.
     private func rebuildDotCache() {
         var cache: [Date: [Color]] = [:]
-        // Events: a single EventKit query spanning ±30 months (Pro only).
-        if isPro && calendarService.isAuthorized {
+        // Events: a single EventKit query spanning ±30 months.
+        if calendarService.isAuthorized {
             let start = cal.date(byAdding: .month, value: -30, to: refMonth) ?? refMonth
             let end = cal.date(byAdding: .month, value: 30, to: refMonth) ?? refMonth
             for e in calendarService.events(from: start, to: end) {
                 cache[cal.startOfDay(for: e.startDate), default: []].append(e.calendarColor)
             }
         }
-        // Tasks (already in memory): one accent dot per task due that day.
+        // Tasks (already in memory): one ink dot per task due that day.
         for t in dueTasks {
             guard let due = t.dueDate else { continue }
             cache[cal.startOfDay(for: due), default: []].append(palette.primary)
@@ -895,7 +1280,7 @@ struct CalendarTabView: View {
     }
 
     private func rebuildDayEvents() {
-        guard isPro, calendarService.isAuthorized else { dayEvents = []; return }
+        guard calendarService.isAuthorized else { dayEvents = []; return }
         // A window around the selected day so the neighbouring pages that the
         // pager renders already have their events.
         let start = cal.date(byAdding: .day, value: -7, to: cal.startOfDay(for: selectedDay)) ?? selectedDay
@@ -904,44 +1289,54 @@ struct CalendarTabView: View {
     }
 }
 
-// MARK: - System event editor
 
-/// Wraps `EKEventEditViewController` so a tapped calendar event can be edited
-/// (title, time, location, notes, and calendar/color) and saved back to EventKit.
-private struct EventEditView: UIViewControllerRepresentable {
-    let store: EKEventStore
-    let event: EKEvent
-    var tint: Color
-    var onDone: () -> Void
+// MARK: - Timeline press catcher
 
-    func makeUIViewController(context: Context) -> EKEventEditViewController {
-        let vc = EKEventEditViewController()
-        vc.eventStore = store
-        vc.event = event
-        vc.editViewDelegate = context.coordinator
-        // Theme the editor's bar buttons (Cancel / Add / Done) with the app accent.
-        // Setting the VC's view tintColor is what actually recolors them — SwiftUI's
-        // `.tint` doesn't reliably reach a hosted UIKit controller's nav bar.
-        vc.view.tintColor = UIColor(tint)
-        return vc
+/// A transparent UIKit layer over the day timeline. A press held ~0.25s begins a
+/// gesture that then tracks the finger (UILongPressGestureRecognizer is
+/// continuous) — used to create, move and resize events. Moving before the hold
+/// fires fails the press, leaving vertical scrolling and day paging untouched.
+/// Plain taps are reported with their location (open an event, finish a draft).
+private struct TimelinePressCatcher: UIViewRepresentable {
+    var onBegan: (CGPoint) -> Void
+    var onChanged: (CGPoint) -> Void
+    var onEnded: () -> Void
+    var onTap: (CGPoint) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        let press = UILongPressGestureRecognizer(target: context.coordinator,
+                                                 action: #selector(Coordinator.press(_:)))
+        // Short enough to feel like "tap and drag" on an event.
+        press.minimumPressDuration = 0.25
+        press.allowableMovement = 10
+        view.addGestureRecognizer(press)
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tap(_:)))
+        view.addGestureRecognizer(tap)
+        return view
     }
 
-    func updateUIViewController(_ controller: EKEventEditViewController, context: Context) {
-        controller.view.tintColor = UIColor(tint)
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.parent = self
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(onDone: onDone) }
+    final class Coordinator: NSObject {
+        var parent: TimelinePressCatcher
+        init(_ parent: TimelinePressCatcher) { self.parent = parent }
 
-    final class Coordinator: NSObject, EKEventEditViewDelegate {
-        let onDone: () -> Void
-        init(onDone: @escaping () -> Void) { self.onDone = onDone }
-
-        func eventEditViewController(_ controller: EKEventEditViewController,
-                                     didCompleteWith action: EKEventEditViewAction) {
-            // Dismiss via SwiftUI by clearing the presentation binding (onDone),
-            // rather than dismissing this controller directly — the latter left the
-            // SwiftUI sheet host presented, making the confirm button seem broken.
-            onDone()
+        @objc func press(_ g: UILongPressGestureRecognizer) {
+            let point = g.location(in: g.view)
+            switch g.state {
+            case .began: parent.onBegan(point)
+            case .changed: parent.onChanged(point)
+            case .ended, .cancelled, .failed: parent.onEnded()
+            default: break
+            }
         }
+
+        @objc func tap(_ g: UITapGestureRecognizer) { parent.onTap(g.location(in: g.view)) }
     }
 }

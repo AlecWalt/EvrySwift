@@ -3,8 +3,8 @@
 //  Evry
 //
 //  SwiftData models — the Swift port of the EvryJS task/project shapes
-//  (js/store.js) plus the project category palette
-//  (js/utils/projectCategories.js).
+//  (js/store.js). Folder colours are sky→navy shades (see `FolderShade`),
+//  never free hues.
 //
 
 import Foundation
@@ -37,12 +37,24 @@ enum TaskPriority: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    /// Chip text matching the webapp ("↑ High", "→ Med", "↓ Low").
+    /// Short chip text ("High", "Medium", "Low"). Priority is carried by the
+    /// word and `symbol`, never by colour (the brand has no red/orange/green).
     var chipLabel: String? {
         switch self {
-        case .high: "↑ High"
-        case .medium: "→ Med"
-        case .low: "↓ Low"
+        case .high: "High"
+        case .medium: "Medium"
+        case .low: "Low"
+        case .normal: nil
+        }
+    }
+
+    /// SF Symbol that marks a non-normal priority — drawn in navy ink; the
+    /// glyph's shape (two marks, one mark, a down arrow) tells the levels apart.
+    var symbol: String? {
+        switch self {
+        case .high: "exclamationmark.2"
+        case .medium: "exclamationmark"
+        case .low: "arrow.down"
         case .normal: nil
         }
     }
@@ -99,6 +111,9 @@ struct SubtaskData: Codable, Hashable, Identifiable {
 final class TaskItem {
     var uid: UUID = UUID()
     var title: String = ""
+    /// Always set: tasks default to today (see `init`) and older undated tasks are
+    /// moved to today on launch (`TaskActions.assignMissingDueDates`). Optional
+    /// only so the existing store needs no migration.
     var dueDate: Date?
     var tags: [String] = []
     var priorityRaw: String = TaskPriority.normal.rawValue
@@ -113,6 +128,9 @@ final class TaskItem {
     var recurrenceRaw: String?
     var subtasks: [SubtaskData] = []
     var sortOrder: Int = 0
+    /// Optional grouping — tasks sharing a `TaskGroup` render together inside a
+    /// collapsible folder in the timeline.
+    var group: TaskGroup?
 
     init(
         title: String,
@@ -124,7 +142,8 @@ final class TaskItem {
         isNote: Bool = false
     ) {
         self.title = title
-        self.dueDate = dueDate
+        // Every task has a due date — with none given it lands on today.
+        self.dueDate = dueDate ?? Calendar.current.startOfDay(for: Date())
         self.tags = tags
         self.priorityRaw = priority.rawValue
         self.notes = notes
@@ -143,4 +162,38 @@ final class TaskItem {
     }
 
     var isTrashed: Bool { deletedAt != nil }
+}
+
+// MARK: - Task group (a sky/navy-shaded folder of tasks)
+
+@Model
+final class TaskGroup {
+    var uid: UUID = UUID()
+    var name: String = ""
+    /// Legacy folder tint (hex RGB) from when colours were picked. Kept only so
+    /// the store needs no migration — it is no longer used for display.
+    var colorHex: Int?
+    /// Automatic colour: a position (0…1) between sky (0) and navy (1),
+    /// assigned in sequence when the folder is created.
+    var shade: Double?
+    var createdAt: Date = Date()
+    var sortOrder: Int = 0
+
+    /// Detaching (not cascading) so ungrouping/deleting the folder keeps the tasks.
+    @Relationship(deleteRule: .nullify, inverse: \TaskItem.group)
+    var tasks: [TaskItem]? = []
+
+    init(name: String = "", colorHex: Int? = nil) {
+        self.name = name
+        self.colorHex = colorHex
+    }
+
+    var color: Color? { colorHex.map { Color(hex: UInt32(truncatingIfNeeded: $0)) } }
+
+    /// The folder's display colour in the current theme — always a sky/navy
+    /// shade; the legacy `colorHex` is ignored so no off-brand hue can appear.
+    func tint(_ palette: Palette) -> Color {
+        if let shade { return palette.folderColor(shade: shade) }
+        return palette.folderColor(shade: 0.5)
+    }
 }

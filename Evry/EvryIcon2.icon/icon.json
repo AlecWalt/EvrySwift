@@ -1,0 +1,39 @@
+{
+  "fill" : {
+    "solid" : "display-p3:0.72217,0.87744,0.97266,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill" : "automatic",
+          "hidden" : false,
+          "image-name" : "Cute Blue-Outlined Star Ghost.png",
+          "name" : "Cute Blue-Outlined Star Ghost",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 0.75,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

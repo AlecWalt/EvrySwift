@@ -3,15 +3,19 @@
 //  Evry
 //
 //  One Brain Dump engine, two outputs. Voice capture (LiveSpeechInput), the
-//  typed/dictated input UI, and on-device AI cleanup are shared; only what
+//  typed/dictated input UI, and on-device language-model cleanup are shared; only what
 //  happens with the final result differs, chosen by `BrainDumpContext`:
 //    • .tasks  → the inbox extracts actionable tasks (unchanged behavior)
 //    • .note   → the Notes tab tidies the dump into note text and hands it back
 //                to a caller that creates a new note or appends to the open one
 //
 //  The experience is built around one emotional arc: a calm, forgiving place to
-//  speak → the rambling visibly distilling into structure (the theme-colored
-//  transformation moment) → quiet closure that confirms and gets out of the way.
+//  speak → Evry visibly sorting the rambling into structure (the transformation
+//  moment) → quiet closure that confirms and gets out of the way.
+//
+//  Visually it's the brand's navy band (in light and dark mode): navy surface,
+//  white / white-85 text, sky accents, sky / ghost-light buttons. Evry speaks
+//  through EvryBubble lines in the first person.
 //
 
 import SwiftUI
@@ -28,23 +32,6 @@ enum BrainDumpContext {
     case note(save: (String) -> Void)
 }
 
-// MARK: - AI extraction types (task mode)
-
-@Generable(description: "A single actionable task extracted from a brain dump")
-private struct DumpedTask {
-    @Guide(description: "Concise action-first task title. No filler words. Include timing naturally in the title.")
-    var title: String
-
-    @Guide(description: "Priority: one of high, medium, low, or normal. Default to 'normal' — only deviate when the text clearly signals unusual importance or unimportance.")
-    var priority: String
-}
-
-@Generable(description: "Actionable tasks extracted and cleaned from a free-form brain dump")
-private struct BrainDumpResult {
-    @Guide(description: "All actionable tasks, filler words removed, max 20.", .maximumCount(20))
-    var tasks: [DumpedTask]
-}
-
 struct BrainPreviewTask: Identifiable {
     let id = UUID()
     var title: String
@@ -56,10 +43,13 @@ struct BrainPreviewTask: Identifiable {
 
 struct BrainDumpSheet: View {
     let context: BrainDumpContext
+    /// Screen point the fill-wipe grows from (the tapped tool bubble). Nil falls
+    /// back to the top-right corner.
+    var fillOrigin: CGPoint? = nil
 
-    @Environment(\.colorScheme) private var scheme
     @Environment(Appearance.self) private var appearance
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The user's own tasks — used to gauge how often they actually use priorities,
     /// so extraction can mirror their habit rather than over-labeling.
@@ -84,6 +74,11 @@ struct BrainDumpSheet: View {
     @State private var appeared = false
     // Staged entrance of the input screen's elements (orb slide-in, box opening).
     @State private var intro = false
+    // Fill-wipe intro: an accent shape sweeps down from the top with a rounded
+    // leading edge, the background sweeps down over it, then the content appears.
+    @State private var loading = true
+    @State private var accentFill: CGFloat = 0
+    @State private var bgFill: CGFloat = 0
     // The transformation now happens in place on the input screen: pressing
     // Distill collapses the typed container and fades the buttons, while the orb
     // + caption morph into the "Distilling…" state. Stays true through analysis.
@@ -98,14 +93,32 @@ struct BrainDumpSheet: View {
     // is the content swap (flipped mid-fade so it happens off-screen).
     @State private var headerVisible = true
     @State private var distillHeader = false
+    // Brain Dump is dictation-first. The typing box is a secondary path, revealed
+    // only when the user taps "Type instead".
+    @State private var typingMode = false
+    // Transient dip + ripple when the mic orb is tapped.
+    @State private var micPop = false
+    @State private var rippleTrigger = 0
+    // The listening *appearance* — flipped immediately on tap so the icon swap,
+    // scale, and body change happen right away, decoupled from the audio engine
+    // (which spins up in the background a moment later).
+    @State private var dictating = false
+    // Kept prepared so the mic-tap haptic fires crisply, even on the first tap.
+    @State private var micHaptic = UIImpactFeedbackGenerator(style: .medium)
     @FocusState private var focused: Bool
+
+    // First-run explainer: shown the very first time Brain Dump is opened.
+    @AppStorage("braindump_intro_seen") private var introSeen = false
+    @State private var showIntro = false
 
     /// The transformation reads for at least this long even if the model is
     /// instant — long enough for the collapse, the orb morph, and a beat of the
     /// distilling state to land before the preview takes over.
     private let minTransformSeconds: Double = 2.4
 
-    private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
+    /// Brain Dump is a navy band in both light and dark mode: navy surface,
+    /// white / white-85 text, sky accents (the derived on-navy palette).
+    private let palette = Palette(dark: true)
     private var aiAvailable: Bool { SystemLanguageModel.default.isAvailable }
     private var forNote: Bool { if case .note = context { return true } else { return false } }
 
@@ -117,26 +130,6 @@ struct BrainDumpSheet: View {
         guard real.count >= 5 else { return false }
         let labeled = real.filter { $0.priority != .normal }.count
         return Double(labeled) / Double(real.count) >= 0.4
-    }
-
-    /// Priority instructions for the extractor — sparing by default, generous only
-    /// if the user's own habit shows they lean on priorities.
-    private var priorityGuidance: String {
-        if usesPrioritiesOften {
-            return """
-            - This user relies on priorities. Assign one to most tasks, inferring \
-            high / medium / low from urgency and importance cues. Use 'normal' only \
-            when there is genuinely no signal.
-            """
-        }
-        return """
-        - Assign priority VERY sparingly. Default every task to 'normal'. Only use \
-        'high' when the text clearly signals something is unusually urgent or \
-        important (e.g. "urgent", "asap", "critical", "really important", a hard \
-        deadline), and only use 'low' when it clearly signals something minor or \
-        optional (e.g. "someday", "whenever", "no rush", "if I get to it"). \
-        Avoid 'medium' unless the user explicitly says so. When in doubt, use 'normal'.
-        """
     }
 
     var body: some View {
@@ -154,45 +147,93 @@ struct BrainDumpSheet: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .opacity(appeared ? 1 : 0)
+
+                // First-run explainer, over everything.
+                if showIntro {
+                    introScreen
+                        .transition(.opacity)
+                        .zIndex(100)
+                }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            // Hide the nav bar (and its X / title) while the explainer is up.
+            .toolbar(showIntro ? .hidden : .automatic, for: .navigationBar)
             .toolbar {
-                if phase != .done {
+                // Only add the button (and its system background) once the content
+                // has appeared — otherwise its container shows during the fill-wipe.
+                if phase != .done && appeared {
                     ToolbarItem(placement: .cancellationAction) {
                         Button {
                             if phase == .preview { withAnimation { phase = .input; distilling = false; collapseHeight = nil; distillHeader = false; headerVisible = true } }
                             else { close() }
                         } label: {
                             Image(systemName: phase == .preview ? "chevron.left" : "xmark")
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.nunito(size: 15, weight: .bold))
                         }
+                        .accessibilityLabel(phase == .preview ? "Back" : "Close")
                     }
                 }
                 ToolbarItem(placement: .principal) {
-                    Text(navTitle)
-                        .font(.system(size: 17, weight: .bold))
-                        .foregroundStyle(palette.text)
+                    if !navTitle.isEmpty {
+                        EyebrowPill(text: navTitle, palette: palette)
+                            .opacity(appeared ? 1 : 0)
+                            .accessibilityAddTraits(.isHeader)
+                    }
                 }
                 if phase == .preview && errorMessage.isEmpty && canConfirm {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button(confirmTitle) { commit() }.fontWeight(.semibold)
+                        Button(confirmTitle) { commit() }
+                            .font(.evryLabel)
                     }
                 }
             }
         }
+        // System controls (nav items, editors, keyboard) render as on-navy.
+        .environment(\.colorScheme, .dark)
+        .overlay { if loading { fillLoader } }
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
         .onAppear {
-            // Defer one runloop so the layout (and the orb's matched geometry) is
-            // established at rest first — otherwise the animated flip makes elements
-            // fly in from the top-left origin instead of animating in place.
-            DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: 0.3)) { appeared = true }
-                withAnimation(.spring(response: 0.55, dampingFraction: 0.82)) { intro = true }
+            micHaptic.prepare()
+            // Fill-wipe intro: the accent sweeps out from the top-right corner
+            // (down and to the left), the background sweeps over it, and only then
+            // does the content appear.
+            withAnimation(.easeInOut(duration: 0.42)) { accentFill = 1 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                withAnimation(.easeInOut(duration: 0.42)) { bgFill = 1 }
+            }
+            // Once the background fill covers the screen, drop the loader (its fill
+            // is the same color as the real background, so it's seamless) and
+            // animate the content in.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.62) {
+                loading = false
+                // First open ever → show the explainer first and hold the tool's
+                // own entrance until it's dismissed, so the content doesn't animate
+                // in behind (and clip through) the popup.
+                if introSeen {
+                    animateContentIn()
+                } else {
+                    withAnimation(.easeOut(duration: 0.35)) { showIntro = true }
+                }
             }
         }
         .onChange(of: speech.transcript) { _, t in if !t.isEmpty { input = t } }
+        // Keep the listening appearance in sync when recording ends on its own
+        // (recognizer finished/errored) so the UI leaves listening mode.
+        .onChange(of: speech.isListening) { _, listening in
+            if !listening {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { dictating = false }
+            }
+        }
+        // Without mic / speech permission the engine never starts — leave the
+        // listening appearance so Evry's caption can explain how to fix it.
+        .onChange(of: speech.permissionDenied) { _, denied in
+            if denied {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { dictating = false }
+            }
+        }
         .onDisappear { speech.stop() }
     }
 
@@ -208,322 +249,533 @@ struct BrainDumpSheet: View {
         }
     }
 
-    /// Full-screen background — the selected accent color washes down from the top
-    /// (stronger while listening) into the neutral app background. Subtle and
-    /// legible; it's atmosphere, not decoration.
+    /// Full-screen background — the navy band, with the soft on-navy sky glow
+    /// off the top-right corner (the system's one gradient).
     private var accentBackground: some View {
-        let top = speech.isListening ? 0.34 : (palette.dark ? 0.26 : 0.18)
-        return ZStack {
+        ZStack {
             palette.bg
-            LinearGradient(
-                colors: [palette.primary.opacity(top), palette.primary.opacity(0.04), .clear],
-                startPoint: .top, endPoint: .center
-            )
-            RadialGradient(
-                colors: [palette.primary.opacity(speech.isListening ? 0.22 : 0.12), .clear],
-                center: .init(x: 0.5, y: 0.08), startRadius: 0, endRadius: 460
-            )
+            EvryGlow(onNavy: true)
+                .offset(x: 150, y: -280)
         }
         .ignoresSafeArea()
-        .animation(.easeInOut(duration: 0.6), value: speech.isListening)
+    }
+
+    // MARK: First-run explainer
+
+    private func dismissIntro() {
+        introSeen = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.easeInOut(duration: 0.3)) { showIntro = false }
+        // Play the tool's entrance only after the popup has fully faded out.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { animateContentIn() }
+    }
+
+    /// The input screen's own entrance (screen fade + orb/box slide-in).
+    private func animateContentIn() {
+        withAnimation(.easeOut(duration: 0.35)) { appeared = true }
+        withAnimation(EvryMotion.settle.delay(0.05)) { intro = true }
+    }
+
+    /// One-time screen shown on the first Brain Dump open: what it is + how it
+    /// works. Copy adapts to the tasks vs. note context and to whether the
+    /// on-device language model is available.
+    private var introScreen: some View {
+        let sortDesc: String = {
+            if aiAvailable {
+                return forNote
+                    ? "I tidy it into a clear, readable note and leave out the filler."
+                    : "I pull out clear, action-first tasks for you. No editing needed."
+            }
+            return forNote
+                ? "I tidy your words into note text."
+                : "I split what you said into separate tasks."
+        }()
+
+        return ZStack {
+            accentBackground
+            VStack(spacing: 0) {
+                Spacer(minLength: 12)
+
+                EvryMascot(size: 96, float: true)
+
+                Text("Brain dump")
+                    .font(.evryH2)
+                    .tracking(EvryTracking.h2)
+                    .foregroundStyle(palette.text)
+                    .padding(.top, 20)
+                    .accessibilityAddTraits(.isHeader)
+
+                Text(forNote
+                     ? "Empty your head out loud, and Evry turns it into a clean note."
+                     : "Empty your head out loud, and Evry turns it into a clean task list.")
+                    .font(.evryLead)
+                    .lineSpacing(4)
+                    .foregroundStyle(palette.textSec)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 36)
+                    .padding(.top, 10)
+
+                VStack(spacing: 20) {
+                    introStep("mic.fill", "Say it all out loud",
+                              "Messy, out of order, all of it. Or tap “Type instead.”")
+                    introStep(nil, "Evry sorts it", sortDesc)
+                    introStep("checkmark", "Review and keep",
+                              forNote
+                              ? "Edit anything you like, then save it to your notes."
+                              : "Remove any you don’t want, then add the rest to your list.")
+                }
+                .padding(.top, 34)
+                .padding(.horizontal, 30)
+
+                Spacer(minLength: 12)
+
+                Button { dismissIntro() } label: {
+                    Text("Start my brain dump")
+                }
+                .buttonStyle(EvrySkyButtonStyle(fullWidth: true))
+                .padding(.horizontal, EvrySpace.grid)
+                .padding(.bottom, 40)
+            }
+        }
+    }
+
+    /// A step row: a sky tile with a navy glyph (nil = Evry's star glyph).
+    private func introStep(_ icon: String?, _ title: String, _ desc: String) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Group {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.nunito(size: 18, weight: .bold))
+                } else {
+                    EvryStarGlyph(size: 20)
+                }
+            }
+            .foregroundStyle(palette.onSky)
+            .frame(width: EvrySpace.tap, height: EvrySpace.tap)
+            .background(palette.sky, in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.evryLabel)
+                    .foregroundStyle(palette.text)
+                Text(desc)
+                    .font(.nunito(size: 14))
+                    .lineSpacing(2)
+                    .foregroundStyle(palette.textSec)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Two stacked fills growing from the origin: sky first, then the navy
+    /// surface over it.
+    private var fillLoader: some View {
+        ZStack {
+            CornerFillShape(progress: accentFill, origin: fillOrigin).fill(Color.evrySky)
+            CornerFillShape(progress: bgFill, origin: fillOrigin).fill(palette.bg)
+        }
+        .ignoresSafeArea()
     }
 
     private var navTitle: String {
         switch phase {
-        case .preview: return forNote ? "Review Note" : "Review Tasks"
+        case .preview: return forNote ? "Review note" : "Review tasks"
         case .done:    return ""
-        default:       return "Brain Dump"
+        default:       return "Brain dump"
         }
     }
 
     // MARK: Input
 
     private var inputView: some View {
-        // One persistent orb, always horizontally centered — so switching to
-        // dictation only ever moves it vertically (and scales it), never sideways.
-        // The content below the caption swaps between typing and dictating.
-        VStack(spacing: 0) {
-            // Orb sits a little lower in dictation; this shift is purely vertical.
-            Spacer().frame(height: distilling ? 0 : (speech.isListening ? 44 : 10))
+        // Dictation-first: the mic orb is the hero and the primary tap target.
+        // The orb stays centered in place; the listening panel lives at the bottom.
+        ZStack {
+            // Orb + caption + idle body, vertically centered.
+            VStack(spacing: 0) {
+                Spacer(minLength: 8)
 
-            modeOrb
-                .opacity((intro && headerVisible) ? 1 : 0)
-                .offset(y: intro ? 0 : -22)
-                .animation(.spring(response: 0.55, dampingFraction: 0.8), value: intro)
-
-            captionArea
-                .padding(.horizontal, 24)
-                .padding(.top, 12)
-                .padding(.bottom, 16)
-
-            // The typed / dictation container. On Distill its height animates to
-            // zero — a real vertical collapse from top and bottom (content pinned
-            // center + clipped + faded). As it shrinks, the centered stack
-            // alignment draws the orb + caption down into the middle of the screen.
-            Group {
-                if speech.isListening { listeningBody } else { typingBody }
-            }
-            .frame(maxWidth: .infinity)
-            .background(
-                GeometryReader { g in
-                    // Track the true natural height only while typing (no collapse
-                    // constraint applied), so it stays full-size and adapts to the
-                    // keyboard. Frozen once the collapse begins.
-                    Color.clear
-                        .onAppear { if collapseHeight == nil { windowHeight = g.size.height } }
-                        .onChange(of: g.size.height) { _, h in if collapseHeight == nil { windowHeight = h } }
+                // The orb doubles as the "start dictating" button.
+                Button {
+                    // Water-drop tap: a quick dip as the "drop" lands, a bouncy
+                    // rebound, and ripple rings spreading out. The haptic fires inside
+                    // startDictation (the shared "start dictating" entry point).
+                    rippleTrigger += 1
+                    withAnimation(.spring(response: 0.14, dampingFraction: 0.6)) { micPop = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        // Low damping → overshoots past 1 and wobbles back (bouncy).
+                        withAnimation(.spring(response: 0.55, dampingFraction: 0.4)) { micPop = false }
+                    }
+                    startDictation()
+                } label: {
+                    modeOrb
+                        .overlay { MicRipple(trigger: rippleTrigger, color: palette.sky) }
                 }
-            )
-            // nil = natural size while typing; on Distill it holds the captured
-            // height and animates to 0 (a vertical collapse from top and bottom).
-            .frame(height: collapseHeight, alignment: .center)
-            .opacity(distilling ? 0 : 1)
-            .clipped()
-            .allowsHitTesting(!distilling)
+                    .buttonStyle(PressScaleStyle())
+                    .scaleEffect(micPop ? 0.9 : 1)
+                    .disabled(dictating || distilling || typingMode)
+                    .opacity((intro && headerVisible) ? 1 : 0)
+                    .offset(y: intro ? 0 : -22)
+                    .animation(.spring(response: 0.55, dampingFraction: 0.8), value: intro)
+
+                captionArea
+                    .padding(.horizontal, 24)
+                    .padding(.top, 14)
+                    .padding(.bottom, 18)
+
+                // Idle body (dictation hero / typing box). Its space is reserved
+                // (hidden) while dictating so the orb doesn't shift; the listening
+                // UI is a separate bottom panel below.
+                Group {
+                    if typingMode { typingBody }
+                    else { dictationHero }
+                }
+                .frame(maxWidth: .infinity)
+                .background(
+                    GeometryReader { g in
+                        // Track the true natural height only while typing (no collapse
+                        // constraint applied), so it stays full-size and adapts to the
+                        // keyboard. Frozen once the collapse begins.
+                        Color.clear
+                            .onAppear { if collapseHeight == nil { windowHeight = g.size.height } }
+                            .onChange(of: g.size.height) { _, h in if collapseHeight == nil { windowHeight = h } }
+                    }
+                )
+                // nil = natural size while typing; on Distill it holds the captured
+                // height and animates to 0 (a vertical collapse from top and bottom).
+                .frame(height: collapseHeight, alignment: .center)
+                .opacity(distilling || dictating ? 0 : 1)
+                .clipped()
+                .allowsHitTesting(!distilling && !dictating)
+
+                Spacer(minLength: 8)
+            }
+
+            // Listening panel — pinned toward the bottom, slides up from below.
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                if dictating {
+                    listeningBody
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: distilling ? .center : .top)
-        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: speech.isListening)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Snappy transition into/out of the listening state, driven by the
+        // immediate `dictating` intent rather than the delayed engine state.
+        .animation(.spring(response: 0.3, dampingFraction: 0.82), value: dictating)
         .animation(.easeInOut(duration: 0.4), value: distilling)
     }
 
     /// The mode icon — a single persistent view. Only its size changes between
     /// modes; because it's centered in the VStack, it never moves horizontally.
     private var modeOrb: some View {
-        let distillIcon = aiAvailable ? "sparkles" : "list.bullet.clipboard.fill"
-        // While distilling the orb grows and switches to the process glyph, with a
-        // gentle self-glow (level) so it reads as actively working. The swap
-        // happens while the orb is faded out, so it's an out-then-in change.
-        let size: CGFloat = speech.isListening ? 140 : (distillHeader ? 96 : 66)
+        let distillIcon = aiAvailable ? "star.fill" : "list.bullet"
+        // Dictation-first: the idle orb is a large mic (the primary CTA). It swaps
+        // to a waveform while listening, and to the process glyph while distilling.
+        // The layout box stays a constant 128 and the size change is applied as a
+        // centered scale, so the orb grows/shrinks *in place* instead of pushing
+        // the surrounding layout (which made it drift upward).
+        let base: CGFloat = 128
+        let target: CGFloat = dictating ? 150 : (distillHeader ? 96 : 128)
         return BreathingOrb(
-            level: speech.isListening ? speech.level : (distillHeader ? 0.35 : 0),
+            level: dictating ? speech.level : (distillHeader ? 0.35 : 0),
             palette: palette,
-            icon: distillHeader ? distillIcon : "brain.head.profile",
+            icon: distillHeader ? distillIcon : "mic.fill",
             activeIcon: "waveform",
-            listening: speech.isListening
+            listening: dictating
         )
-        .frame(width: size, height: size)
+        .frame(width: base, height: base)
+        .scaleEffect(target / base)
+        .accessibilityLabel(distillHeader ? "Evry is sorting your thoughts" : "Start talking")
     }
 
-    /// Accent pill + one line of guidance — the same header structure the Pomodoro
-    /// screen uses (its phase pill + encouragement), so the two features read as a
-    /// matched pair. The pill names the current mode; the line encourages.
+    /// Evry's line for the current moment, in an EvryBubble — first person,
+    /// short, ending with an offer where it can.
     private var captionArea: some View {
-        let pill = distillHeader ? "DISTILLING"
-            : (speech.isListening ? "LISTENING" : (forNote ? "NOTES" : "TASKS"))
-        let sub = distillHeader ? generatingTitle
-            : (speech.isListening ? "No rush — say it however it comes out." : hintText)
-        return VStack(spacing: 10) {
-            Text(pill)
-                .font(.system(size: 13, weight: .bold))
-                .tracking(1)
-                .foregroundStyle(palette.primary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(palette.primary.opacity(0.14), in: Capsule())
-                .overlay(Capsule().strokeBorder(palette.primary.opacity(0.35), lineWidth: 1))
-                .contentTransition(.opacity)
-
-            Text(sub)
-                .font(.system(size: 14))
-                .foregroundStyle(palette.textSec)
-                .multilineTextAlignment(.center)
-                .id(sub)                        // cross-fade when the mode changes
-                .transition(.opacity)
-        }
-        .frame(maxWidth: .infinity)
-        .opacity(headerVisible ? 1 : 0)
-        .animation(.easeInOut(duration: 0.35), value: speech.isListening)
-    }
-
-    private var typingBody: some View {
-        VStack(spacing: 0) {
-            editorCard
-                // Starts closed in place and expands vertically to fill on first
-                // appear; the vertical transition closes/opens it on dictate toggle
-                // and collapses it away when distilling (it's removed from layout).
-                .scaleEffect(x: 1, y: intro ? 1 : 0.05, anchor: .top)
-                .opacity(intro ? 1 : 0)
-                .animation(.spring(response: 0.55, dampingFraction: 0.85).delay(0.12), value: intro)
-                .transition(.verticalOpen)
-                .padding(.horizontal, 16)
-
-            buttonsRow
-                .opacity(intro ? 1 : 0)
-                .offset(y: intro ? 0 : 16)
-                .animation(.easeOut(duration: 0.4).delay(0.3), value: intro)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
-        }
-        .transition(.opacity)
-        // Keyboard waits until the box has opened, and only when there's nothing yet
-        // (so returning from dictation with a transcript doesn't shove it back up).
-        .onAppear {
-            guard input.isEmpty else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                if input.isEmpty && !speech.isListening { focused = true }
+        let sub: String = {
+            if distillHeader { return generatingTitle }
+            // While listening the guidance lives in the bottom panel, not here.
+            if dictating { return "" }
+            if speech.permissionDenied && !typingMode {
+                return "I can’t hear you yet. Please allow microphone and speech access in Settings, or type instead."
+            }
+            if typingMode {
+                return forNote ? "Type it however it comes. I’ll tidy it into a note."
+                               : "Type it however it comes. I’ll sort it into tasks."
+            }
+            if !input.isEmpty {
+                return forNote ? "Got it. Shall I tidy that into a note?"
+                               : "Got it. Shall I sort that into tasks?"
+            }
+            return forNote ? "Tell me what’s on your mind. I’ll turn it into a tidy note."
+                           : "Tell me what’s on your mind. I’ll turn it into tasks."
+        }()
+        return ZStack {
+            if !sub.isEmpty {
+                EvryBubble(text: sub, palette: palette)
+                    .id(sub)                    // cross-fade when the line changes
+                    .transition(.opacity)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .opacity(headerVisible ? 1 : 0)
+        .animation(.easeInOut(duration: 0.35), value: dictating)
+        .animation(.easeInOut(duration: 0.3), value: typingMode)
+        .animation(.easeInOut(duration: 0.3), value: input.isEmpty)
+        .animation(.easeInOut(duration: 0.3), value: speech.permissionDenied)
+    }
+
+    // MARK: Dictation hero (default)
+
+    @ViewBuilder
+    private var dictationHero: some View {
+        VStack(spacing: 16) {
+            // While dictating this whole body is hidden but keeps its space, so
+            // show the compact variant to hold a stable height (the orb stays put).
+            if input.isEmpty || dictating {
+                Button { startDictation() } label: {
+                    Label("Start talking", systemImage: "mic.fill")
+                }
+                .buttonStyle(EvrySkyButtonStyle(fullWidth: true))
+                .padding(.horizontal, 36)
+
+                typeInsteadButton
+            } else {
+                // What was dictated so far, shown for review before distilling.
+                ScrollView(.vertical, showsIndicators: false) {
+                    Text(input)
+                        .font(.evryBody)
+                        .lineSpacing(4)
+                        .foregroundStyle(palette.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 220)
+                .padding(16)
+                .background(palette.card, in: RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+                .padding(.horizontal, EvrySpace.gutter)
+
+                Button { startDistill() } label: {
+                    distillLabel
+                }
+                .buttonStyle(EvrySkyButtonStyle(fullWidth: true))
+                .padding(.horizontal, 36)
+
+                HStack(spacing: 24) {
+                    Button { startDictation() } label: {
+                        Label("Record again", systemImage: "arrow.counterclockwise")
+                            .font(.evrySmall)
+                            .foregroundStyle(palette.primary)
+                            .frame(minHeight: EvrySpace.tap)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    typeInsteadButton
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 4)
+        .transition(.opacity)
+    }
+
+    /// The distill button's label: Evry's star + the action.
+    private var distillLabel: some View {
+        HStack(spacing: 8) {
+            if aiAvailable { EvryStarGlyph(size: 18) }
+            Text(analyzeTitle)
+        }
+    }
+
+    private var typeInsteadButton: some View {
+        Button { enterTyping() } label: {
+            Text("Type instead")
+                .font(.evrySmall)
+                .foregroundStyle(palette.textSec)
+                .underline(color: palette.textSec.opacity(0.5))
+                .frame(minHeight: EvrySpace.tap)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Typing (secondary path)
+
+    private var typingBody: some View {
+        VStack(spacing: 14) {
+            editorCard
+                .padding(.horizontal, EvrySpace.gutter)
+
+            HStack(spacing: 12) {
+                Button { backToVoice() } label: {
+                    Label("Use voice", systemImage: "mic.fill")
+                }
+                .buttonStyle(EvryGhostLightButtonStyle())
+
+                Spacer()
+
+                Button { startDistill() } label: {
+                    distillLabel
+                }
+                .buttonStyle(EvrySkyButtonStyle())
+                .opacity(inputEmpty ? 0.45 : 1)
+                .disabled(inputEmpty)
+            }
+            .padding(.horizontal, EvrySpace.gutter)
+        }
+        .transition(.opacity)
     }
 
     private var editorCard: some View {
         ZStack(alignment: .topLeading) {
             if input.isEmpty {
                 Text(placeholderText)
-                    .font(.system(size: 15))
+                    .font(.evryBody)
                     .foregroundStyle(palette.textPh)
-                    .padding(.top, 14)
+                    .padding(.top, 16)
                     .padding(.horizontal, 16)
                     .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
             TextEditor(text: $input)
-                .font(.system(size: 16))
+                .font(.evryBody)
                 .foregroundStyle(palette.text)
                 .scrollContentBackground(.hidden)
                 .focused($focused)
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 11)
                 .padding(.vertical, 8)
+                .accessibilityLabel(forNote ? "Your note" : "Your tasks")
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(palette.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        // Capped a bit shorter so the larger Dictate/Distill buttons have room.
+        .frame(maxWidth: .infinity, maxHeight: 300)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
+            // Focus ring on navy is sky (focus-ring-on-navy).
+            RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous)
                 .strokeBorder(focused ? palette.primary : palette.border, lineWidth: 1.5)
         )
     }
 
-    private var buttonsRow: some View {
-        HStack(spacing: 12) {
-            Button {
-                input = ""
-                focused = false
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                withAnimation(.spring(response: 0.55, dampingFraction: 0.82)) { speech.toggle() }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "mic.fill").font(.system(size: 13, weight: .semibold))
-                    Text("Dictate").font(.system(size: 14, weight: .medium))
-                }
-                .foregroundStyle(palette.primary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(palette.primary.opacity(0.1), in: Capsule())
-            }
-            .buttonStyle(PressScaleStyle())
+    // MARK: Actions
 
-            if speech.permissionDenied {
-                Text("Enable microphone in Settings.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(palette.textSec)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer()
-
-            Button {
-                focused = false
-                speech.stop()
-                genStart = Date()
-                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                // Snapshot the container's current height (no animation) so the
-                // collapse animates cleanly from full size, then transform in
-                // place: collapse vertically, fade the buttons, and morph the orb
-                // + caption into the distilling state.
-                var freeze = Transaction(); freeze.disablesAnimations = true
-                withTransaction(freeze) { collapseHeight = windowHeight }
-                DispatchQueue.main.async {
-                    withAnimation(.easeInOut(duration: 0.7)) {
-                        collapseHeight = 0
-                        distilling = true
-                    }
-                    // Fade the orb + caption out, swap to the distilling content
-                    // while invisible, then fade it back in.
-                    withAnimation(.easeInOut(duration: 0.35)) { headerVisible = false }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                        distillHeader = true
-                        withAnimation(.easeInOut(duration: 0.45)) { headerVisible = true }
-                    }
-                }
-                Task { await analyze() }
-            } label: {
-                HStack(spacing: 6) {
-                    if aiAvailable {
-                        Image(systemName: "sparkles").font(.system(size: 13, weight: .semibold))
-                    }
-                    Text(analyzeTitle).font(.system(size: 15, weight: .semibold))
-                }
-                .foregroundStyle(inputEmpty ? palette.textSec : palette.onPrimary)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 11)
-                .background(inputEmpty ? palette.hover : palette.primary, in: Capsule())
-            }
-            .buttonStyle(PressScaleStyle())
-            .disabled(inputEmpty)
+    /// Start (or restart) voice dictation — the primary Brain Dump action.
+    private func startDictation() {
+        // Fire on every tap so the mic circle always gives feedback, then
+        // re-prepare for the next tap.
+        micHaptic.impactOccurred()
+        micHaptic.prepare()
+        if typingMode { withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { typingMode = false } }
+        input = ""
+        focused = false
+        // Flip the listening appearance immediately (in sync with the water-drop
+        // tap) — the icon swap, scale, and body fade happen right away. The actual
+        // recording spins up off-main a moment later.
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { dictating = true }
+        if !speech.isListening {
+            speech.toggle()
+        }
+        // Permission already refused: the engine won't start, so drop straight
+        // back out of the listening appearance (Evry's caption explains why).
+        if speech.permissionDenied {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { dictating = false }
         }
     }
 
-    /// Dictation mode body — the orb and caption live in the shared parent; this
-    /// is just the quiet live transcript and the Stop button.
+    /// Reveal the secondary typing box.
+    private func enterTyping() {
+        if speech.isListening { speech.stop() }
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { typingMode = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { focused = true }
+    }
+
+    /// Leave the typing box back to the dictation hero (keeps whatever was typed).
+    private func backToVoice() {
+        focused = false
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { typingMode = false }
+    }
+
+    /// Kick off the distill/analyze transformation (shared by voice + typing).
+    private func startDistill() {
+        focused = false
+        speech.stop()
+        genStart = Date()
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        // Snapshot the container's current height (no animation) so the collapse
+        // animates cleanly from full size, then transform in place.
+        var freeze = Transaction(); freeze.disablesAnimations = true
+        withTransaction(freeze) { collapseHeight = windowHeight }
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.7)) {
+                collapseHeight = 0
+                distilling = true
+            }
+            // Fade the orb + caption out, swap to the distilling content while
+            // invisible, then fade it back in.
+            withAnimation(.easeInOut(duration: 0.35)) { headerVisible = false }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                distillHeader = true
+                withAnimation(.easeInOut(duration: 0.45)) { headerVisible = true }
+            }
+        }
+        Task { await analyze() }
+    }
+
+    /// The bottom listening panel — the guidance line, the live transcript, and
+    /// the Stop button. Lives low on screen and slides up from the bottom.
     private var listeningBody: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 16) {
             // Live transcript, shown quietly so words register without a text box.
             if !input.isEmpty {
                 Text(input)
-                    .font(.system(size: 15))
+                    .font(.evryBody)
                     .foregroundStyle(palette.textSec)
                     .multilineTextAlignment(.center)
                     .lineLimit(4)
                     .padding(.horizontal, 36)
-                    .padding(.top, 4)
             }
 
-            Spacer()
+            EvryBubble(text: "I’m listening. Say it however it comes out.", palette: palette)
 
             Button {
-                withAnimation(.spring(response: 0.55, dampingFraction: 0.82)) { speech.stop() }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "stop.fill").font(.system(size: 15, weight: .semibold))
-                    Text("Stop").font(.system(size: 16, weight: .semibold))
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                    dictating = false
+                    speech.stop()
                 }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 30)
-                .padding(.vertical, 14)
-                .background(Palette.danger, in: Capsule())
+            } label: {
+                Label("Stop", systemImage: "stop.fill")
+                    .padding(.horizontal, 12)
             }
-            .buttonStyle(PressScaleStyle())
-            .padding(.bottom, 36)
+            .buttonStyle(EvrySkyButtonStyle())
+            .padding(.top, 4)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .transition(.opacity)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, EvrySpace.grid)
+        .padding(.bottom, 40)
     }
 
     private var inputEmpty: Bool { input.trimmingCharacters(in: .whitespaces).isEmpty }
 
-    private var hintText: String {
-        if aiAvailable {
-            return forNote ? "Speak or type freely — AI will tidy it into a clean note."
-                           : "Speak or type freely — AI will extract your tasks."
-        } else {
-            return forNote ? "Speak or type freely — we'll save it as a note."
-                           : "Speak or type freely — we'll build your task list."
-        }
-    }
     private var placeholderText: String {
-        forNote ? "e.g. \"Ideas for the launch — landing page, email teaser, and a short demo video…\""
-                : "e.g. \"Call dentist, buy groceries, email Sarah the report…\""
+        forNote ? "For example, “Ideas for the launch: landing page, email teaser, and a short demo video…”"
+                : "For example, “Call the dentist, buy groceries, email Sarah the report…”"
     }
     private var analyzeTitle: String {
-        if aiAvailable { return "Distill" }
-        return forNote ? "Create Note" : "Create Tasks"
+        if aiAvailable { return forNote ? "Tidy my note" : "Sort my thoughts" }
+        return forNote ? "Create note" : "Create tasks"
     }
 
     // MARK: Distilling — the transformation moment (in place on the input screen)
 
-    /// The caption shown while the model works, after the input container has
-    /// collapsed and the orb has morphed into its processing state.
+    /// Evry's line while it works, after the input container has collapsed and
+    /// the orb has morphed into its processing state.
     private var generatingTitle: String {
-        if aiAvailable { return forNote ? "Distilling into a note…" : "Distilling your thoughts…" }
-        return forNote ? "Saving your note…" : "Building your task list…"
+        if aiAvailable { return forNote ? "I’m tidying this into a note…" : "I’m sorting your thoughts…" }
+        return forNote ? "I’m saving your note…" : "I’m building your task list…"
     }
 
     // MARK: Preview
@@ -536,15 +788,20 @@ struct BrainDumpSheet: View {
                 } else if forNote {
                     notePreview
                 } else {
+                    EvryBubble(text: previewTasks.isEmpty
+                               ? "I didn’t find any tasks in that. Shall we try again?"
+                               : "I found \(previewTasks.count) task\(previewTasks.count == 1 ? "" : "s"). Add \(previewTasks.count == 1 ? "it" : "them") to your list?",
+                               palette: palette)
                     previewHeader
                     previewTaskList
-                    Text("Tap × to remove tasks before adding.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(palette.textPh)
+                    Text("Tap × to remove any you don’t need.")
+                        .font(.nunito(size: 14))
+                        .foregroundStyle(palette.textMuted)
                         .padding(.horizontal, 4)
                 }
             }
-            .padding(20)
+            .padding(EvrySpace.gutter)
+            .padding(.top, 4)
         }
         .task { await runReveal() }
     }
@@ -562,65 +819,54 @@ struct BrainDumpSheet: View {
         for _ in previewTasks.indices {
             withAnimation(.spring(response: 0.5, dampingFraction: 0.68)) { revealedCount += 1 }
             UISelectionFeedbackGenerator().selectionChanged()
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            try? await Task.sleep(nanoseconds: reduceMotion ? 80_000_000 : 250_000_000)
             if Task.isCancelled { return }
         }
     }
 
     private var errorBanner: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 40))
-                .foregroundStyle(Palette.warning)
-            Text(errorMessage)
-                .font(.system(size: 15))
-                .foregroundStyle(palette.text)
-                .multilineTextAlignment(.center)
-            Button("Try Again") { errorMessage = ""; withAnimation { phase = .input; distilling = false; collapseHeight = nil; distillHeader = false; headerVisible = true } }
-                .fontWeight(.semibold)
-                .foregroundStyle(palette.primary)
+        VStack(alignment: .leading, spacing: 16) {
+            EvryBubble(text: errorMessage, palette: palette)
+            Button {
+                errorMessage = ""
+                withAnimation { phase = .input; distilling = false; collapseHeight = nil; distillHeader = false; headerVisible = true }
+            } label: {
+                Label("Try again", systemImage: "arrow.counterclockwise")
+            }
+            .buttonStyle(EvrySkyButtonStyle(fullWidth: true))
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 60)
+        .padding(.top, 40)
     }
 
     // MARK: Preview — note
 
     private var notePreview: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
+            EvryBubble(text: "Here’s your note. Change anything you like, then save it?", palette: palette)
             HStack(spacing: 6) {
-                Text("NOTE")
-                    .font(.system(size: 11, weight: .bold))
-                    .tracking(0.8)
+                Text("Your note")
+                    .font(.evrySmall)
                     .foregroundStyle(palette.textSec)
                 Spacer()
-                // Theme-colored marker that this was tidied from a raw dump.
+                // Marks that this was tidied from a raw dump.
                 if aiAvailable {
-                    Text("TIDIED")
-                        .font(.system(size: 10, weight: .bold))
-                        .tracking(0.6)
-                        .foregroundStyle(palette.primary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(palette.primaryLight, in: Capsule())
+                    EyebrowPill(text: "Tidied by Evry", palette: palette, size: 12)
                 }
             }
             .padding(.horizontal, 4)
             TextEditor(text: $noteText)
-                .font(.system(size: 16))
+                .font(.evryBody)
                 .foregroundStyle(palette.text)
                 .scrollContentBackground(.hidden)
                 .frame(minHeight: 260)
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 11)
                 .padding(.vertical, 8)
-                .background(palette.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+                .background(palette.card, in: RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
                 .opacity(revealed ? 1 : 0)
                 .animation(.easeOut(duration: 0.5), value: revealed)
-            Text("Edit if you like, then save.")
-                .font(.system(size: 12))
-                .foregroundStyle(palette.textPh)
-                .padding(.horizontal, 4)
+                .accessibilityLabel("Your note")
         }
     }
 
@@ -628,23 +874,23 @@ struct BrainDumpSheet: View {
 
     private var previewHeader: some View {
         HStack(spacing: 8) {
-            Text("TASKS")
-                .font(.system(size: 11, weight: .bold))
-                .tracking(0.8)
+            Text("Tasks")
+                .font(.evrySmall)
                 .foregroundStyle(palette.textSec)
             Spacer()
             // Counts up as tasks reveal.
-            Text("\(revealedCount)/\(previewTasks.count)")
-                .font(.system(size: 11, weight: .bold))
+            Text("\(revealedCount) of \(previewTasks.count)")
+                .font(.evrySmall)
                 .monospacedDigit()
                 .foregroundStyle(palette.textSec)
                 .contentTransition(.numericText())
         }
         .padding(.horizontal, 4)
+        .padding(.top, 4)
     }
 
-    /// Individual neutral task cards — the app's standard look — spaced like the
-    /// inbox list. The flair lives in how each one arrives, not in recoloring it.
+    /// Individual task cards spaced like the inbox list. The flair lives in how
+    /// each one arrives, not in recolouring it.
     private var previewTaskList: some View {
         VStack(spacing: 8) {
             ForEach(Array(previewTasks.enumerated()), id: \.element.id) { i, task in
@@ -654,36 +900,36 @@ struct BrainDumpSheet: View {
     }
 
     private func previewTaskRow(task: BrainPreviewTask, index: Int) -> some View {
-        // Revealed strictly in sequence (see runReveal). The card itself is the
-        // ordinary neutral task card; the flair is the arrival — it crystallizes
-        // from blurred/shifted, its checkbox pops a check, and a single theme ring
-        // radiates to mark the moment it was pulled from the dump.
+        // Revealed strictly in sequence (see runReveal). The flair is the
+        // arrival — it crystallizes from blurred/shifted, its check disc pops a
+        // tick, and a single sky ring radiates as it's pulled from the dump.
         let shown = index < revealedCount
         return HStack(spacing: 12) {
             ZStack {
-                Circle().strokeBorder(shown ? palette.primary : palette.border, lineWidth: 2)
-                Circle().fill(shown ? palette.primary : .clear)
+                Circle().strokeBorder(shown ? Color.clear : palette.border, lineWidth: 2)
+                Circle().fill(shown ? Palette.doneFill : .clear)
                 Image(systemName: "checkmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(palette.onPrimary)
+                    .font(.nunito(size: 11, weight: .heavy))
+                    .foregroundStyle(palette.onSky)
                     .opacity(shown ? 1 : 0)
                     .scaleEffect(shown ? 1 : 0.2)
             }
             .frame(width: 22, height: 22)
-            .overlay { if shown { ExtractionRing(color: palette.primary) } }
-            .animation(.spring(response: 0.3, dampingFraction: 0.55), value: shown)
+            .overlay { if shown && !reduceMotion { ExtractionRing(color: palette.sky) } }
+            .animation(EvryMotion.spring, value: shown)
+            .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(task.title)
-                    .font(.system(size: 16.5))
+                    .font(.evryBody)
                     .foregroundStyle(palette.text)
                     .multilineTextAlignment(.leading)
                 HStack(spacing: 6) {
                     if task.priority != .normal { priorityBadge(task.priority) }
                     if let due = task.dueDate, let label = formatDueDate(due) {
                         Label(label, systemImage: "calendar")
-                            .font(.system(size: 11))
-                            .foregroundStyle(palette.textSec)
+                            .font(.evryCaption)
+                            .foregroundStyle(palette.textMuted)
                     }
                 }
             }
@@ -695,54 +941,61 @@ struct BrainDumpSheet: View {
                 }
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(palette.textSec)
-                    .frame(width: 40, height: 40)
+                    .font(.nunito(size: 13, weight: .bold))
+                    .foregroundStyle(palette.textMuted)
+                    .frame(width: EvrySpace.tap, height: EvrySpace.tap)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .opacity(0.5)
+            .accessibilityLabel("Remove \(task.title)")
         }
-        .padding(.vertical, 11)
-        .padding(.horizontal, 14)
-        .background(palette.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .padding(.vertical, 8)
+        .padding(.leading, 16)
+        .padding(.trailing, 6)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous).strokeBorder(palette.hairline, lineWidth: 1))
         // Flare: crystallize from blurred + shifted + scaled into place.
         .opacity(shown ? 1 : 0)
-        .blur(radius: shown ? 0 : 6)
-        .scaleEffect(shown ? 1 : 0.94, anchor: .leading)
-        .offset(x: shown ? 0 : -14)
+        .blur(radius: shown || reduceMotion ? 0 : 6)
+        .scaleEffect(shown || reduceMotion ? 1 : 0.94, anchor: .leading)
+        .offset(x: shown || reduceMotion ? 0 : -14)
     }
 
+    /// Priority is carried by glyph + word on a sky-soft pill, never by hue.
     private func priorityBadge(_ priority: TaskPriority) -> some View {
-        let (label, color): (String, Color) = switch priority {
-        case .high:   ("High",   Palette.danger)
-        case .medium: ("Medium", Palette.warning)
-        case .low:    ("Low",    Palette.success)
-        case .normal: ("",       .clear)
+        let (label, icon): (String, String?) = switch priority {
+        case .high:   ("High",   "exclamationmark.circle.fill")
+        case .medium: ("Medium", nil)
+        case .low:    ("Low",    "arrow.down")
+        case .normal: ("",       nil)
         }
-        return Text(label)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(color)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(color.opacity(0.15), in: Capsule())
+        return HStack(spacing: 3) {
+            if let icon { Image(systemName: icon).accessibilityHidden(true) }
+            Text(label)
+        }
+        .font(.evryCaption)
+        .foregroundStyle(palette.text)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(palette.skySoft, in: Capsule())
+        .accessibilityLabel("\(label) priority")
     }
 
     // MARK: Done — quiet closure
 
-    /// A distinct, calm resolution: confirm what got off the user's mind, then
-    /// auto-dismiss. Rewards externalizing the thought — not "using the feature".
+    /// A distinct, calm resolution: Evry confirms what got off the user's mind,
+    /// then the screen gets out of the way.
     private var doneView: some View {
         VStack(spacing: 18) {
             Spacer()
-            ClosureCheck(palette: palette)
-                .frame(width: 64, height: 64)
+            ClosureMascot()
             VStack(spacing: 6) {
                 Text("Off your mind.")
-                    .font(.system(size: 20, weight: .bold))
+                    .font(.evryH3)
                     .foregroundStyle(palette.text)
+                    .accessibilityAddTraits(.isHeader)
                 Text(closureSubtitle)
-                    .font(.system(size: 14))
+                    .font(.evryBody)
                     .foregroundStyle(palette.textSec)
                     .multilineTextAlignment(.center)
             }
@@ -754,7 +1007,7 @@ struct BrainDumpSheet: View {
 
     private var closureSubtitle: String {
         switch context {
-        case .tasks: return "\(previewTasks.count) task\(previewTasks.count == 1 ? "" : "s") captured."
+        case .tasks: return "\(previewTasks.count) task\(previewTasks.count == 1 ? "" : "s") added to your list."
         case .note:  return "Saved to your notes."
         }
     }
@@ -763,7 +1016,7 @@ struct BrainDumpSheet: View {
 
     private var confirmTitle: String {
         switch context {
-        case .tasks: return "Add \(previewTasks.count) Task\(previewTasks.count == 1 ? "" : "s")"
+        case .tasks: return "Add \(previewTasks.count) task\(previewTasks.count == 1 ? "" : "s")"
         case .note:  return "Save"
         }
     }
@@ -782,7 +1035,7 @@ struct BrainDumpSheet: View {
         case .note(let save): save(noteText)
         }
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) { phase = .done }
+        withAnimation(EvryMotion.settle) { phase = .done }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { close() }
     }
 
@@ -805,66 +1058,18 @@ struct BrainDumpSheet: View {
         }
     }
 
+    /// Extraction itself lives in `EvryAssistant` (shared with the Evry chat);
+    /// this just drives the sheet's phases around it.
     private func analyzeTasks() async {
-        if aiAvailable {
-            do {
-                let session = LanguageModelSession(instructions: """
-                    You are a productivity assistant. Extract clear, actionable tasks \
-                    ONLY from the user's own free-form brain dump (spoken or typed).
-                    Rules:
-                    - Use ONLY the content the user provided. NEVER invent, assume, or add \
-                    tasks that are not in their text. Do not use any example tasks.
-                    - If the input contains no actionable tasks, return an empty list.
-                    - Remove ALL filler words and sounds (um, uh, hmm, like, you know, ahh, etc.)
-                    - Combine fragmented thoughts into concise, self-contained task titles
-                    - Rewrite each task in action-first phrasing (start with a verb, drop \
-                    "I need to"/"I should"/"I have to")
-                    - Keep any timing cues the user mentioned in the title
-                    \(priorityGuidance)
-                    - Merge duplicates into one task
-                    - Today's date is \(Date().formatted(.dateTime.weekday().day().month().year()))
-                    """)
-                let response = try await session.respond(
-                    to: "Extract tasks from this brain dump:\n\n\(input)",
-                    generating: BrainDumpResult.self
-                )
-                let tasks: [BrainPreviewTask] = response.content.tasks.map { dumped in
-                    let parsed = parseTaskInput(dumped.title)
-                    let priority: TaskPriority = switch dumped.priority.lowercased() {
-                    case "high":   .high
-                    case "medium": .medium
-                    case "low":    .low
-                    default:       parsed.priority
-                    }
-                    return BrainPreviewTask(
-                        title: parsed.title.isEmpty ? dumped.title : parsed.title,
-                        dueDate: parsed.date ?? Calendar.current.startOfDay(for: Date()),
-                        priority: priority
-                    )
-                }
-                await MainActor.run { previewTasks = tasks }
-                await advanceToPreview()
-            } catch {
-                await MainActor.run {
-                    errorMessage = "Apple Intelligence couldn't process your request. Try again or rephrase your input."
-                    withAnimation { phase = .preview }
-                }
-            }
-        } else {
-            let lines = input
-                .components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { $0.count > 2 }
-            let tasks: [BrainPreviewTask] = lines.map { line in
-                let parsed = parseTaskInput(line)
-                return BrainPreviewTask(
-                    title: parsed.title.isEmpty ? line : parsed.title,
-                    dueDate: parsed.date ?? Calendar.current.startOfDay(for: Date()),
-                    priority: parsed.priority
-                )
-            }
+        do {
+            let tasks = try await EvryAssistant.distill(input, usesPrioritiesOften: usesPrioritiesOften)
             await MainActor.run { previewTasks = tasks }
             await advanceToPreview()
+        } catch {
+            await MainActor.run {
+                errorMessage = "I couldn’t sort that one. Please try again, or say it a little differently."
+                withAnimation { phase = .preview }
+            }
         }
     }
 
@@ -885,7 +1090,7 @@ struct BrainDumpSheet: View {
                 await advanceToPreview()
             } catch {
                 await MainActor.run {
-                    errorMessage = "Apple Intelligence couldn't process your request. Try again or rephrase your input."
+                    errorMessage = "I couldn’t sort that one. Please try again, or say it a little differently."
                     withAnimation { phase = .preview }
                 }
             }
@@ -897,11 +1102,40 @@ struct BrainDumpSheet: View {
     }
 }
 
+// MARK: - Mic ripple
+
+/// Water-drop ripple: on each `trigger` bump, two concentric rings spread out
+/// from the orb's edge and fade — like a drop landing in a puddle.
+private struct MicRipple: View {
+    let trigger: Int
+    let color: Color
+
+    /// 0 = at rest (rings at the orb edge), 1 = fully spread + faded.
+    @State private var phase: CGFloat = 1
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<2, id: \.self) { i in
+                Circle()
+                    .strokeBorder(color, lineWidth: 2)
+                    .scaleEffect(1 + phase * (0.7 + CGFloat(i) * 0.5))
+                    .opacity(Double(1 - phase) * 0.5)
+            }
+        }
+        .allowsHitTesting(false)
+        .onChange(of: trigger) { _, _ in
+            phase = 0
+            withAnimation(.easeOut(duration: 0.6)) { phase = 1 }
+        }
+    }
+}
+
 // MARK: - Breathing orb
 
-/// A calm, alive indicator: a soft theme-tinted disc with a gentle looping
-/// breath and an outer glow that swells with the mic amplitude. Shared by the
+/// A calm, alive indicator: a sky disc with a navy glyph, a gentle looping
+/// breath, and a soft sky halo that swells with the mic amplitude. Shared by the
 /// listening state and the transformation state so the two feel like one motif.
+/// Decorative motion (breath, sonar) stops under Reduce Motion.
 private struct BreathingOrb: View {
     let level: Double
     let palette: Palette
@@ -912,6 +1146,7 @@ private struct BreathingOrb: View {
     /// When listening, the orb comes alive: sonar pulses + amplitude-driven glow.
     var listening: Bool = false
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var breathe = false
     @State private var sonar = false
 
@@ -919,87 +1154,55 @@ private struct BreathingOrb: View {
         ZStack {
             // Sonar rings — only while listening. Two staggered, slow pulses so it
             // reads as "hearing you" without becoming busy.
-            if listening {
+            if listening && !reduceMotion {
                 ForEach(0..<2, id: \.self) { i in
                     Circle()
-                        .stroke(palette.primary.opacity(0.28), lineWidth: 2)
+                        .stroke(palette.sky.opacity(0.4), lineWidth: 2)
                         .scaleEffect(sonar ? 1.9 : 1.0)
-                        .opacity(sonar ? 0 : 0.4)
+                        .opacity(sonar ? 0 : 0.5)
                         .animation(
                             .easeOut(duration: 1.8).repeatForever(autoreverses: false).delay(Double(i) * 0.9),
                             value: sonar
                         )
                 }
             }
-            // Voice-responsive glow (calm: swells a little, never snaps). Kept
-            // restrained so it reads as a soft halo rather than a bloom.
+            // Voice-responsive halo (calm: swells a little, never snaps).
             Circle()
-                .fill(palette.primary.opacity(0.11))
+                .fill(palette.sky.opacity(0.16))
                 .scaleEffect(1.0 + CGFloat(min(1, max(0, level))) * 0.45)
                 .animation(.easeOut(duration: 0.28), value: level)
-            Circle().fill(palette.primaryLight)
-            Circle().strokeBorder(palette.primary.opacity(0.25), lineWidth: 1)
-            // Two stacked glyphs, both centered — cross-fade by opacity so the icon
-            // swaps in place (no slide/translate).
+            // The sky disc — the main action on navy.
+            Circle().fill(palette.sky)
+                .evryShadowLift(palette)
+            // Two stacked glyphs: the base icon slides out to the left while the
+            // active (listening) icon slides in from the right — a clean swap.
             ZStack {
                 Image(systemName: icon)
-                    .opacity(listening && activeIcon != nil ? 0 : 1)
+                    .offset(x: (listening && activeIcon != nil && !reduceMotion) ? -46 : 0)
+                    .opacity((listening && activeIcon != nil) ? 0 : 1)
                 if let activeIcon {
                     Image(systemName: activeIcon)
+                        .offset(x: listening || reduceMotion ? 0 : 46)
                         .opacity(listening ? 1 : 0)
                 }
             }
-            .font(.system(size: 22, weight: .semibold))
-            .foregroundStyle(palette.primary)
-            .animation(.easeInOut(duration: 0.3), value: listening)
+            .font(.nunito(size: 24, weight: .bold))
+            .foregroundStyle(palette.onSky)
+            .animation(.spring(response: 0.32, dampingFraction: 0.78), value: listening)
         }
-        .scaleEffect(breathe ? 1.05 : 0.97)
-        .animation(.easeInOut(duration: 1.7).repeatForever(autoreverses: true), value: breathe)
-        .onAppear { breathe = true; sonar = true }
-    }
-}
-
-// MARK: - Typewriter text
-
-/// Reveals its text one character at a time, as if typed. Reserves the full size
-/// up front (hidden) so surrounding layout doesn't jump as characters appear.
-private struct TypewriterText: View {
-    let text: String
-    var font: Font
-    var color: Color
-    var perChar: Double = 0.02
-    var startDelay: Double = 0
-
-    @State private var count = 0
-
-    var body: some View {
-        ZStack {
-            Text(text).opacity(0)
-            Text(String(text.prefix(count)))
-                .foregroundStyle(color)
-                .frame(maxWidth: .infinity, alignment: .center)
-        }
-        .font(font)
-        .multilineTextAlignment(.center)
-        .fixedSize(horizontal: false, vertical: true)
-        .task(id: text) {
-            count = 0
-            if startDelay > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(startDelay * 1_000_000_000))
-            }
-            while count < text.count {
-                try? await Task.sleep(nanoseconds: UInt64(perChar * 1_000_000_000))
-                if Task.isCancelled { return }
-                count += 1
-            }
+        .scaleEffect(breathe ? 1.05 : 1)
+        .animation(breathe ? .easeInOut(duration: 1.7).repeatForever(autoreverses: true) : nil, value: breathe)
+        .onAppear {
+            guard !reduceMotion else { return }
+            breathe = true; sonar = true
         }
     }
 }
 
 // MARK: - Extraction ring
 
-/// A single, gentle theme-colored ring that expands and fades once — reused from
-/// the app's completion-burst language to mark a task being pulled from the dump.
+/// A single, gentle sky ring that expands and fades once — reused from the
+/// app's completion-burst language to mark a task being pulled from the dump.
 private struct ExtractionRing: View {
     let color: Color
     var delay: Double = 0
@@ -1013,7 +1216,7 @@ private struct ExtractionRing: View {
             .scaleEffect(scale)
             .opacity(opacity)
             .onAppear {
-                opacity = 0.5
+                opacity = 0.6
                 scale = 0.9
                 withAnimation(.easeOut(duration: 0.55).delay(delay)) {
                     scale = 2.4
@@ -1023,61 +1226,42 @@ private struct ExtractionRing: View {
     }
 }
 
-// MARK: - Closure check
+// MARK: - Closure mascot
 
-/// The quiet completion mark: a theme-filled check that pops once with a single
-/// radiating ring, echoing `TaskCheckbox` without the green (this is closure for
-/// the whole dump, tied to the app's identity color).
-private struct ClosureCheck: View {
-    let palette: Palette
-
+/// The quiet success beat: Evry pops in with a small sky check disc tucked at
+/// the corner. The pop is a "small delight" (EvryMotion.spring) and is skipped
+/// under Reduce Motion.
+private struct ClosureMascot: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pop: CGFloat = 0.6
-    @State private var ringScale: CGFloat = 0.7
-    @State private var ringOpacity: Double = 0
 
     var body: some View {
-        ZStack {
-            Circle()
-                .stroke(palette.primary, lineWidth: 2.5)
-                .scaleEffect(ringScale)
-                .opacity(ringOpacity)
-            Circle().fill(palette.primary)
-            Image(systemName: "checkmark")
-                .font(.system(size: 26, weight: .bold))
-                .foregroundStyle(palette.onPrimary)
-        }
-        .scaleEffect(pop)
-        .onAppear {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) { pop = 1 }
-            ringOpacity = 0.6
-            ringScale = 0.9
-            withAnimation(.easeOut(duration: 0.6)) {
-                ringScale = 2.1
-                ringOpacity = 0
+        EvryMascot(size: 96)
+            .overlay(alignment: .bottomTrailing) {
+                EvryCheck(size: 28)
+                    .offset(x: 4, y: 2)
             }
-        }
+            .scaleEffect(reduceMotion ? 1 : pop)
+            .onAppear {
+                withAnimation(EvryMotion.spring) { pop = 1 }
+            }
+            .accessibilityHidden(true)
     }
 }
 
-// MARK: - Vertical open/close transition
+// MARK: - Evry's star glyph
 
-private extension AnyTransition {
-    /// Collapses/expands vertically from the top — the text box "opening" and
-    /// "closing" in place rather than scaling uniformly from a corner.
-    static var verticalOpen: AnyTransition {
-        .modifier(
-            active: VerticalScaleModifier(scaleY: 0.05),
-            identity: VerticalScaleModifier(scaleY: 1)
-        )
+/// The star that stands for Evry, the assistant, in small UI (EvryIconStar,
+/// a template image that tints with the surrounding foreground style).
+private struct EvryStarGlyph: View {
+    var size: CGFloat = 18
+
+    var body: some View {
+        Image("EvryIconStar")
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
     }
 }
-
-private struct VerticalScaleModifier: ViewModifier {
-    let scaleY: CGFloat
-    func body(content: Content) -> some View {
-        content
-            .scaleEffect(x: 1, y: scaleY, anchor: .top)
-            .opacity(Double(scaleY))
-    }
-}
-
