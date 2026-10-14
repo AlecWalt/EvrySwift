@@ -43,9 +43,18 @@ struct FrequentPlace: Codable, Identifiable, Equatable {
 enum FrequentPlaces {
     static let key = "frequent_places"
 
+    /// The last decoded list, keyed by the raw data it came from. `match(for:)`
+    /// runs on every task created and every title keystroke, so decode only
+    /// when the stored data actually changes (any writer — including the
+    /// Profile panel's @AppStorage — is picked up by the comparison).
+    private static var cache: (data: Data, places: [FrequentPlace])?
+
     static func load() -> [FrequentPlace] {
         guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
-        return (try? JSONDecoder().decode([FrequentPlace].self, from: data)) ?? []
+        if let cache, cache.data == data { return cache.places }
+        let places = (try? JSONDecoder().decode([FrequentPlace].self, from: data)) ?? []
+        cache = (data, places)
+        return places
     }
 
     static func save(_ places: [FrequentPlace]) {
