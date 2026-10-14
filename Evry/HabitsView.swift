@@ -105,8 +105,10 @@ struct HabitsView: View {
                 }
             }
         }
-        .onChange(of: allDone) { old, new in
-            if new && !old { celebrate() }
+        // Only a check-in that completes the day celebrates — not deleting or
+        // archiving the last unfinished habit.
+        .onChange(of: doneToday) { old, new in
+            if new > old && allDone { celebrate() }
         }
         // Full-screen (over the tab bar and swipe handle) with a clear
         // background; the view runs its own entrance, so the slide is suppressed.
@@ -297,14 +299,14 @@ struct HabitsView: View {
         .evryField(palette, cornerRadius: EvryRadius.field)
     }
 
-    /// The focused habit's current week, Sunday → Saturday — each a small ring
+    /// The focused habit's current week, from the locale's first weekday (as in
+    /// the Inbox week and the habit day picker) — each a small ring
     /// of that day's progress. Days still ahead are dimmed.
     private func weekStrip(_ habit: Habit, stats: HabitStats) -> some View {
         let cal = Calendar.current
         let today = cal.startOfDay(for: Date())
-        // Always Sunday-first (weekday 1), regardless of the locale's first day.
-        let sunday = cal.date(byAdding: .day, value: 1 - cal.component(.weekday, from: today), to: today) ?? today
-        let days = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: sunday) }
+        let weekStart = cal.dateInterval(of: .weekOfYear, for: today)?.start ?? today
+        let days = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: weekStart) }
 
         return HStack(spacing: 0) {
             ForEach(days, id: \.self) { day in
@@ -1764,7 +1766,8 @@ private struct HabitDetailSheet: View {
                     .foregroundStyle(palette.text)
                     .frame(minWidth: 34)
                     .contentTransition(.numericText())
-                todayStep("plus", enabled: !stats.todayDone) {
+                // A built habit is a finished record — no new check-ins.
+                todayStep("plus", enabled: !stats.todayDone && !habit.isFormed) {
                     HabitActions.checkIn(habit, context: context)
                     if stats.today + 1 >= stats.target {
                         UINotificationFeedbackGenerator().notificationOccurred(.success)
