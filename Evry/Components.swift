@@ -456,11 +456,15 @@ struct BurstPillButton: View {
     @State private var popScale: CGFloat = 1
     @State private var burstScale: CGFloat = 1
     @State private var burstOpacity: Double = 0
+    @State private var firing = false
 
     var body: some View {
         Button {
+            // One action per tap — a second tap during the pop is ignored.
+            guard !firing else { return }
+            firing = true
             play()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { action() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { action(); firing = false }
         } label: {
             Text(title)
                 .font(.nunito(size: 13, weight: .bold))
@@ -512,12 +516,16 @@ struct TrashBurstButton: View {
     @State private var popScale: CGFloat = 1
     @State private var burstScale: CGFloat = 0.85
     @State private var burstOpacity: Double = 0
+    @State private var firing = false
     @State private var tinted = false
 
     var body: some View {
         Button {
+            // One action per tap — a second tap during the pop is ignored.
+            guard !firing else { return }
+            firing = true
             play()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { action() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { action(); firing = false }
         } label: {
             ZStack {
                 // Ring that bursts outward on tap (same shape as the checkbox's).
