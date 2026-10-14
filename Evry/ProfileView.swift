@@ -285,7 +285,7 @@ struct ProfileView: View {
             .padding(.horizontal, 60)
 
             HStack {
-                circleButton("magnifyingglass", label: "Search tasks, notes and projects") { showGlobalSearch = true }
+                circleButton("magnifyingglass", label: "Search tasks") { showGlobalSearch = true }
                 Spacer()
                 circleButton("gearshape.fill", label: "Open settings") { showSettings = true }
             }
@@ -2307,7 +2307,7 @@ struct GlobalSearchSheet: View {
                         .font(.nunito(size: 15, weight: .semibold))
                         .foregroundStyle(palette.textSec)
                         .accessibilityHidden(true)
-                    TextField("Tasks, notes, projects, tags…", text: $searchText)
+                    TextField("Tasks and tags…", text: $searchText)
                         .font(.evryBody)
                         .foregroundStyle(palette.text)
                         .autocorrectionDisabled()
@@ -2677,13 +2677,18 @@ struct ProfilePhotoCropper: View {
                         DragGesture()
                             .updating($drag) { v, state, _ in state = v.translation }
                             .onEnded { v in
-                                offset.width += v.translation.width
-                                offset.height += v.translation.height
+                                let moved = CGSize(width: offset.width + v.translation.width,
+                                                   height: offset.height + v.translation.height)
+                                withAnimation(EvryMotion.settle) { offset = clamped(moved, scale: scale) }
                             }
                             .simultaneously(with:
                                 MagnificationGesture()
                                     .updating($pinch) { v, state, _ in state = v }
-                                    .onEnded { v in scale = min(4, max(1, scale * v)) }
+                                    .onEnded { v in
+                                        scale = min(4, max(1, scale * v))
+                                        // Zooming out can leave the photo off the window.
+                                        withAnimation(EvryMotion.settle) { offset = clamped(offset, scale: scale) }
+                                    }
                             )
                     )
 
@@ -2702,6 +2707,19 @@ struct ProfilePhotoCropper: View {
                 .padding(.top, 8)
             }
         }
+    }
+
+    /// Keeps the photo covering the whole crop window — panning past its edge
+    /// would otherwise leave an empty band in the saved avatar.
+    private func clamped(_ offset: CGSize, scale: CGFloat) -> CGSize {
+        let aspect = image.size.height > 0 ? image.size.width / image.size.height : 1
+        // The aspect-filled size before zoom.
+        let filled = aspect >= 1 ? CGSize(width: side * aspect, height: side)
+                                 : CGSize(width: side, height: side / aspect)
+        let maxX = max(0, (filled.width * scale - side) / 2)
+        let maxY = max(0, (filled.height * scale - side) / 2)
+        return CGSize(width: min(maxX, max(-maxX, offset.width)),
+                      height: min(maxY, max(-maxY, offset.height)))
     }
 
     /// The zoom/pan image layer, sized to fill the square crop window.
