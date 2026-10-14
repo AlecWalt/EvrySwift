@@ -1896,7 +1896,6 @@ private struct LayoutSettingsView: View {
     @AppStorage("inbox_hide_completed") private var hideCompleted = false
     @AppStorage("inbox_hide_notes") private var hideNotes = false
     @AppStorage("inbox_hide_reschedule") private var hideReschedule = false
-    @AppStorage("inbox_swipe_layout") private var swipeLayout = true
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
     // Profile is always present, so only the toggleable tabs count toward the
@@ -1924,9 +1923,6 @@ private struct LayoutSettingsView: View {
                     inboxRow("Hide completed tasks", icon: "eye.slash", isOn: $hideCompleted)
                     inboxRow("Hide notes", icon: "note.text.badge.plus", isOn: $hideNotes)
                     inboxRow("Hide reschedule button", icon: "calendar.badge.minus", isOn: $hideReschedule)
-                    // Swipe between Schedule and Tasks (and right for the menu),
-                    // instead of the Tasks / Schedule selector.
-                    inboxRow("Swipe navigation", icon: "hand.draw", isOn: $swipeLayout)
                 }
                 .padding(.horizontal, EvrySpace.gutter)
                 .padding(.vertical, 20)

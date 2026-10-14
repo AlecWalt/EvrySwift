@@ -33,9 +33,6 @@ struct InboxView: View {
     @State private var timelineDayOffset = 0
     /// Tasks or Schedule — Schedule by default.
     @State private var mode: InboxMode = .schedule
-    /// The swipe layout: no selector — swipe between Schedule and Tasks, and
-    /// swipe right on Schedule to reveal the menu. (Off = the selector layout.)
-    @AppStorage("inbox_swipe_layout") private var swipeLayout = true
     /// How far the main card has slid aside for the menu (shared with the root,
     /// so the add handle rides along).
     @Environment(InboxDrawerState.self) private var drawer
@@ -105,11 +102,7 @@ struct InboxView: View {
     private var tasks: [TaskItem] { allTasks.filter { !$0.isTrashed && (!hideNotes || !$0.isNote) } }
 
     var body: some View {
-        if swipeLayout {
-            swipeLayoutBody
-        } else {
-            mainContent
-        }
+        swipeLayoutBody
     }
 
     private var mainContent: some View {
@@ -127,44 +120,29 @@ struct InboxView: View {
                         .zIndex(1)
                 }
 
-                if swipeLayout {
-                    // Schedule and Tasks side by side; the visible one follows
-                    // the finger while swiping between them.
-                    GeometryReader { geo in
-                        let w = geo.size.width
-                        HStack(spacing: 0) {
-                            schedulePage
-                                .frame(width: w)
-                            tasksPage
-                                .frame(width: w)
-                        }
-                        .offset(x: (mode == .tasks ? -w : 0) + pageDrag)
-                        // While a view swipe is underway the page rides along
-                        // under the finger — so a swipe that began on a checkbox
-                        // would end on it and count as a tap. No taps mid-swipe.
-                        // (Page swipes only — the menu swipe moves the whole card,
-                        // so nothing shifts under the finger, and disabling would
-                        // briefly dim buttons as it ends.)
-                        .disabled(navDrag == .page)
-                        // Hold the page's own vertical scroll still during any
-                        // sideways swipe, so it can't nudge or bounce underneath.
-                        .scrollDisabled(navDrag == .page || navDrag == .menu)
+                // Schedule and Tasks side by side; the visible one follows
+                // the finger while swiping between them.
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    HStack(spacing: 0) {
+                        schedulePage
+                            .frame(width: w)
+                        tasksPage
+                            .frame(width: w)
                     }
-                    .clipped()
-                } else {
-                    ZStack {
-                        // Tasks stays alive (hidden) while one of its tasks is
-                        // being dragged onto the Schedule, so the drag carries on.
-                        if mode == .tasks || scheduleDrag.isEngaged {
-                            tasksPage
-                                .opacity(mode == .tasks ? 1 : 0)
-                                .transition(.opacity)
-                        }
-                        if mode == .schedule {
-                            schedulePage.transition(.opacity)
-                        }
-                    }
+                    .offset(x: (mode == .tasks ? -w : 0) + pageDrag)
+                    // While a view swipe is underway the page rides along
+                    // under the finger — so a swipe that began on a checkbox
+                    // would end on it and count as a tap. No taps mid-swipe.
+                    // (Page swipes only — the menu swipe moves the whole card,
+                    // so nothing shifts under the finger, and disabling would
+                    // briefly dim buttons as it ends.)
+                    .disabled(navDrag == .page)
+                    // Hold the page's own vertical scroll still during any
+                    // sideways swipe, so it can't nudge or bounce underneath.
+                    .scrollDisabled(navDrag == .page || navDrag == .menu)
                 }
+                .clipped()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(inFocusMode ? Color.clear : palette.bg)
@@ -239,8 +217,6 @@ struct InboxView: View {
                 scheduleDrag: scheduleDrag,
                 dayOffset: $timelineDayOffset,
                 onToggleSelect: toggleSelect,
-                // In the swipe layout, sideways swipes move between views instead.
-                pagesDays: !swipeLayout,
                 onListBottomChange: { tasksListMaxY = $0 }
             )
         }
@@ -499,11 +475,7 @@ struct InboxView: View {
                     .accessibilityHidden(weekOpen)
             }
 
-            if swipeLayout {
-                pageHint
-            } else {
-                InboxModeSelector(mode: $mode, palette: palette)
-            }
+            pageHint
         }
         .onChange(of: timelineDayOffset) { old, new in dayForward = new >= old }
         .onChange(of: mode) { _, m in
@@ -758,14 +730,9 @@ private struct InboxTimelineView: View {
     let scheduleDrag: ScheduleDragState
     @Binding var dayOffset: Int
     var onToggleSelect: (TaskItem) -> Void
-    /// Swipe the blank area below the list to change day (off in the swipe layout,
-    /// where horizontal swipes move between Schedule and Tasks instead).
-    var pagesDays = true
     /// Reports where the task list ends (global y), for the swipe layout.
     var onListBottomChange: (CGFloat) -> Void = { _ in }
 
-    // Day-paging slide offset. Local @State so a drag never re-renders the parent.
-    @State private var swipeDelta: CGFloat = 0
     // Measured content height of the current day page — the container sizes to it
     // (capped) so it adapts as tasks / subtask lists expand and collapse.
     @State private var contentHeight: CGFloat = 170
@@ -781,44 +748,23 @@ private struct InboxTimelineView: View {
             // In multi-select the container expands to the full height so there's
             // room to see where tasks are being reordered; otherwise it fits the
             // measured content (so it grows/shrinks with expanded subtasks), capped
-            // to the available height — minus a bottom gutter so there's always a
-            // strip to swipe on to page days (clearing the add-task handle), even
-            // when a day is packed with tasks.
-            // Keep the list's bottom edge above the floating add-task handle / tab
-            // bar (matching the inbox list's own bottom clearance), so there's
-            // always an uncovered strip to swipe on to page days.
+            // to the available height — keeping the list's bottom edge clear of the
+            // floating add-task handle and tab bar.
             let bottomGutter: CGFloat = 132
             let fitted = min(max(contentHeight, 120), max(200, geo.size.height - bottomGutter))
             let listH = isSelecting ? geo.size.height : fitted
             VStack(spacing: 0) {
-                // Capped, self-contained vertical-scroll list. Also the filmstrip:
-                // the current page slides out and the adjacent day slides in.
-                ZStack(alignment: .top) {
-                    if swipeDelta != 0 {
-                        let adjOff = dayOffset + (swipeDelta < 0 ? 1 : -1)
-                        let adjDate = cal.date(byAdding: .day, value: adjOff, to: today) ?? today
-                        dayPage(for: adjDate, off: adjOff)
-                            .frame(width: w, height: listH)
-                            .offset(x: swipeDelta < 0 ? w + swipeDelta : -w + swipeDelta)
-                            .transition(.identity)
-                    }
-                    dayPage(for: curDate, off: dayOffset)
-                        .frame(width: w, height: listH)
-                        .offset(x: swipeDelta)
-                }
-                .frame(height: listH)
+                // Capped, self-contained vertical-scroll list.
+                dayPage(for: curDate, off: dayOffset)
+                    .frame(width: w, height: listH)
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { onListBottomChange($0) }
                 // The task region is flat — no inner-shadow well darkening the
                 // rows; rows soften out at the edges via `timelineScrollFade`.
-                // Everything below this region pages the day.
                 .clipShape(RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
 
-                // Blank area below the list — swipe left/right here to change day.
-                // Isolated from the list, so vertical scrolling is never contested.
+                // Blank space below the list (a swipe here switches views).
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .gesture(pagesDays ? dayPagingGesture(width: w) : nil)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
@@ -861,37 +807,6 @@ private struct InboxTimelineView: View {
             allTaskCount: tasks.count,
             reportsHeight: off == dayOffset
         )
-    }
-
-    /// Day-paging drag, attached ONLY to the blank area below the list — so it can
-    /// never contend with the list's vertical scroll. Live-follows the finger.
-    private func dayPagingGesture(width w: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 10)
-            .onChanged { v in
-                guard draggingID == nil else { return }
-                swipeDelta = v.translation.width
-            }
-            .onEnded { v in
-                guard draggingID == nil else {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { swipeDelta = 0 }
-                    return
-                }
-                commitDayPage(tx: v.translation.width, vx: v.velocity.width, width: w)
-            }
-    }
-
-    /// Commits (or cancels) a day-page swipe. On commit the day switches right
-    /// away and the freshly-shown page is placed where the adjacent page already
-    /// sat, then animated home — seamless, no jump at the switch.
-    private func commitDayPage(tx: CGFloat, vx: CGFloat, width w: CGFloat) {
-        if abs(tx) > w * 0.22 || abs(vx) > 450 {
-            let direction = tx > 0 ? -1 : 1
-            dayOffset += direction
-            swipeDelta = (direction == -1 ? -w : w) + tx
-            withAnimation(.spring(response: 0.22, dampingFraction: 0.9)) { swipeDelta = 0 }
-        } else {
-            withAnimation(.spring(response: 0.26, dampingFraction: 0.85)) { swipeDelta = 0 }
-        }
     }
 }
 
