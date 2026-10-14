@@ -963,7 +963,7 @@ struct EvryChatOverlay: View {
         withThinking {
             let tasks: [BrainPreviewTask]
             do {
-                tasks = try await EvryAssistant.distill(text, usesPrioritiesOften: usesPrioritiesOften)
+                tasks = try await EvryAssistant.distill(text, usesPrioritiesOften: EvryAssistant.usesPrioritiesOften(context))
             } catch {
                 // The model couldn't run this time — split the text instead, so
                 // the person still gets their tasks.
@@ -981,14 +981,6 @@ struct EvryChatOverlay: View {
 
     /// True when the user labels a meaningful share of their own tasks with a
     /// priority (matches Brain dump's behaviour).
-    private var usesPrioritiesOften: Bool {
-        let all = (try? context.fetch(FetchDescriptor<TaskItem>())) ?? []
-        let real = all.filter { !$0.isTrashed && !$0.isNote }
-        guard real.count >= 5 else { return false }
-        let labeled = real.filter { $0.priority != .normal }.count
-        return Double(labeled) / Double(real.count) >= 0.4
-    }
-
     private func addTasks(_ tasks: [BrainPreviewTask], from message: ChatMessage) {
         for task in tasks {
             let item = TaskItem(title: task.title)

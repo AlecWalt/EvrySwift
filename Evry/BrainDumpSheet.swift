@@ -51,9 +51,7 @@ struct BrainDumpSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// The user's own tasks — used to gauge how often they actually use priorities,
-    /// so extraction can mirror their habit rather than over-labeling.
-    @Query private var allTasks: [TaskItem]
+    @Environment(\.modelContext) private var modelContext
 
     private enum Phase { case input, preview, done }
 
@@ -125,16 +123,6 @@ struct BrainDumpSheet: View {
     private let palette = Palette(dark: true)
     private var aiAvailable: Bool { SystemLanguageModel.default.isAvailable }
     private var forNote: Bool { if case .note = context { return true } else { return false } }
-
-    /// True when the user labels a meaningful share of their own tasks with a
-    /// priority — a signal that extraction should use priorities freely too.
-    /// Requires a small sample so a brand-new user defaults to sparing.
-    private var usesPrioritiesOften: Bool {
-        let real = allTasks.filter { !$0.isTrashed && !$0.isNote }
-        guard real.count >= 5 else { return false }
-        let labeled = real.filter { $0.priority != .normal }.count
-        return Double(labeled) / Double(real.count) >= 0.4
-    }
 
     var body: some View {
         NavigationStack {
@@ -1086,7 +1074,7 @@ struct BrainDumpSheet: View {
     /// this just drives the sheet's phases around it.
     private func analyzeTasks() async {
         do {
-            let tasks = try await EvryAssistant.distill(input, usesPrioritiesOften: usesPrioritiesOften)
+            let tasks = try await EvryAssistant.distill(input, usesPrioritiesOften: EvryAssistant.usesPrioritiesOften(modelContext))
             await MainActor.run { previewTasks = tasks }
             await advanceToPreview()
         } catch {

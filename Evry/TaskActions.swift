@@ -126,13 +126,10 @@ enum TaskActions {
     /// Purge trashed tasks older than the 30-day retention window.
     static func purgeExpiredTrash(context: ModelContext) {
         let cutoff = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
-        let descriptor = FetchDescriptor<TaskItem>(
-            predicate: #Predicate<TaskItem> { $0.deletedAt != nil }
-        )
-        guard let trashed = try? context.fetch(descriptor) else { return }
-        for task in trashed {
-            guard let deletedAt = task.deletedAt, deletedAt < cutoff else { continue }
-            context.delete(task)
-        }
+        let descriptor = FetchDescriptor<TaskItem>(predicate: #Predicate<TaskItem> { t in
+            if let deletedAt = t.deletedAt { deletedAt < cutoff } else { false }
+        })
+        guard let expired = try? context.fetch(descriptor) else { return }
+        for task in expired { context.delete(task) }
     }
 }

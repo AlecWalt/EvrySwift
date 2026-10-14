@@ -14,11 +14,28 @@
 
 import Foundation
 import FoundationModels
+import SwiftData
 import UIKit
 
 enum EvryAssistant {
     /// True when the on-device language model can be used right now.
     static var isAvailable: Bool { SystemLanguageModel.default.isAvailable }
+
+    /// True when the person labels a meaningful share (40%+) of their own tasks
+    /// with a priority — so Distill can use priorities freely too. Needs a small
+    /// sample, so a brand-new user defaults to sparing. Two counts in the
+    /// store, not a fetch of every task.
+    static func usesPrioritiesOften(_ context: ModelContext) -> Bool {
+        let real = FetchDescriptor<TaskItem>(predicate: #Predicate { !$0.isNote && $0.deletedAt == nil })
+        let total = (try? context.fetchCount(real)) ?? 0
+        guard total >= 5 else { return false }
+        let normal = TaskPriority.normal.rawValue
+        let labeled = FetchDescriptor<TaskItem>(predicate: #Predicate {
+            !$0.isNote && $0.deletedAt == nil && $0.priorityRaw != normal
+        })
+        let count = (try? context.fetchCount(labeled)) ?? 0
+        return Double(count) / Double(total) >= 0.4
+    }
 }
 
 // MARK: - Distill (brain dump → tasks)

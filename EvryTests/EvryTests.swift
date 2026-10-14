@@ -297,3 +297,31 @@ struct NoteBodySaverTests {
         #expect(note.plainText == "AB")
     }
 }
+
+// MARK: - Store queries
+
+@MainActor
+struct StoreQueryTests {
+    @Test func prioritiesOftenNeedsFortyPercent() throws {
+        let ctx = try memoryContext()
+        for i in 0..<5 {
+            ctx.insert(TaskItem(title: "t\(i)", priority: i < 2 ? .high : .normal, autoLocation: false))
+        }
+        #expect(EvryAssistant.usesPrioritiesOften(ctx))          // 2 of 5 = 40%
+        ctx.insert(TaskItem(title: "t5", autoLocation: false))
+        #expect(!EvryAssistant.usesPrioritiesOften(ctx))         // 2 of 6
+    }
+
+    @Test func purgeRemovesOnlyExpiredTrash() throws {
+        let ctx = try memoryContext()
+        let old = TaskItem(title: "old", autoLocation: false)
+        old.deletedAt = cal.date(byAdding: .day, value: -31, to: Date())
+        let recent = TaskItem(title: "recent", autoLocation: false)
+        recent.deletedAt = Date()
+        let live = TaskItem(title: "live", autoLocation: false)
+        [old, recent, live].forEach { ctx.insert($0) }
+        TaskActions.purgeExpiredTrash(context: ctx)
+        let left = try ctx.fetch(FetchDescriptor<TaskItem>()).map(\.title).sorted()
+        #expect(left == ["live", "recent"])
+    }
+}

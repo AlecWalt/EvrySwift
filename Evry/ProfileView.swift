@@ -2266,27 +2266,26 @@ struct GlobalSearchSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(ProjectNavigationState.self) private var projectNavState
 
-    @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    @Query(filter: #Predicate<TaskItem> { $0.deletedAt == nil },
+           sort: \TaskItem.createdAt, order: .reverse) private var tasks: [TaskItem]
 
     @State private var searchText = ""
     @FocusState private var focused: Bool
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
-    private var tasks: [TaskItem] { allTasks.filter { !$0.isTrashed } }
 
     private var results: [TaskItem] {
-        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        let q = searchText.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return [] }
-        return tasks.filter {
-            $0.title.lowercased().contains(q) ||
-            $0.notes.lowercased().contains(q) ||
-            $0.tags.contains(where: { $0.lowercased().contains(q) })
-        }
+        func has(_ s: String) -> Bool { s.range(of: q, options: .caseInsensitive) != nil }
+        return tasks.filter { has($0.title) || has($0.notes) || $0.tags.contains(where: has) }
     }
 
     var body: some View {
-        NavigationStack {
+        // Searched once per render (it was re-run on each of five reads).
+        let results = self.results
+        return NavigationStack {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
@@ -2479,10 +2478,10 @@ struct TrashView: View {
     @Environment(Appearance.self) private var appearance
     @Environment(\.dismiss) private var dismiss
 
-    @Query(sort: \TaskItem.deletedAt, order: .reverse) private var allTasks: [TaskItem]
+    @Query(filter: #Predicate<TaskItem> { $0.deletedAt != nil },
+           sort: \TaskItem.deletedAt, order: .reverse) private var trashedTasks: [TaskItem]
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
-    private var trashedTasks: [TaskItem] { allTasks.filter { $0.deletedAt != nil } }
     @State private var confirmDeleteAll = false
 
     var body: some View {
