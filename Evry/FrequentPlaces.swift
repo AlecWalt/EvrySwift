@@ -104,12 +104,14 @@ enum FrequentPlaces {
     /// "Work" is only matched as a place ("at work", "the office"), never the
     /// verb ("work on the report").
     private static let matchPhrases: [(label: String, phrases: [String])] = [
-        ("Gym", ["gym", "workout", "work out", "lift", "lifting", "leg day", "climb", "climbing",
-                 "boulder", "bouldering", "crossfit", "yoga", "pilates", "spin class", "exercise"]),
-        ("Work", ["at work", "to work", "from work", "for work", "leave work", "work shift", "shift",
+        // No bare "lift", "climb", "exercise", "shift" or "class": they matched
+        // unrelated titles ("Lift the couch", "Shift dentist to Friday").
+        ("Gym", ["gym", "workout", "work out", "lifting", "leg day", "climbing",
+                 "boulder", "bouldering", "crossfit", "yoga", "pilates", "spin class"]),
+        ("Work", ["at work", "to work", "from work", "for work", "leave work", "work shift",
                   "office", "commute", "workday", "work day"]),
         ("Home", ["go home", "head home", "get home", "at home", "back home", "home"]),
-        ("School", ["school", "class", "classes", "campus", "lecture", "college", "university"]),
+        ("School", ["school", "campus", "lecture", "college", "university"]),
         ("Grocery store", ["grocery", "groceries", "grocery shopping", "supermarket"]),
     ]
 }
@@ -240,7 +242,10 @@ enum PlaceResolver {
             || text.contains("not that one") || text.contains("not the right") {
             return .wrongPlace
         }
-        if let kind = PlaceLabels.statedKind(in: text, excluding: "") { return .kind(kind) }
+        if let kind = PlaceLabels.statedKind(in: text, excluding: "") {
+            // "No, I don't work there" / "not my house" rejects the kind it names.
+            return PlaceLabels.kindIsNegated(in: text) ? .no : .kind(kind)
+        }
         if ["yes", "yeah", "yep", "yup", "sure", "correct", "right", "yea", "ya"].contains(first)
             || text.hasPrefix("it is") || text.hasPrefix("that's it") {
             return .yes
@@ -425,6 +430,26 @@ enum PlaceLabels {
             return entry.label
         }
         return nil
+    }
+
+    /// True when the first kind word in `text` is directly negated — "don't
+    /// work", "not my house", "isn't my office" — rather than offered, as in
+    /// "no, that's just a store".
+    static func kindIsNegated(in text: String) -> Bool {
+        let tokens = words(text)
+        let negators: Set<String> = ["not", "don't", "dont", "isn't", "isnt", "never", "no", "doesn't", "doesnt"]
+        for entry in kindWords {
+            for phrase in entry.words {
+                let parts = words(phrase)
+                guard let first = parts.first,
+                      let i = tokens.indices.first(where: { idx in
+                          tokens[idx] == first && Array(tokens[idx...].prefix(parts.count)) == parts
+                      }) else { continue }
+                // Up to two words before it ("don't work", "not my house").
+                return tokens[max(0, i - 2)..<i].contains(where: negators.contains)
+            }
+        }
+        return false
     }
 
     static func words(_ text: String) -> [String] {

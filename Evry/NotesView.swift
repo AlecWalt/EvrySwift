@@ -721,6 +721,8 @@ private struct EditFolderSheet: View {
     @Bindable var folder: Folder
 
     @Environment(\.dismiss) private var dismiss
+    /// The name on open, put back if the field is left empty.
+    @State private var originalName = ""
     @Environment(\.colorScheme) private var scheme
     @Environment(Appearance.self) private var appearance
 
@@ -756,6 +758,11 @@ private struct EditFolderSheet: View {
                     Button("Done") { dismiss() }.font(.evryLabel)
                 }
             }
+        }
+        .onAppear { originalName = folder.name }
+        // A folder can't be left nameless (creating one requires a name too).
+        .onDisappear {
+            if folder.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { folder.name = originalName }
         }
         .tint(palette.primary)
         .presentationCornerRadius(EvryRadius.panel)

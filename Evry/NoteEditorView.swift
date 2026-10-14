@@ -28,6 +28,8 @@ struct NoteEditorView: View {
     /// Debounces body saves (see `NoteBodySaver`).
     @State private var saver = NoteBodySaver()
     @Environment(\.scenePhase) private var scenePhase
+    /// The note was blank when opened (a fresh one, not an old one emptied).
+    @State private var openedEmpty = false
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
@@ -91,6 +93,7 @@ struct NoteEditorView: View {
             .environment(appearance)
         }
         .onAppear {
+            openedEmpty = note.isEmpty
             bodyText = note.body
             // A freshly created note opens ready to type its title.
             if note.title.isEmpty {
@@ -107,9 +110,12 @@ struct NoteEditorView: View {
         .onDisappear {
             // Write any edit still waiting on the debounce first.
             saver.flush(note)
-            // Discard a note left blank, otherwise flush edits so the list row
-            // (preview / modified order) reflects them right away.
-            if note.isEmpty { context.delete(note) }
+            // A brand-new note left blank is discarded. An existing note that's
+            // been emptied goes to Recently Deleted (with its 30-day undo)
+            // instead of vanishing for good.
+            if note.isEmpty {
+                if openedEmpty { context.delete(note) } else { NoteActions.softDelete(note) }
+            }
             try? context.save()
         }
     }
@@ -186,6 +192,8 @@ struct NoteEditorView: View {
         newFolderName = ""
         guard !name.isEmpty else { return }
         let folder = Folder(name: name)
+        // The next sky/navy shade, like folders made from the Notes screen.
+        folder.shade = FolderShade.next(FolderShade.noteFoldersKey)
         folder.sortOrder = folders.count
         context.insert(folder)
         note.folder = folder

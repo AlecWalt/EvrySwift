@@ -171,9 +171,8 @@ struct PlaceLabelTests {
     }
 
     @Test func negatedReplyIsANo() async {
-        await withKnownIssue("B11: negation read as a kind") {
-            #expect(await PlaceResolver.interpretReply("no, I don't work there") == .no)
-        }
+        #expect(await PlaceResolver.interpretReply("no, I don't work there") == .no)
+        #expect(await PlaceResolver.interpretReply("not my house") == .no)
     }
 }
 
@@ -203,7 +202,8 @@ struct PlaceMatchTests {
         #expect(FrequentPlaces.match(for: title, in: places)?.label == label)
     }
 
-    @Test(arguments: ["Work on API docs", "Pick up paint at Home Depot", "Write report"])
+    @Test(arguments: ["Work on API docs", "Pick up paint at Home Depot", "Write report",
+                      "Lift the couch", "Shift dentist to Friday"])
     func noMatch(title: String) {
         #expect(FrequentPlaces.match(for: title, in: places) == nil)
     }
