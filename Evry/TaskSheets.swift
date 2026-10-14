@@ -474,6 +474,7 @@ struct AddTaskSheet: View {
         }
         .onChange(of: showLocation) { _, newValue in
             if newValue {
+                locationProvider.locate()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     locationFocused = true
                 }
@@ -1130,18 +1131,31 @@ private func doneGlyph(_ done: Bool, palette: Palette, size: CGFloat) -> some Vi
 
 @Observable
 private final class CurrentLocationProvider: NSObject, CLLocationManagerDelegate {
-    private let manager = CLLocationManager()
+    /// Made on first use: the quick-add card is rebuilt often, and a location
+    /// search is the only thing that needs this.
+    @ObservationIgnored private lazy var manager: CLLocationManager = {
+        let m = CLLocationManager()
+        m.delegate = self
+        m.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        return m
+    }()
     var coordinate: CLLocationCoordinate2D?
 
-    override init() {
-        super.init()
-        manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-        manager.startUpdatingLocation()
+    /// A one-off fix (no continuous GPS). The last known location is used
+    /// straight away so the first search is already biased nearby.
+    func locate() {
+        if coordinate == nil { coordinate = manager.location?.coordinate }
+        let status = manager.authorizationStatus
+        guard status == .authorizedWhenInUse || status == .authorizedAlways else { return }
+        manager.requestLocation()
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         coordinate = locations.last?.coordinate
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        // No fix: searches simply aren't biased to the current area.
     }
 }
 
