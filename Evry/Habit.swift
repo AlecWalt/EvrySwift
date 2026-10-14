@@ -248,6 +248,32 @@ struct HabitStats {
     }
 }
 
+// MARK: - Stats cache
+
+/// Reuses each habit's `HabitStats` (a walk over its whole history) until
+/// something it depends on changes — check-ins, target, schedule, goal or the
+/// day. The Habits page re-renders on every carousel swipe; this keeps that
+/// from re-walking every habit's history each time.
+@MainActor
+final class HabitStatsCache {
+    private var store: [UUID: (key: Int, stats: HabitStats)] = [:]
+
+    func stats(for habit: Habit, today: Date) -> HabitStats {
+        var hasher = Hasher()
+        hasher.combine(habit.entries?.count ?? 0)
+        hasher.combine(habit.dailyTarget)
+        hasher.combine(habit.weekdays)
+        hasher.combine(habit.goalDays)
+        hasher.combine(habit.createdAt)
+        hasher.combine(today)
+        let key = hasher.finalize()
+        if let hit = store[habit.uid], hit.key == key { return hit.stats }
+        let fresh = HabitStats(habit: habit)
+        store[habit.uid] = (key, fresh)
+        return fresh
+    }
+}
+
 // MARK: - Actions
 
 enum HabitActions {

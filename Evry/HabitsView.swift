@@ -24,6 +24,8 @@ struct HabitsView: View {
 
     /// The carousel page currently in view.
     @State private var focusedID: UUID?
+    /// Each habit's stats, reused until its history or schedule changes.
+    @State private var statsCache = HabitStatsCache()
     /// Cards playing their delete animation (shrink + fade) before removal.
     @State private var removingIDs: Set<UUID> = []
     @State private var detailHabit: Habit?
@@ -43,7 +45,8 @@ struct HabitsView: View {
 
     var body: some View {
         let today = Calendar.current.startOfDay(for: Date())
-        let stats = Dictionary(habits.map { ($0.uid, HabitStats(habit: $0)) }, uniquingKeysWith: { a, _ in a })
+        let stats = Dictionary(habits.map { ($0.uid, statsCache.stats(for: $0, today: today)) },
+                               uniquingKeysWith: { a, _ in a })
         // Built habits are records now, so they no longer count toward today.
         let due = habits.filter { $0.isDue(on: today) }
         let doneToday = due.filter { stats[$0.uid]?.todayDone == true }.count
@@ -199,6 +202,7 @@ struct HabitsView: View {
                             habit: habit,
                             stats: s,
                             restDay: !habit.isScheduled(on: today),
+                            isFocused: habit.uid == (focusedID ?? habits.first?.uid),
                             palette: palette,
                             onCheckIn: { HabitActions.checkIn(habit, context: context) },
                             onUndo: { HabitActions.undoCheckIn(habit, context: context) },
@@ -380,6 +384,8 @@ private struct HabitPage: View {
     let habit: Habit
     let stats: HabitStats
     let restDay: Bool
+    /// The card in the middle of the carousel — only it runs the liquid drift.
+    let isFocused: Bool
     let palette: Palette
     let onCheckIn: () -> Void
     let onUndo: () -> Void
@@ -601,8 +607,9 @@ private struct HabitPage: View {
     /// Two offset wave layers rising from the bottom of the card to `level`,
     /// drifting continuously like liquid.
     private func liquid(level: Double) -> some View {
-        // The drift is decorative — it holds still under Reduce Motion.
-        TimelineView(.animation(paused: reduceMotion)) { timeline in
+        // The drift is decorative: 30fps is plenty, and it holds still under
+        // Reduce Motion and on the neighbouring (off-centre) cards.
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || !isFocused)) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
             ZStack {
                 LiquidFill(level: level, amplitude: 6 + slosh, phase: t * 1.7 + 1.2, cycles: 1.3)
@@ -1031,6 +1038,8 @@ private struct ConfettiRain: View {
 
     /// Generated once, up front (State keeps the first set across re-renders).
     @State private var pieces: [Piece]
+    /// Every piece has fallen off screen by ~7s; stop redrawing then.
+    @State private var finished = false
 
     init(start: Date, colors: [Color]) {
         self.start = start
@@ -1039,7 +1048,7 @@ private struct ConfettiRain: View {
     }
 
     var body: some View {
-        TimelineView(.animation) { timeline in
+        TimelineView(.animation(paused: finished)) { timeline in
             Canvas { ctx, size in
                 let t = timeline.date.timeIntervalSince(start)
                 for p in pieces {
@@ -1065,6 +1074,10 @@ private struct ConfettiRain: View {
                     piece.fill(shape, with: .color(colors[p.colorIndex % colors.count]))
                 }
             }
+        }
+        .task {
+            try? await Task.sleep(for: .seconds(8))
+            finished = true
         }
     }
 

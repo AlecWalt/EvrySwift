@@ -227,6 +227,19 @@ struct HabitStatsTests {
     }
 }
 
+extension HabitStatsTests {
+    @Test func cacheRefreshesAfterACheckIn() throws {
+        let ctx = try memoryContext()
+        let habit = Habit(name: "Walk")
+        ctx.insert(habit)
+        let cache = HabitStatsCache()
+        let today = cal.startOfDay(for: Date())
+        #expect(cache.stats(for: habit, today: today).today == 0)
+        HabitActions.checkIn(habit, context: ctx)
+        #expect(cache.stats(for: habit, today: today).today == 1)
+    }
+}
+
 // MARK: - Recurring tasks
 
 @MainActor
