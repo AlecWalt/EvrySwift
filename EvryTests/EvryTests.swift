@@ -57,6 +57,13 @@ struct TaskParsingTests {
         #expect(d.map { $0 > Date() } == true)
     }
 
+    @Test func midnightIsTheEndOfToday() {
+        let p = parseTaskInput("Submit form at midnight")
+        #expect(p.title == "Submit form")
+        #expect(hour(p.date) == 23)
+        #expect(p.date.map(cal.isDateInToday) == true)
+    }
+
     @Test func plainTitleHasNoDate() {
         let p = parseTaskInput("Read a book")
         #expect(p.title == "Read a book")
