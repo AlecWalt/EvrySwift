@@ -917,19 +917,25 @@ struct EvryChatOverlay: View {
     private func appData() -> EvryAppData {
         let cal = Calendar.current
         let now = Date()
-        let tasks = ((try? context.fetch(FetchDescriptor<TaskItem>())) ?? []).filter { !$0.isTrashed && !$0.isNote }
         func record(_ t: TaskItem) -> EvryAppData.Task {
             EvryAppData.Task(title: t.title, due: t.dueDate, priority: t.priority.rawValue,
                              folder: t.group?.name, notes: t.notes)
         }
-        let open = tasks.filter { !$0.completed }
+        // Filtered in the store rather than fetching everything and filtering here.
+        let openFetch = FetchDescriptor<TaskItem>(predicate: #Predicate {
+            !$0.completed && !$0.isNote && $0.deletedAt == nil
+        })
+        let open = ((try? context.fetch(openFetch)) ?? [])
             .sorted { ($0.dueDate ?? .distantFuture) < ($1.dueDate ?? .distantFuture) }
         let weekAgo = cal.date(byAdding: .day, value: -7, to: now) ?? now
-        let done = tasks.filter { $0.completed && ($0.completedAt ?? .distantPast) >= weekAgo }
-            .sorted { ($0.completedAt ?? .distantPast) > ($1.completedAt ?? .distantPast) }
+        let doneFetch = FetchDescriptor<TaskItem>(predicate: #Predicate { t in
+            if let at = t.completedAt { t.completed && !t.isNote && t.deletedAt == nil && at >= weekAgo } else { false }
+        }, sortBy: [SortDescriptor(\.completedAt, order: .reverse)])
+        let done = (try? context.fetch(doneFetch)) ?? []
 
-        let notes = ((try? context.fetch(FetchDescriptor<Note>())) ?? []).filter { !$0.isTrashed }
-            .sorted { $0.modifiedAt > $1.modifiedAt }
+        let notesFetch = FetchDescriptor<Note>(predicate: #Predicate { $0.deletedAt == nil },
+                                               sortBy: [SortDescriptor(\.modifiedAt, order: .reverse)])
+        let notes = ((try? context.fetch(notesFetch)) ?? [])
             .map { n in
                 EvryAppData.Note(title: n.title, folder: n.folder?.name,
                                  text: n.plainText

@@ -12,12 +12,12 @@ final class LiveSpeechInput {
     /// it responds to the voice instead of showing a generic spinner.
     var level: Double = 0
 
-    private var recognizer: SFSpeechRecognizer?
-    private var engine = AVAudioEngine()
-    private var task: SFSpeechRecognitionTask?
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-
-    init() { recognizer = SFSpeechRecognizer() }
+    // Made on first use, not at init: views hold this as @State, whose initial
+    // value is re-created every time the view is re-initialised.
+    @ObservationIgnored private var recognizer: SFSpeechRecognizer?
+    @ObservationIgnored private var engine: AVAudioEngine?
+    @ObservationIgnored private var task: SFSpeechRecognitionTask?
+    @ObservationIgnored private var request: SFSpeechAudioBufferRecognitionRequest?
 
     func toggle() {
         if isListening { stop(); return }
@@ -29,7 +29,7 @@ final class LiveSpeechInput {
     }
 
     func stop() {
-        if engine.isRunning {
+        if let engine, engine.isRunning {
             engine.stop()
             engine.inputNode.removeTap(onBus: 0)
         }
@@ -50,7 +50,10 @@ final class LiveSpeechInput {
     }
 
     private func startRecording() {
+        if recognizer == nil { recognizer = SFSpeechRecognizer() }
         guard let recognizer, recognizer.isAvailable else { return }
+        let engine = self.engine ?? AVAudioEngine()
+        self.engine = engine
         // Activating the audio session + starting the engine blocks for tens of
         // milliseconds; doing it on the main thread hitches the start-listening
         // animation. Run it off-main and flip `isListening` back on the main queue.
@@ -65,12 +68,12 @@ final class LiveSpeechInput {
             let req = SFSpeechAudioBufferRecognitionRequest()
             req.shouldReportPartialResults = true
 
-            let node = self.engine.inputNode
+            let node = engine.inputNode
             node.installTap(onBus: 0, bufferSize: 1024, format: node.outputFormat(forBus: 0)) { [weak self] buf, _ in
                 req.append(buf)
                 self?.updateLevel(buf)
             }
-            do { try self.engine.start() } catch { self.stop(); return }
+            do { try engine.start() } catch { self.stop(); return }
 
             let task = recognizer.recognitionTask(with: req) { [weak self] result, err in
                 guard let self else { return }
