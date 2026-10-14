@@ -2001,37 +2001,11 @@ private struct NotificationsSettingsView: View {
     @Environment(Appearance.self) private var appearance
     @Environment(\.dismiss) private var dismiss
 
+    /// The only notification setting that does anything (NotificationService
+    /// reads it); digests and default times were never wired up, so they're gone.
     @AppStorage("notif_task_reminders")    private var taskReminders = true
-    @AppStorage("notif_daily_digest")      private var dailyDigest   = false
-    @AppStorage("notif_weekly_summary")    private var weeklySummary = false
-    @AppStorage("notif_default_reminder_hour") private var defaultReminderHour = 9
-    @AppStorage("notif_digest_hour")       private var digestHour    = 8
-    @AppStorage("notif_digest_minute")     private var digestMinute  = 0
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
-
-    private var defaultReminderDate: Binding<Date> {
-        Binding(
-            get: {
-                Calendar.current.date(bySettingHour: defaultReminderHour, minute: 0, second: 0, of: Date()) ?? Date()
-            },
-            set: {
-                defaultReminderHour = Calendar.current.component(.hour, from: $0)
-            }
-        )
-    }
-
-    private var digestDate: Binding<Date> {
-        Binding(
-            get: {
-                Calendar.current.date(bySettingHour: digestHour, minute: digestMinute, second: 0, of: Date()) ?? Date()
-            },
-            set: {
-                digestHour   = Calendar.current.component(.hour, from: $0)
-                digestMinute = Calendar.current.component(.minute, from: $0)
-            }
-        )
-    }
 
     var body: some View {
         NavigationStack {
@@ -2041,35 +2015,9 @@ private struct NotificationsSettingsView: View {
 
                     notifRow("Task reminders", icon: "bell.fill",
                              subtitle: "A kind nudge before tasks are due", isOn: $taskReminders)
-
-                    if taskReminders {
-                        timePickerRow(
-                            icon: "clock.fill",
-                            label: "Default reminder time",
-                            subtitle: "Used when a task has no specific time",
-                            selection: defaultReminderDate
-                        )
-                    }
-
-                    notifRow("Daily digest", icon: "sun.max.fill",
-                             subtitle: "A morning look at your day’s tasks", isOn: $dailyDigest)
-
-                    if dailyDigest {
-                        timePickerRow(
-                            icon: "clock.fill",
-                            label: "Digest time",
-                            subtitle: "When to receive your daily summary",
-                            selection: digestDate
-                        )
-                    }
-
-                    notifRow("Weekly summary", icon: "chart.bar.fill",
-                             subtitle: "A look back at your week", isOn: $weeklySummary)
                 }
                 .padding(.horizontal, EvrySpace.gutter)
                 .padding(.vertical, 20)
-                .animation(EvryMotion.settle, value: taskReminders)
-                .animation(EvryMotion.settle, value: dailyDigest)
             }
             .background(palette.bg)
             .navigationTitle("Notifications")
@@ -2111,35 +2059,6 @@ private struct NotificationsSettingsView: View {
         .padding(.vertical, 12)
         .frame(minHeight: EvrySpace.storeHeight)
         .evryField(palette)
-    }
-
-    private func timePickerRow(icon: String, label: String, subtitle: String, selection: Binding<Date>) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: icon)
-                .font(.nunito(size: 18, weight: .semibold))
-                .foregroundStyle(palette.primary)
-                .frame(width: 30, height: 30)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label)
-                    .font(.evryBody)
-                    .foregroundStyle(palette.text)
-                Text(subtitle)
-                    .font(.nunito(size: 14))
-                    .foregroundStyle(palette.textSec)
-            }
-            Spacer()
-            DatePicker(label, selection: selection, displayedComponents: .hourAndMinute)
-                .labelsHidden()
-                .tint(palette.primary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .frame(minHeight: EvrySpace.storeHeight)
-        .background(palette.skyMist, in: RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous)
-            .strokeBorder(palette.hairline, lineWidth: 1))
-        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     private func sectionLabel(_ text: String) -> some View {
