@@ -407,8 +407,7 @@ struct ContentView: View {
             PathView(
                 palette: palette,
                 onEdit: { editingTask = $0 },
-                onDelete: deleteTask,
-                inFocusMode: true
+                onDelete: deleteTask
             )
             .zIndex(0)
 

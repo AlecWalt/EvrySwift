@@ -38,14 +38,6 @@ enum PomodoroPhase: String, Codable {
         }
     }
 
-    /// Path-tab status label ("Focusing" while working).
-    var statusLabel: String {
-        switch self {
-        case .work: "Focusing"
-        case .shortBreak: "Short break"
-        case .longBreak: "Long break"
-        }
-    }
 }
 
 struct PomodoroPreset: Identifiable, Equatable {

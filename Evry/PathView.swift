@@ -2,9 +2,9 @@
 //  PathView.swift
 //  Evry
 //
-//  Focus tab — one next-action card at a time with skip rotation, ported
-//  from the webapp's pathTab.js. "Not this one" pushes the task to the back
-//  of its urgency tier rather than excluding it.
+//  The Focus Mode backdrop — one next-action card at a time with skip
+//  rotation, ported from the webapp's pathTab.js. "Not this one" pushes the
+//  task to the back of its urgency tier rather than excluding it.
 //
 
 import SwiftUI
@@ -15,13 +15,8 @@ struct PathView: View {
     let palette: Palette
     var onEdit: (TaskItem) -> Void
     var onDelete: (TaskItem) -> Void
-    /// True while shown as the Focus Mode backdrop (extra top inset for the
-    /// exit button, no tab-bar padding). This view now only renders inside
-    /// Focus Mode — the Focus tab itself shows the Pomodoro (FocusTabView).
-    var inFocusMode = false
 
     @Environment(\.modelContext) private var context
-    @Environment(PomodoroModel.self) private var pomodoro
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
 
@@ -29,7 +24,6 @@ struct PathView: View {
     /// the webapp's component state.
     @State private var skippedOrder: [UUID] = []
     @State private var celebrating = false
-    @State private var showPomodoro = false
     // Drives the Focus Mode entrance — the task screen fades + slides up once
     // as we drop into Focus Mode after Start is pressed.
     @State private var contentAppeared = false
@@ -43,12 +37,6 @@ struct PathView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !inFocusMode {
-                pomodoroWidget
-                    .padding(.horizontal, 20)
-                    .padding(.top, 16)
-            }
-
             Group {
             if let candidate {
                 VStack(spacing: 16) {
@@ -79,8 +67,9 @@ struct PathView: View {
                     Spacer()
                 }
                 .padding(.horizontal, EvrySpace.grid)
-                .padding(.top, inFocusMode ? 60 : 0)
-                .padding(.bottom, inFocusMode ? 80 : 110)
+                // Room for Focus Mode's exit button above, no tab bar below.
+                .padding(.top, 60)
+                .padding(.bottom, 80)
             } else {
                 VStack {
                     Spacer()
@@ -92,63 +81,21 @@ struct PathView: View {
                     )
                     Spacer()
                 }
-                .padding(.top, inFocusMode ? 60 : 0)
-                .padding(.bottom, inFocusMode ? 80 : 110)
+                .padding(.top, 60)
+                .padding(.bottom, 80)
             }
             }
-            // Focus Mode entrance: fade + slide up. Outside Focus Mode the
-            // content is always fully shown (no offset).
-            .opacity(inFocusMode ? (contentAppeared ? 1 : 0) : 1)
-            .offset(y: inFocusMode ? (contentAppeared ? 0 : 26) : 0)
+            // Focus Mode entrance: fade + slide up.
+            .opacity(contentAppeared ? 1 : 0)
+            .offset(y: contentAppeared ? 0 : 26)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.bg)
         .onAppear {
-            guard inFocusMode else { return }
             // Let the Pomodoro cover finish dismissing before sliding in.
             withAnimation(.spring(response: 0.5, dampingFraction: 0.82).delay(0.15)) {
                 contentAppeared = true
             }
-        }
-    }
-
-    // MARK: Pomodoro trigger (same card style as the Profile tab's)
-
-    private var pomodoroWidget: some View {
-        Button {
-            showPomodoro = true
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "timer")
-                    .font(.nunito(size: 17, weight: .bold))
-                    .foregroundStyle(palette.onSky)
-                    .frame(width: 40, height: 40)
-                    .background(palette.sky, in: Circle())
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Pomodoro")
-                        .font(.evryTitle)
-                        .foregroundStyle(palette.text)
-                    Text(pomodoro.running
-                         ? "\(pomodoro.phase.statusLabel), \(pomodoro.timeLabel) left"
-                         : "Timed focus sessions with gentle breaks")
-                        .font(.nunito(size: 14))
-                        .foregroundStyle(palette.textSec)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.nunito(size: 14, weight: .bold))
-                    .foregroundStyle(palette.textMuted)
-                    .accessibilityHidden(true)
-            }
-            .padding(16)
-            .evryCard(palette)
-            .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .fullScreenCover(isPresented: $showPomodoro) {
-            // Already in Focus Mode — the cover just controls the timer.
-            PomodoroView()
         }
     }
 
@@ -311,8 +258,7 @@ struct PathView: View {
     PathView(
         palette: Palette(dark: false, accent: .evry),
         onEdit: { _ in },
-        onDelete: { _ in },
-        inFocusMode: true
+        onDelete: { _ in }
     )
     .environment(Appearance())
     .environment(PomodoroModel())
