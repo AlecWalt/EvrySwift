@@ -385,7 +385,9 @@ struct ScheduleView: View {
         .onAppear(perform: reload)
         .onChange(of: dayOffset) { _, _ in reload() }
         .onChange(of: scenePhase) { _, phase in if phase == .active { reload() } }
-        .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in reload() }
+        // EventKit posts these in bursts while it syncs (and once for our own
+        // saves) — coalesce them into one reload.
+        .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in reloadSoon() }
         .sheet(item: $editing) { wrapper in
             EventEditorView(palette: palette, store: calendar.eventStore, event: wrapper.event) { changed in
                 editing = nil
@@ -393,6 +395,17 @@ struct ScheduleView: View {
                 calendar.eventStore.reset()
                 reload()
             }
+        }
+    }
+
+    @State private var pendingReload: Task<Void, Never>?
+
+    private func reloadSoon() {
+        pendingReload?.cancel()
+        pendingReload = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            reload()
         }
     }
 
@@ -439,14 +452,14 @@ struct ScheduleView: View {
     private func list(_ items: [ScheduleEntry], measuring: Bool) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                // One clock for the rail and every card (not one timer per
+                // card): refreshes every 30s so the line keeps creeping forward.
+                TimelineView(.periodic(from: .now, by: 30)) { context in
                 ZStack(alignment: .topLeading) {
-                    // Refreshes every 30s so the line keeps creeping forward.
-                    TimelineView(.periodic(from: .now, by: 30)) { context in
-                        rail(items, now: context.date)
-                    }
+                    rail(items, now: context.date)
                     VStack(spacing: 10) {
                         ForEach(Array(items.enumerated()), id: \.element.id) { i, entry in
-                            TimelineView(.periodic(from: .now, by: 30)) { context in
+                            Group {
                                 switch entry.kind {
                                 case .event(let e): card(e, now: context.date)
                                 case .task(let t): taskCard(t)
@@ -469,6 +482,7 @@ struct ScheduleView: View {
                         }
                     }
                     .padding(.leading, 36)
+                }
                 }
                 .coordinateSpace(.named(Self.space))
                 .onPreferenceChange(DotYKey.self) { dotYs = $0 }

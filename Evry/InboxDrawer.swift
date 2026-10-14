@@ -249,7 +249,20 @@ struct InboxDateWheel: View {
         .frame(maxHeight: .infinity)
     }
 
+    /// The wheel's 731 row labels, built once per calendar day rather than
+    /// formatting every date on each render.
+    private static var labelCache: (day: Date, labels: [Int: String])?
+
     private func label(for offset: Int) -> String {
+        let today = cal.startOfDay(for: Date())
+        if let cache = Self.labelCache, cache.day == today, let label = cache.labels[offset] { return label }
+        if Self.labelCache?.day != today { Self.labelCache = (today, [:]) }
+        let label = makeLabel(for: offset)
+        Self.labelCache?.labels[offset] = label
+        return label
+    }
+
+    private func makeLabel(for offset: Int) -> String {
         switch offset {
         case 0: return "Today"
         case 1: return "Tomorrow"
