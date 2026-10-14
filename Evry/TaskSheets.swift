@@ -712,6 +712,8 @@ struct EditTaskSheet: View {
 
     @State private var newSubtask = ""
     @State private var tagsText = ""
+    /// What the reminder shows, as opened — it's rebuilt if any of it changes.
+    @State private var opened: (title: String, priority: TaskPriority, tags: [String])?
     @FocusState private var focus: Field?
     private enum Field: Hashable { case title, notes, location, tags, subtask }
 
@@ -741,12 +743,20 @@ struct EditTaskSheet: View {
         .background(palette.bg.ignoresSafeArea())
         .presentationDragIndicator(.visible)
         .tint(palette.primary)
+        // Opening the editor changes nothing: an undated task shows today in the
+        // picker (see `due`) but stays undated until a day is actually picked.
         .onAppear {
-            if task.dueDate == nil { task.dueDate = startOfDay(Date()) }
             tagsText = task.tags.joined(separator: ", ")
+            opened = (task.title, task.priority, task.tags)
         }
         .onChange(of: task.dueDate) {
             NotificationService.schedule(task)
+        }
+        .onDisappear {
+            // The reminder carries the title, priority and tags — refresh it.
+            if let opened, opened.title != task.title || opened.priority != task.priority || opened.tags != task.tags {
+                NotificationService.schedule(task)
+            }
         }
     }
 
@@ -859,6 +869,9 @@ struct EditTaskSheet: View {
                     .focused($focus, equals: .tags)
                     .submitLabel(.done)
                     .onChange(of: tagsText) {
+                        // Skip the initial fill on appear, which would otherwise
+                        // rewrite the tags (lowercased) without any edit.
+                        guard tagsText != task.tags.joined(separator: ", ") else { return }
                         task.tags = tagsText
                             .split(separator: ",")
                             .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
