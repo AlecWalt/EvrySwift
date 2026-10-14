@@ -197,8 +197,9 @@ struct InboxDateWheel: View {
     @Binding var dayOffset: Int
     let palette: Palette
 
-    /// A year either way.
-    private static let range = -365...365
+    /// A year either way — widened to reach the current day if a swipe or a
+    /// jump to a task has gone further, so the wheel always has its row.
+    private var range: ClosedRange<Int> { min(-365, dayOffset)...max(365, dayOffset) }
     private let cal = Calendar.current
 
     var body: some View {
@@ -232,7 +233,7 @@ struct InboxDateWheel: View {
             Spacer(minLength: 0)
 
             Picker("Day", selection: $dayOffset) {
-                ForEach(Self.range, id: \.self) { offset in
+                ForEach(range, id: \.self) { offset in
                     Text(label(for: offset))
                         .font(.nunito(size: 19, weight: offset == 0 ? .heavy : .semibold))
                         .foregroundStyle(palette.text)
