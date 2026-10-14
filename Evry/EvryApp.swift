@@ -50,20 +50,32 @@ struct EvryApp: App {
         do {
             return try ModelContainer(for: schema, configurations: [modelConfiguration])
         } catch {
-            // The schema changed out from under an old store (this app
-            // replaced the template's Item model) — start fresh rather
-            // than crash-loop on a dev-phase store.
-            let fresh = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+            // The store couldn't be opened (e.g. the schema changed out from
+            // under an old store). Start fresh rather than crash-loop — but set
+            // the old files aside instead of deleting them, so nothing is lost
+            // for good if the failure was something else.
+            Self.backUpStore(at: modelConfiguration.url)
             do {
-                if let url = fresh.url as URL? {
-                    try? FileManager.default.removeItem(at: url)
-                }
-                return try ModelContainer(for: schema, configurations: [fresh])
+                return try ModelContainer(for: schema, configurations: [modelConfiguration])
             } catch {
                 fatalError("Could not create ModelContainer: \(error)")
             }
         }
     }()
+
+    /// Moves the store and its -wal/-shm siblings to "<name>.backup-<time>".
+    private static func backUpStore(at url: URL) {
+        let fm = FileManager.default
+        let stamp = Int(Date().timeIntervalSince1970)
+        for suffix in ["", "-wal", "-shm"] {
+            let file = URL(fileURLWithPath: url.path + suffix)
+            guard fm.fileExists(atPath: file.path) else { continue }
+            let backup = URL(fileURLWithPath: file.path + ".backup-\(stamp)")
+            if (try? fm.moveItem(at: file, to: backup)) == nil {
+                try? fm.removeItem(at: file)
+            }
+        }
+    }
 
     var body: some Scene {
         WindowGroup {
