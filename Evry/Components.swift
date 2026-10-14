@@ -1383,7 +1383,10 @@ private struct InlineTaskInput: UIViewRepresentable {
         }
         func textViewDidChange(_ tv: UITextView) {
             parent.text = tv.text
-            if let t = tv as? _TaskTextView { applyHighlight(to: t) }
+            // Don't restyle mid-composition (Japanese, Chinese, Korean…):
+            // replacing attributedText would commit or break the marked text.
+            // The highlight catches up on the change that ends composition.
+            if tv.markedTextRange == nil, let t = tv as? _TaskTextView { applyHighlight(to: t) }
             tv.invalidateIntrinsicContentSize()
             reportHeight(tv)
         }
