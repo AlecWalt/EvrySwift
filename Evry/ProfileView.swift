@@ -14,6 +14,7 @@ import StoreKit
 import PhotosUI
 import UIKit
 import MessageUI
+import ImageIO
 
 private let profileISO8601 = ISO8601DateFormatter()
 
@@ -51,7 +52,8 @@ struct ProfileView: View {
     let palette: Palette
     var onEnterFocusMode: () -> Void
 
-    @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    /// Trash is filtered in the store; the order doesn't matter here.
+    @Query(filter: #Predicate<TaskItem> { $0.deletedAt == nil }) private var tasks: [TaskItem]
     @Query private var habits: [Habit]
 
     @Environment(\.requestReview) private var requestReview
@@ -62,7 +64,8 @@ struct ProfileView: View {
     @AppStorage("app_first_used") private var firstUsed = ""
     @AppStorage("membership_plan") private var membershipPlan = ""
     @State private var selectedPhoto: PhotosPickerItem? = nil
-    @State private var profileImageData: Data? = nil
+    /// The photo, decoded once (not on every render).
+    @State private var profileImage: UIImage? = nil
     @State private var cropItem: CropImage? = nil
     @State private var showSettings = false
     @State private var showSetupFlow = false
@@ -88,14 +91,9 @@ struct ProfileView: View {
     @AppStorage("daily_pomo_goal") private var dailyFocusGoal = 60
     /// The frequent places from setup (JSON) — shown in the developer area.
     @AppStorage(FrequentPlaces.key) private var frequentPlacesData = Data()
-    /// How far the page is pulled down past its top (pull far enough to search).
-    @State private var pullDistance: CGFloat = 0
-    @State private var pullArmed = false
-    @State private var scrollInteracting = false
-    private static let pullToSearch: CGFloat = 80
-
-    private var tasks: [TaskItem] { allTasks.filter { !$0.isTrashed } }
-    private var stats: TaskStats { computeStats(tasks) }
+    /// Pull-to-search state, in its own observable so overscroll frames only
+    /// redraw the hint — not the whole page.
+    @State private var pull = PullToSearch()
 
     private var initials: String {
         let words = userName.trimmingCharacters(in: .whitespaces).split(separator: " ")
@@ -132,28 +130,17 @@ struct ProfileView: View {
         // Pull down from the top to open search.
         .onScrollGeometryChange(for: CGFloat.self) { geo in
             max(0, -(geo.contentOffset.y + geo.contentInsets.top))
-        } action: { _, pull in
-            pullDistance = pull
-            guard scrollInteracting else { return }
-            if pull >= Self.pullToSearch && !pullArmed {
-                pullArmed = true
-                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-            } else if pull < Self.pullToSearch * 0.8 && pullArmed {
-                pullArmed = false
-            }
+        } action: { _, distance in
+            pull.update(distance)
         }
         .onScrollPhaseChange { _, phase in
-            scrollInteracting = phase == .interacting
             // Opens as the finger lets go, if it was pulled far enough.
-            if phase != .interacting && pullArmed {
-                pullArmed = false
-                showGlobalSearch = true
-            }
+            if pull.phaseChanged(interacting: phase == .interacting) { showGlobalSearch = true }
         }
-        .overlay(alignment: .top) { pullHint }
+        .overlay(alignment: .top) { PullToSearchHint(pull: pull, palette: palette) }
         .background(pageBackground.ignoresSafeArea())
         .onAppear {
-            profileImageData = UserDefaults.standard.data(forKey: "profile_image_data")
+            profileImage = UserDefaults.standard.data(forKey: "profile_image_data").flatMap(UIImage.init(data:))
             if firstUsed.isEmpty {
                 firstUsed = profileISO8601.string(from: Date())
             }
@@ -164,14 +151,14 @@ struct ProfileView: View {
             // Load the full image, then let the user crop/zoom before saving.
             Task {
                 if let data = try? await item?.loadTransferable(type: Data.self),
-                   let img = UIImage(data: data) {
+                   let img = CropImage.downsampled(data) {
                     await MainActor.run { cropItem = CropImage(image: img); selectedPhoto = nil }
                 }
             }
         }
         .fullScreenCover(item: $cropItem) { c in
             ProfilePhotoCropper(image: c.image, palette: palette) { jpeg in
-                profileImageData = jpeg
+                profileImage = UIImage(data: jpeg)
                 UserDefaults.standard.set(jpeg, forKey: "profile_image_data")
             }
         }
@@ -185,23 +172,6 @@ struct ProfileView: View {
             CrestGallerySheet(level: level.level, palette: palette)
                 .presentationDetents([.medium, .large])
         }
-    }
-
-    /// A magnifying glass that fades in above the header as the page is pulled
-    /// down, filling in once it's pulled far enough to open search.
-    private var pullHint: some View {
-        let progress = min(1, pullDistance / Self.pullToSearch)
-        return Image(systemName: "magnifyingglass")
-            .font(.nunito(size: 17, weight: .bold))
-            .foregroundStyle(pullArmed ? palette.onPrimary : palette.text)
-            .frame(width: 40, height: 40)
-            .background(pullArmed ? palette.primary : palette.hover, in: Circle())
-            .scaleEffect(0.6 + 0.4 * progress)
-            .opacity(Double(progress))
-            .offset(y: max(0, pullDistance / 2 - 20))
-            .animation(EvryMotion.pop, value: pullArmed)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
     }
 
     // MARK: Level ring
@@ -334,8 +304,8 @@ struct ProfileView: View {
             ZStack {
                 ZStack {
                     Circle()
-                        .fill(profileImageData != nil ? Color.clear : (userName.isEmpty ? palette.skySoft : avatarColor(for: userName)))
-                    if let data = profileImageData, let img = UIImage(data: data) {
+                        .fill(profileImage != nil ? Color.clear : (userName.isEmpty ? palette.skySoft : avatarColor(for: userName)))
+                    if let img = profileImage {
                         Image(uiImage: img)
                             .resizable()
                             .scaledToFill()
@@ -402,13 +372,15 @@ struct ProfileView: View {
     /// bottom of the page, so the sky only shows at the top and as slim slivers
     /// down the sides.
     private var container: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        // Computed once per render and shared (it was recomputed per read).
+        let stats = computeStats(tasks)
+        return VStack(alignment: .leading, spacing: 18) {
             todayTiles
             if membershipPlan != "pro" {
                 upgradeRow
             }
-            statsTiles
-            activitySection
+            statsTiles(stats)
+            activitySection(stats)
             developerSection
         }
         .padding(.horizontal, 16)
@@ -562,7 +534,7 @@ struct ProfileView: View {
 
     // MARK: Stats
 
-    private var statsTiles: some View {
+    private func statsTiles(_ stats: TaskStats) -> some View {
         let overdueCount = tasks.filter { !$0.completed && isOverdueDate($0.dueDate) }.count
         let activeTasks = tasks.filter { !$0.completed && !$0.isNote }.count
         let cells: [(value: String, label: String, alert: Bool)] = [
@@ -610,7 +582,7 @@ struct ProfileView: View {
 
     // MARK: Activity (week chart)
 
-    private var activitySection: some View {
+    private func activitySection(_ stats: TaskStats) -> some View {
         let maxCount = max(1, stats.weekData.map(\.count).max() ?? 1)
 
         return VStack(alignment: .leading, spacing: 8) {
@@ -785,6 +757,59 @@ struct ProfileView: View {
 
 }
 
+// MARK: - Pull to search
+
+/// How far the Profile page is pulled down past its top, and whether it's far
+/// enough to open search on release.
+@Observable
+final class PullToSearch {
+    static let threshold: CGFloat = 80
+    var distance: CGFloat = 0
+    var armed = false
+    private var interacting = false
+
+    func update(_ distance: CGFloat) {
+        self.distance = distance
+        guard interacting else { return }
+        if distance >= Self.threshold && !armed {
+            armed = true
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        } else if distance < Self.threshold * 0.8 && armed {
+            armed = false
+        }
+    }
+
+    /// Returns true when the finger lifts while armed — time to open search.
+    func phaseChanged(interacting: Bool) -> Bool {
+        self.interacting = interacting
+        guard !interacting, armed else { return false }
+        armed = false
+        return true
+    }
+}
+
+/// A magnifying glass that fades in above the header as the page is pulled
+/// down, filling in once it's pulled far enough to open search.
+private struct PullToSearchHint: View {
+    let pull: PullToSearch
+    let palette: Palette
+
+    var body: some View {
+        let progress = min(1, pull.distance / PullToSearch.threshold)
+        Image(systemName: "magnifyingglass")
+            .font(.nunito(size: 17, weight: .bold))
+            .foregroundStyle(pull.armed ? palette.onPrimary : palette.text)
+            .frame(width: 40, height: 40)
+            .background(pull.armed ? palette.primary : palette.hover, in: Circle())
+            .scaleEffect(0.6 + 0.4 * progress)
+            .opacity(Double(progress))
+            .offset(y: max(0, pull.distance / 2 - 20))
+            .animation(EvryMotion.pop, value: pull.armed)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
 // MARK: - Settings sheet
 
 struct SettingsSheet: View {
@@ -793,7 +818,9 @@ struct SettingsSheet: View {
     @Environment(CalendarService.self) private var calendarService
     @Environment(\.dismiss) private var dismiss
 
-    @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    /// Only what "Clear completed" needs (not every task).
+    @Query(filter: #Predicate<TaskItem> { $0.completed && $0.deletedAt == nil })
+    private var completedTasks: [TaskItem]
 
     @AppStorage("user_name") private var userName = ""
     @AppStorage("user_email") private var userEmail = ""
@@ -835,7 +862,7 @@ struct SettingsSheet: View {
     }
 
     private var clearCompletedCount: Int {
-        allTasks.filter { $0.completed && !$0.isTrashed }.count
+        completedTasks.count
     }
 
     private var layoutValueLabel: String {
@@ -927,7 +954,7 @@ struct SettingsSheet: View {
 
                         // Inline confirmation, right below the button.
                         if showClearCompletedConfirm {
-                            let count = allTasks.filter { $0.completed && !$0.isTrashed }.count
+                            let count = clearCompletedCount
                             HStack(spacing: 10) {
                                 Button("Cancel") {
                                     withAnimation(EvryMotion.settle) { showClearCompletedConfirm = false }
@@ -1014,7 +1041,7 @@ struct SettingsSheet: View {
             message: "This permanently removes them and can’t be undone.",
             confirmTitle: "Delete \(clearCompletedCount)"
         ) {
-            for task in allTasks where task.completed && !task.isTrashed {
+            for task in completedTasks {
                 TaskActions.delete(task)
             }
             withAnimation(EvryMotion.settle) { showClearCompletedConfirm = false }
@@ -1488,7 +1515,7 @@ struct ProfileAccountSheet: View {
         .onChange(of: selectedPhoto) { _, item in
             Task {
                 if let data = try? await item?.loadTransferable(type: Data.self),
-                   let img = UIImage(data: data) {
+                   let img = CropImage.downsampled(data) {
                     await MainActor.run { cropItem = CropImage(image: img); selectedPhoto = nil }
                 }
             }
@@ -2561,6 +2588,21 @@ struct TrashView: View {
 struct CropImage: Identifiable {
     let id = UUID()
     let image: UIImage
+
+    /// Decodes a library photo at no more than `maxPixel` on its long side.
+    /// A 12–48MP original decoded in full spikes memory for a 300px avatar.
+    static func downsampled(_ data: Data, maxPixel: CGFloat = 2000) -> UIImage? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, options) else { return UIImage(data: data) }
+        let thumb = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,   // respect orientation
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ] as CFDictionary
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, thumb) else { return UIImage(data: data) }
+        return UIImage(cgImage: cg)
+    }
 }
 
 /// A circular crop/zoom editor: pan and pinch the image within a round window,
