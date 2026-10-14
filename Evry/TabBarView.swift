@@ -99,6 +99,8 @@ enum EvryTabBarAppearance {
 ///   activate it; release on neither to cancel.
 struct SwipeHandle: View {
     let palette: Palette
+    /// What the primary action adds, for VoiceOver ("Add task", "Add habit"…).
+    var actionLabel: String = "Add task"
     let action: () -> Void
     var onBrainDump: (CGPoint) -> Void = { _ in }
     var onPomodoro: (CGPoint) -> Void = { _ in }
@@ -141,7 +143,7 @@ struct SwipeHandle: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: 36)
-        .accessibilityLabel("Add task")
+        .accessibilityLabel(actionLabel)
         .accessibilityHint("Double tap to add. Touch and hold for Brain dump or Pomo focus.")
         .accessibilityAddTraits(.isButton)
     }
