@@ -134,10 +134,8 @@ struct InboxView: View {
                     selectedCount: selectedIDs.count,
                     palette: palette,
                     onDelete: deleteSelected,
-                    onMove: {},
                     onCancel: cancelSelection,
                     onGroup: startGroupSelected,
-                    showMove: false,
                     showGroup: true
                 )
                 .padding(.bottom, 100)
