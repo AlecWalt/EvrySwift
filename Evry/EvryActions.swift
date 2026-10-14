@@ -240,7 +240,7 @@ final class EvryActionDesk {
     func readNote(named name: String) -> String {
         let notes = ((try? context.fetch(FetchDescriptor<Note>())) ?? []).filter { !$0.isTrashed }
         guard let note = find(name, in: notes, title: \.title) else { return "There's no note matching \"\(name)\"." }
-        let text = NoteBodyCodec.plainText(note.body).replacingOccurrences(of: "•\t", with: "- ")
+        let text = note.plainText.replacingOccurrences(of: "•\t", with: "- ")
         return "Note \"\(note.title)\":\n\(text.prefix(1500))"
     }
 

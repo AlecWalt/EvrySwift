@@ -73,7 +73,9 @@ struct NotesView: View {
     @Environment(Appearance.self) private var appearance
     @Environment(\.evryAway) private var evryAway
     @Query(sort: \Folder.sortOrder) private var folders: [Folder]
-    @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
+    /// Trash is filtered in the store, not in Swift on every render.
+    @Query(filter: #Predicate<Note> { $0.deletedAt == nil },
+           sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
 
     @State private var navPath = NavigationPath()
     /// True while a notes list is on top, and for the length of the pop
@@ -82,7 +84,7 @@ struct NotesView: View {
     @State private var listOnTop = false
     @State private var editingFolder: Folder?
 
-    private var liveNotes: [Note] { allNotes.filter { !$0.isTrashed } }
+    private var liveNotes: [Note] { allNotes }
 
     /// Per-folder note counts in a single pass (avoids O(folders × notes) work
     /// when rendering the folder list).
@@ -239,7 +241,9 @@ struct NotesListView: View {
     @Environment(Appearance.self) private var appearance
     @Environment(NotesNavigationState.self) private var notesNav
     @Environment(\.evryAway) private var evryAway
-    @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
+    /// Trash is filtered in the store, not in Swift on every render.
+    @Query(filter: #Predicate<Note> { $0.deletedAt == nil },
+           sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
 
     @State private var searchText = ""
     @State private var searchActive = false
@@ -260,28 +264,24 @@ struct NotesListView: View {
 
     // MARK: Derived collections
 
-    /// Non-trashed notes within this scope.
+    /// Notes within this scope (trash is already excluded by the query).
     private var notes: [Note] {
-        allNotes.filter { note in
-            guard !note.isTrashed else { return false }
-            switch scope {
-            case .all:              return true
-            case .folder(let f):    return note.folder?.uid == f.uid
-            }
+        switch scope {
+        case .all:              return allNotes
+        case .folder(let f):    return allNotes.filter { $0.folder?.uid == f.uid }
         }
     }
 
-    /// Scope notes narrowed by the search query.
+    /// Scope notes narrowed by the search query (case-insensitive, without
+    /// lowercasing a copy of every note's text on each pass).
     private var filtered: [Note] {
-        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        let q = searchText.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return notes }
         return notes.filter {
-            $0.title.lowercased().contains(q) || $0.plainText.lowercased().contains(q)
+            $0.title.range(of: q, options: .caseInsensitive) != nil
+                || $0.plainText.range(of: q, options: .caseInsensitive) != nil
         }
     }
-
-    private var pinned: [Note] { filtered.filter(\.pinned) }
-    private var unpinned: [Note] { filtered.filter { !$0.pinned } }
 
     /// In All Notes the folder chip is useful context; inside a folder it's noise.
     private var showsFolderChip: Bool {
@@ -296,7 +296,7 @@ struct NotesListView: View {
     }
 
     /// Unpinned notes bucketed by the day they were created, newest day first.
-    private var dateGroups: [DateGroup] {
+    private func dateGroups(_ unpinned: [Note]) -> [DateGroup] {
         let cal = Calendar.current
         let buckets = Dictionary(grouping: unpinned) { cal.startOfDay(for: $0.createdAt) }
         return buckets.keys.sorted(by: >).map { day in
@@ -330,8 +330,12 @@ struct NotesListView: View {
             }
 
             ScrollView {
-                VStack(spacing: 0) {
-                    if filtered.isEmpty {
+                // Filtered once per render, then split.
+                let shown = filtered
+                let pinned = shown.filter(\.pinned)
+                // Lazy, so long note lists only build the rows on screen.
+                LazyVStack(spacing: 0) {
+                    if shown.isEmpty {
                         emptyState
                             // Lines up with the Inbox's empty state.
                             .padding(.top, 36)
@@ -343,7 +347,7 @@ struct NotesListView: View {
                         }
                         // Unpinned notes grouped by creation day, newest first,
                         // with a date header between groups (Apple Notes style).
-                        ForEach(dateGroups) { group in
+                        ForEach(dateGroups(shown.filter { !$0.pinned })) { group in
                             SectionLabel(text: group.title, palette: palette)
                                 .padding(.horizontal, EvrySpace.gutter)
                             noteRows(group.notes)

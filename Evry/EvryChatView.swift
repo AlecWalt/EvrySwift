@@ -534,7 +534,7 @@ struct EvryChatOverlay: View {
                         .font(.evryLabel)
                         .foregroundStyle(palette.text)
                         .lineLimit(1)
-                    Text(NoteBodyCodec.plainText(note.body).replacingOccurrences(of: "•\t", with: ""))
+                    Text(note.plainText.replacingOccurrences(of: "•\t", with: ""))
                         .font(.nunito(size: 13))
                         .foregroundStyle(palette.textSec)
                         .lineLimit(2)
@@ -932,7 +932,7 @@ struct EvryChatOverlay: View {
             .sorted { $0.modifiedAt > $1.modifiedAt }
             .map { n in
                 EvryAppData.Note(title: n.title, folder: n.folder?.name,
-                                 text: NoteBodyCodec.plainText(n.body)
+                                 text: n.plainText
                                     .replacingOccurrences(of: "•\t", with: "")
                                     .replacingOccurrences(of: "\n", with: " "))
             }
