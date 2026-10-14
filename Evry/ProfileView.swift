@@ -802,7 +802,6 @@ struct SettingsSheet: View {
     @AppStorage("pro_welcomed") private var proWelcomed = false
     @AppStorage("tab_inbox_visible") private var tabInbox = true
     @AppStorage("tab_habits_visible") private var tabHabits = true
-    @AppStorage("tab_calendar_visible") private var tabCalendar = false
     @AppStorage("tab_notes_visible") private var tabNotes = true
     @State private var showMembershipPlans = false
     @State private var showProfile = false
@@ -842,7 +841,7 @@ struct SettingsSheet: View {
 
     private var layoutValueLabel: String {
         // Profile is always shown; count it alongside the toggleable tabs.
-        let count = [tabInbox, tabHabits, tabCalendar, tabNotes].filter { $0 }.count + 1
+        let count = [tabInbox, tabHabits, tabNotes].filter { $0 }.count + 1
         return "\(count) tabs"
     }
 
@@ -1893,7 +1892,6 @@ private struct LayoutSettingsView: View {
 
     @AppStorage("tab_inbox_visible") private var tabInbox = true
     @AppStorage("tab_habits_visible") private var tabHabits = true
-    @AppStorage("tab_calendar_visible") private var tabCalendar = false
     @AppStorage("tab_notes_visible") private var tabNotes = true
     @AppStorage("inbox_hide_completed") private var hideCompleted = false
     @AppStorage("inbox_hide_notes") private var hideNotes = false
@@ -1904,7 +1902,7 @@ private struct LayoutSettingsView: View {
     // Profile is always present, so only the toggleable tabs count toward the
     // "at least one must stay enabled" rule.
     private var enabledCount: Int {
-        [tabInbox, tabHabits, tabCalendar, tabNotes].filter { $0 }.count
+        [tabInbox, tabHabits, tabNotes].filter { $0 }.count
     }
 
     var body: some View {
@@ -1914,7 +1912,6 @@ private struct LayoutSettingsView: View {
                     sectionLabel("Tabs")
                     tabRow("Inbox",    tool: .tasks,    isOn: $tabInbox)
                     tabRow("Habits",   tool: .habits,   isOn: $tabHabits)
-                    tabRow("Calendar", tool: .calendar, isOn: $tabCalendar)
                     tabRow("Notes",    tool: .notes,    isOn: $tabNotes)
                     Text("Keep at least one tab on. Profile is always here.")
                         .font(.nunito(size: 14))

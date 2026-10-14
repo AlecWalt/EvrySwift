@@ -85,7 +85,6 @@ struct ContentView: View {
     @AppStorage("tab_habits_visible")   private var tabHabitsVisible   = true
     // Calendar is hidden by default now that Habits has its spot; it can be
     // re-enabled from Settings → Layout.
-    @AppStorage("tab_calendar_visible") private var tabCalendarVisible = false
     @AppStorage("tab_notes_visible")    private var tabNotesVisible    = true
 
     // Focus Mode
@@ -300,12 +299,6 @@ struct ContentView: View {
                     .tabItem { EvryTabLabel(tab: .habits) }
                     .tag(AppTab.habits)
             }
-            if tabCalendarVisible {
-                CalendarTabView(palette: palette, onEdit: { editingTask = $0 })
-                    .tabPageBackground(palette)
-                    .tabItem { EvryTabLabel(tab: .calendar) }
-                    .tag(AppTab.calendar)
-            }
             if tabNotesVisible {
                 NotesView(palette: palette)
                     .tabPageBackground(palette)
@@ -327,7 +320,6 @@ struct ContentView: View {
         }
         .onChange(of: tabInboxVisible)    { _, v in if !v && selectedTab == .inbox    { jumpToFirstVisible() } }
         .onChange(of: tabHabitsVisible)   { _, v in if !v && selectedTab == .habits   { jumpToFirstVisible() } }
-        .onChange(of: tabCalendarVisible) { _, v in if !v && selectedTab == .calendar { jumpToFirstVisible() } }
         .onChange(of: tabNotesVisible)    { _, v in if !v && selectedTab == .notes    { jumpToFirstVisible() } }
         .overlay(alignment: .bottom) {
             // Hidden while a quick-add card is open. Its removal is the pill's
@@ -401,9 +393,9 @@ struct ContentView: View {
     }
 
     private func jumpToFirstVisible() {
-        let order: [AppTab] = [.inbox, .habits, .calendar, .notes, .profile]
+        let order: [AppTab] = [.inbox, .habits, .notes, .profile]
         // Profile is always present, so it's the guaranteed fallback.
-        let flags = [tabInboxVisible, tabHabitsVisible, tabCalendarVisible, tabNotesVisible, true]
+        let flags = [tabInboxVisible, tabHabitsVisible, tabNotesVisible, true]
         if let idx = flags.firstIndex(of: true) {
             selectedTab = order[idx]
         }

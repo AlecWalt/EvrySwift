@@ -10,7 +10,7 @@ import SwiftUI
 import UIKit
 
 enum AppTab: String, CaseIterable, Identifiable {
-    case inbox, habits, calendar, notes, profile
+    case inbox, habits, notes, profile
 
     var id: String { rawValue }
 
@@ -18,7 +18,6 @@ enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .inbox: "Inbox"
         case .habits: "Habits"
-        case .calendar: "Calendar"
         case .notes: "Notes"
         case .profile: "Profile"
         }
@@ -30,7 +29,6 @@ enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .inbox: EvryTool.tasks.glyph
         case .habits: EvryTool.habits.glyph
-        case .calendar: EvryTool.calendar.glyph
         case .notes: EvryTool.notes.glyph
         case .profile: nil
         }

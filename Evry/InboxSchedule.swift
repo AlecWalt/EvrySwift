@@ -11,9 +11,6 @@
 //  event is on, then the line carries on towards the next event, stopping at
 //  the last one of the day.
 //
-//  This replaces the separate Calendar tab, which is kept intact in
-//  CalendarTabView.swift (and can be re-enabled from Profile → Layout).
-//
 
 import SwiftUI
 import EventKit
