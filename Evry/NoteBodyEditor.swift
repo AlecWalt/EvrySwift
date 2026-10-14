@@ -2,11 +2,10 @@
 //  NoteBodyEditor.swift
 //  Evry
 //
-//  Rich-text body editor for a note — a custom UIKit/TextKit-1 editor wrapped for
-//  SwiftUI. It adds two touches the native TextEditor can't: a caret that glides
-//  smoothly to each new position as you type, and freshly typed characters that
-//  fade in. It also owns the Apple Notes-style formatting bar (bold / italic /
-//  underline / strikethrough / text styles / auto-continuing lists).
+//  Rich-text body editor for a note — a standard UITextView wrapped for SwiftUI
+//  (the system caret and text rendering, so typing stays fast). It owns the
+//  Apple Notes-style formatting bar (bold / italic / underline / strikethrough /
+//  text styles / alignment / auto-continuing lists).
 //
 //  The rich body is an `NSAttributedString`; persistence (RTFD) lives in
 //  `NoteBodyCodec`. Attribute changes are pushed back through `onEdit`.
@@ -15,16 +14,6 @@
 import SwiftUI
 import UIKit
 
-// MARK: - Custom attribute
-
-extension NSAttributedString.Key {
-    /// Timestamp (CACurrentMediaTime) marking when a run was typed, so the layout
-    /// manager can fade it in. Purely transient — RTFD does not persist it.
-    static let evryFadeStart = NSAttributedString.Key("EvryFadeStart")
-}
-
-private let fadeDuration: CFTimeInterval = 0.09
-
 // MARK: - SwiftUI wrapper
 
 struct NoteBodyEditor: View {
@@ -32,9 +21,6 @@ struct NoteBodyEditor: View {
     var placeholder: String = "Start writing…"
     let palette: Palette
     var onEdit: (NSAttributedString) -> Void = { _ in }
-    /// Reports the text view's vertical scroll offset (so overlaid stickers can
-    /// track the content as it scrolls).
-    var onScroll: (CGFloat) -> Void = { _ in }
 
     @State private var controller = RichTextController()
 
@@ -43,7 +29,7 @@ struct NoteBodyEditor: View {
         // (see the representable), so it always sits above the keyboard.
         RichTextEditorRepresentable(text: $text, palette: palette,
                                     placeholder: placeholder,
-                                    controller: controller, onEdit: onEdit, onScroll: onScroll)
+                                    controller: controller, onEdit: onEdit)
     }
 }
 
@@ -146,15 +132,14 @@ private struct RichTextEditorRepresentable: UIViewRepresentable {
     let placeholder: String
     let controller: RichTextController
     let onEdit: (NSAttributedString) -> Void
-    let onScroll: (CGFloat) -> Void
 
-    func makeUIView(context: Context) -> FadingCaretTextView {
-        let tv = FadingCaretTextView.make()
+    func makeUIView(context: Context) -> NoteTextView {
+        let tv = NoteTextView()
+        tv.font = tv.bodyFont   // one-time default; never reset afterwards
         tv.delegate = controller
         controller.textView = tv
         controller.textBinding = $text
         controller.onEdit = onEdit
-        controller.onScroll = onScroll
         tv.configure(palette: palette)
         tv.setAttributedTextPreservingSelection(text.length > 0 ? text : NSAttributedString(string: "", attributes: tv.bodyTypingAttributes))
         tv.typingAttributes = tv.bodyTypingAttributes
@@ -164,13 +149,12 @@ private struct RichTextEditorRepresentable: UIViewRepresentable {
         return tv
     }
 
-    func updateUIView(_ tv: FadingCaretTextView, context: Context) {
+    func updateUIView(_ tv: NoteTextView, context: Context) {
         controller.textBinding = $text
         controller.onEdit = onEdit
-        controller.onScroll = onScroll
         tv.configure(palette: palette)
         // Reflect external content changes (initial load, brain dump append).
-        // Compare plain strings so transient fade attributes don't trigger reloads.
+        // Compare plain strings so attribute-only differences don't reload.
         if (tv.attributedText?.string ?? "") != text.string {
             tv.setAttributedTextPreservingSelection(text)
         }
@@ -184,10 +168,13 @@ private struct RichTextEditorRepresentable: UIViewRepresentable {
 
     /// Hosts the SwiftUI formatting bar as the text view's inputAccessoryView so
     /// it always rides above the keyboard and keeps the field focused when tapped.
-    private func installAccessory(on tv: FadingCaretTextView) {
+    private func installAccessory(on tv: NoteTextView) {
         let host = UIHostingController(rootView: NoteFormattingBar(controller: controller, palette: palette))
         host.view.backgroundColor = .clear
-        host.view.frame = CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: 52)
+        // The text view's own screen (not the deprecated UIScreen.main); the
+        // flexible width then follows the keyboard's.
+        let width = tv.window?.windowScene?.screen.bounds.width ?? tv.bounds.width
+        host.view.frame = CGRect(x: 0, y: 0, width: width, height: 52)
         host.view.autoresizingMask = [.flexibleWidth]
         controller.accessoryHost = host
         tv.inputAccessoryView = host.view
@@ -201,10 +188,9 @@ enum NoteTextStyle: Equatable { case title, heading, body }
 
 @Observable
 final class RichTextController: NSObject, UITextViewDelegate {
-    @ObservationIgnored weak var textView: FadingCaretTextView?
+    @ObservationIgnored weak var textView: NoteTextView?
     @ObservationIgnored var textBinding: Binding<NSAttributedString>?
     @ObservationIgnored var onEdit: ((NSAttributedString) -> Void)?
-    @ObservationIgnored var onScroll: ((CGFloat) -> Void)?
     /// Retains the hosting controller for the inputAccessoryView formatting bar.
     @ObservationIgnored var accessoryHost: UIViewController?
 
@@ -265,38 +251,19 @@ final class RichTextController: NSObject, UITextViewDelegate {
     // MARK: Delegate
 
     func textViewDidChange(_ tv: UITextView) {
-        (tv as? FadingCaretTextView)?.commitPendingFade()
         pushText()
     }
 
-    // UITextViewDelegate refines UIScrollViewDelegate, so this is called as the
-    // text view scrolls — used to keep overlaid stickers tracking the content.
-    func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        onScroll?(scrollView.contentOffset.y)
-    }
-
     func textViewDidChangeSelection(_ tv: UITextView) {
-        (tv as? FadingCaretTextView)?.moveCaret(animated: true)
         refreshState()
     }
 
     func textViewDidBeginEditing(_ tv: UITextView) {
-        (tv as? FadingCaretTextView)?.moveCaret(animated: false)
         refreshState()
     }
 
-    func textViewDidEndEditing(_ tv: UITextView) {
-        (tv as? FadingCaretTextView)?.hideCaret()
-    }
-
     func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
-        guard let tv = textView as? FadingCaretTextView else { return true }
-
-        // Fade in only genuine single-character typing. Autocorrect / predictive
-        // replacements (multi-character, or replacing an existing range) and pastes
-        // insert without a fade so a corrected word doesn't re-animate.
-        let isTyping = range.length == 0 && text.count == 1
-        tv.pendingFade = isTyping ? NSRange(location: range.location, length: (text as NSString).length) : nil
+        guard let tv = textView as? NoteTextView else { return true }
 
         // Auto-continue lists on Return — the current line's marker is read from
         // the text itself, so continuation works after reopening the note.
@@ -311,7 +278,6 @@ final class RichTextController: NSObject, UITextViewDelegate {
 
         if isEmptyMarkerLine(lineContent) {
             // Return on an empty item → strip the marker and leave the list.
-            tv.pendingFade = nil
             var attrs = tv.typingAttributes
             attrs[.paragraphStyle] = defaultParagraphStyle
             tv.textStorage.replaceCharacters(
@@ -336,9 +302,6 @@ final class RichTextController: NSObject, UITextViewDelegate {
             let caret = range.location + (insertion as NSString).length
             tv.selectedRange = NSRange(location: caret, length: 0)
             tv.typingAttributes = attrs
-            // Fade the freshly inserted marker (the part after the newline).
-            tv.pendingFade = NSRange(location: range.location + 1, length: (marker as NSString).length)
-            tv.commitPendingFade()
             listActive = kind
             pushText(); refreshState()
             return false
@@ -360,8 +323,6 @@ final class RichTextController: NSObject, UITextViewDelegate {
         // Apply the hanging-indent paragraph style across the whole current line.
         let paraRange = (tv.textStorage.string as NSString).paragraphRange(for: tv.selectedRange)
         tv.textStorage.addAttribute(.paragraphStyle, value: listParagraphStyle(), range: paraRange)
-        tv.pendingFade = NSRange(location: range.location, length: (marker as NSString).length)
-        tv.commitPendingFade()
         pushText(); refreshState()
         tv.becomeFirstResponder()
     }
@@ -420,10 +381,7 @@ final class RichTextController: NSObject, UITextViewDelegate {
         guard let tv = textView else { return }
         let range = tv.selectedRange
         if range.length > 0 {
-            // Collect first (don't mutate mid-enumeration), then apply directly —
-            // matching the working underline/strikethrough path. Wrapping these in
-            // beginEditing/endEditing with the custom layout manager was preventing
-            // the font change from taking visual effect.
+            // Collect first (don't mutate mid-enumeration), then apply.
             var updates: [(NSRange, UIFont)] = []
             tv.textStorage.enumerateAttribute(.font, in: range, options: []) { value, sub, _ in
                 let font = (value as? UIFont) ?? bodyFont
@@ -535,32 +493,15 @@ extension UIFont {
     }
 }
 
-// MARK: - Text view (custom caret + glyph fade-in)
+// MARK: - Text view
 
-final class FadingCaretTextView: UITextView {
+/// The note's text view: a standard UITextView (system caret and rendering)
+/// with the app's theming and a placeholder.
+final class NoteTextView: UITextView {
     let bodyFont = UIFont.nunito(size: 16)
     var placeholderText = ""
-    /// Range awaiting a fade-in, captured in `shouldChangeText` and applied once
-    /// the characters actually exist.
-    var pendingFade: NSRange?
 
-    private let caretView = UIView()
     private let placeholderLabel = UILabel()
-    private var displayLink: CADisplayLink?
-    private var caretColor: UIColor = .tintColor
-
-    /// Builds the TextKit-1 stack so our custom layout manager is used.
-    static func make() -> FadingCaretTextView {
-        let storage = NSTextStorage()
-        let layout = FadingLayoutManager()
-        storage.addLayoutManager(layout)
-        let container = NSTextContainer(size: CGSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
-        container.widthTracksTextView = true
-        layout.addTextContainer(container)
-        let tv = FadingCaretTextView(frame: .zero, textContainer: container)
-        tv.font = tv.bodyFont   // one-time default; never reset afterwards
-        return tv
-    }
 
     var bodyTypingAttributes: [NSAttributedString.Key: Any] {
         let ink = textColor ?? .label
@@ -640,7 +581,6 @@ final class FadingCaretTextView: UITextView {
         textColor = ink
         if inkChanged { rethemeStorage() }
         tintColor = UIColor(palette.primary)
-        caretColor = UIColor(palette.primary)
         // Links read as ink with the soft TextLink underline (bold is applied
         // per-run in `styleLinks`, since linkTextAttributes can't set a font).
         linkTextAttributes = [
@@ -648,17 +588,10 @@ final class FadingCaretTextView: UITextView {
             .underlineStyle: NSUnderlineStyle.thick.rawValue,
             .underlineColor: linkUnderlineColor,
         ]
-        caretView.backgroundColor = caretColor
         autocorrectionType = .default
         autocapitalizationType = .sentences
         textContainerInset = UIEdgeInsets(top: 8, left: 5, bottom: 8, right: 5)
 
-        if caretView.superview == nil {
-            caretView.layer.cornerRadius = 1
-            caretView.layer.cornerCurve = .continuous
-            caretView.isHidden = true
-            addSubview(caretView)
-        }
         if placeholderLabel.superview == nil {
             placeholderLabel.numberOfLines = 0
             placeholderLabel.isUserInteractionEnabled = false
@@ -674,7 +607,6 @@ final class FadingCaretTextView: UITextView {
         attributedText = themed(new)
         let loc = min(sel.location, (new.string as NSString).length)
         selectedRange = NSRange(location: loc, length: 0)
-        moveCaret(animated: false)
         refreshPlaceholder()
     }
 
@@ -695,151 +627,5 @@ final class FadingCaretTextView: UITextView {
     override func layoutSubviews() {
         super.layoutSubviews()
         refreshPlaceholder()
-        moveCaret(animated: false)
-    }
-
-    // MARK: Custom caret
-
-    // Fully hide the system caret (zero size) but keep its origin so auto-scroll
-    // to the caret still works. Selection handles/highlight are unaffected.
-    private var revealTrueCaret = false
-    override func caretRect(for position: UITextPosition) -> CGRect {
-        if revealTrueCaret { return super.caretRect(for: position) }
-        // Fully suppress the system caret; our custom caretView draws it instead.
-        return .zero
-    }
-
-    private func trueCaretRect(for position: UITextPosition) -> CGRect {
-        revealTrueCaret = true
-        defer { revealTrueCaret = false }
-        return caretRect(for: position)
-    }
-
-    func moveCaret(animated: Bool) {
-        guard isFirstResponder, let range = selectedTextRange, range.isEmpty else {
-            caretView.isHidden = true
-            return
-        }
-        // Ensure layout is current before reading the caret rect — right after a
-        // Return, a stale layout can briefly report the previous line's position,
-        // which is what made the caret jump to the top line and back.
-        layoutManager.ensureLayout(for: textContainer)
-        caretView.isHidden = false
-        let rect = trueCaretRect(for: range.start)
-        // Keep the caret a constant height (the current typing font's line height),
-        // centered on the caret rect, so it doesn't jump with the adjacent glyph.
-        let font = (typingAttributes[.font] as? UIFont) ?? bodyFont
-        let height = font.lineHeight
-        let target = CGRect(x: rect.minX, y: rect.midY - height / 2, width: 2, height: height)
-        // Glide only within a line; snap when the line (vertical position) changes
-        // so the caret never animates through an intermediate/stale line.
-        let sameLine = !caretView.frame.isEmpty && abs(target.midY - caretView.frame.midY) < height * 0.75
-        if animated && sameLine {
-            UIView.animate(withDuration: 0.09, delay: 0,
-                           options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]) {
-                self.caretView.frame = target
-            }
-        } else {
-            caretView.frame = target
-        }
-        restartBlink()
-    }
-
-    func hideCaret() {
-        caretView.isHidden = true
-        caretView.layer.removeAnimation(forKey: "blink")
-    }
-
-    private func restartBlink() {
-        caretView.layer.removeAnimation(forKey: "blink")
-        caretView.layer.opacity = 1
-        let blink = CABasicAnimation(keyPath: "opacity")
-        blink.fromValue = 1
-        blink.toValue = 0
-        blink.duration = 0.5
-        blink.autoreverses = true
-        blink.repeatCount = .infinity
-        // Stay solid briefly after the caret moves, so fast typing reads clearly.
-        blink.beginTime = CACurrentMediaTime() + 0.5
-        caretView.layer.add(blink, forKey: "blink")
-    }
-
-    // MARK: Fade-in
-
-    func commitPendingFade() {
-        guard let range = pendingFade,
-              range.location >= 0,
-              range.location + range.length <= textStorage.length else {
-            pendingFade = nil
-            return
-        }
-        pendingFade = nil
-        textStorage.addAttribute(.evryFadeStart, value: CACurrentMediaTime(), range: range)
-        startFadeLoop()
-    }
-
-    private func startFadeLoop() {
-        guard displayLink == nil else { return }
-        let link = CADisplayLink(target: self, selector: #selector(stepFade))
-        link.add(to: .main, forMode: .common)
-        displayLink = link
-    }
-
-    @objc private func stepFade() {
-        let now = CACurrentMediaTime()
-        var active = false
-        var expired: [NSRange] = []
-        let full = NSRange(location: 0, length: textStorage.length)
-        textStorage.enumerateAttribute(.evryFadeStart, in: full, options: []) { value, range, _ in
-            guard let start = value as? CFTimeInterval else { return }
-            if now - start >= fadeDuration {
-                expired.append(range)
-            } else {
-                active = true
-                layoutManager.invalidateDisplay(forCharacterRange: range)
-            }
-        }
-        for range in expired {
-            textStorage.removeAttribute(.evryFadeStart, range: range)
-            layoutManager.invalidateDisplay(forCharacterRange: range)
-        }
-        if !active {
-            displayLink?.invalidate()
-            displayLink = nil
-        }
-    }
-
-    deinit {
-        displayLink?.invalidate()
-    }
-}
-
-// MARK: - Layout manager that fades freshly typed glyphs
-
-final class FadingLayoutManager: NSLayoutManager {
-    override func drawGlyphs(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
-        guard let storage = textStorage else {
-            super.drawGlyphs(forGlyphRange: glyphsToShow, at: origin)
-            return
-        }
-        let charRange = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
-        let now = CACurrentMediaTime()
-
-        storage.enumerateAttribute(.evryFadeStart, in: charRange, options: []) { value, subCharRange, _ in
-            let subGlyphRange = glyphRange(forCharacterRange: subCharRange, actualCharacterRange: nil)
-            if let start = value as? CFTimeInterval {
-                let alpha = max(0, min(1, CGFloat((now - start) / fadeDuration)))
-                if let ctx = UIGraphicsGetCurrentContext() {
-                    ctx.saveGState()
-                    ctx.setAlpha(alpha)
-                    super.drawGlyphs(forGlyphRange: subGlyphRange, at: origin)
-                    ctx.restoreGState()
-                } else {
-                    super.drawGlyphs(forGlyphRange: subGlyphRange, at: origin)
-                }
-            } else {
-                super.drawGlyphs(forGlyphRange: subGlyphRange, at: origin)
-            }
-        }
     }
 }

@@ -56,11 +56,15 @@ struct EvryTabLabel: View {
 }
 
 /// Brand styling for the system tab bar: the current tab fills sky-soft (the
-/// design system's "current page" state), glyphs and labels are navy (sky /
-/// white in dark), labels are Nunito. Applied once at launch.
+/// design system's "current page" state), the selected tab — and any tab the
+/// Liquid Glass selector passes over — is blue, the rest navy (white in dark),
+/// labels are Nunito. Applied once at launch.
 enum EvryTabBarAppearance {
+    /// The logo's light blue — brand sky, #B0E6FF.
+    static let selectedBlue = Color.evrySky
+
     static func apply() {
-        let selectedInk = UIColor(Color(light: .evryNavy, dark: .evrySky))
+        let selectedInk = UIColor(selectedBlue)
         let normalInk = UIColor(Color(light: .evryNavy75, dark: .evryWhite80))
         let currentFill = UIColor(Color(light: .evrySkySoft,
                                         dark: Color.evryNavy.mix(with: .evrySky, by: 0.18)))

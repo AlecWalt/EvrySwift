@@ -3,9 +3,9 @@
 //  Evry
 //
 //  The Evry event editor — replaces Apple's EKEventEditViewController for both
-//  creating and editing calendar events. Fields: title, date & time (all-day,
-//  start, end), repeat, location, travel time, alert and notes. Saves straight
-//  to EventKit.
+//  creating and editing calendar events, styled like the task editor: compact
+//  outlined cards for title/notes and the details (all-day, start, end, repeat,
+//  place, travel time, alert). Saves straight to EventKit.
 //
 //  Travel time: EventKit has no public travel-time API (Apple Calendar's own
 //  travel time isn't exposed). Evry stores it two ways:
@@ -37,6 +37,9 @@ struct EventEditorView: View {
     @State private var end: Date
     @State private var repeatRule: EventRepeat
     @State private var location: String
+    /// The location filled in from a saved place the title mentions ("Work",
+    /// "Gym"), so it can follow the title until the person sets their own.
+    @State private var autoLocation: String? = nil
     @State private var travel: EventTravel
     @State private var alert: EventAlert
     @State private var notes: String
@@ -132,23 +135,29 @@ struct EventEditorView: View {
 
     // MARK: Body
 
+    // Laid out like the task editor: a header with the actions, then compact
+    // outlined cards — title and notes, the details, and delete.
     var body: some View {
         VStack(spacing: 0) {
-            topBar
+            header
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
+                VStack(spacing: 10) {
                     if readOnly {
                         Text("This calendar is read-only, so this event can't be changed.")
                             .font(.evrySmall)
                             .foregroundStyle(palette.textSec)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 4)
                     }
-                    titleSection
-                    dateSection
-                    repeatSection
-                    locationSection
-                    travelSection
-                    alertSection
-                    notesSection
+                    mainCard
+                    detailsCard
+                    if travel != .none {
+                        Text("You'll get a reminder to leave \(travel.label.lowercased()) before it starts.")
+                            .font(.nunito(size: 13, weight: .semibold))
+                            .foregroundStyle(palette.textMuted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 4)
+                    }
                     if let errorMessage {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
                             Image(systemName: "exclamationmark.circle.fill").accessibilityHidden(true)
@@ -156,26 +165,34 @@ struct EventEditorView: View {
                         }
                         .font(.evrySmall)
                         .foregroundStyle(palette.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if !isNew && !readOnly {
-                        Button(role: .destructive) {
+                        Button {
                             focus = nil
                             showDeleteConfirm = true
                         } label: {
-                            Text("Delete event")
+                            HStack(spacing: 8) {
+                                Image(systemName: "trash")
+                                    .font(.nunito(size: 15, weight: .semibold))
+                                Text("Delete event")
+                                    .font(.nunito(size: 15, weight: .bold))
+                            }
+                            .foregroundStyle(palette.text)
+                            .frame(maxWidth: .infinity, minHeight: 50)
+                            .editCard(palette)
+                            .contentShape(Rectangle())
                         }
-                        .buttonStyle(EvrySecondaryButtonStyle(palette: palette, fullWidth: true))
-                        .padding(.top, 6)
+                        .buttonStyle(PressScaleStyle())
                     }
                 }
                 .disabled(readOnly)
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
                 .padding(.bottom, 24)
             }
             .scrollDismissesKeyboard(.interactively)
         }
-        .safeAreaInset(edge: .bottom) { saveBar }
         .background(palette.bg.ignoresSafeArea())
         .tint(palette.primary)
         .presentationBackground(palette.bg)
@@ -201,7 +218,7 @@ struct EventEditorView: View {
         }
         .animation(EvryMotion.card, value: spanChoice?.id)
         .onChange(of: start) { old, new in
-            // Moving the start keeps the event's length, like Apple Calendar.
+            // Moving the start keeps the event's length.
             end = new.addingTimeInterval(max(0, end.timeIntervalSince(old)))
         }
         .onChange(of: end) { _, new in
@@ -212,157 +229,154 @@ struct EventEditorView: View {
         }
     }
 
-    // MARK: Top bar
+    // MARK: Header
 
-    private var topBar: some View {
-        ZStack {
+    private var header: some View {
+        HStack(spacing: 4) {
             Text(isNew ? "New event" : "Edit event")
-                .font(.evryTitle)
+                .font(.evryH3)
                 .foregroundStyle(palette.text)
-            HStack {
-                Button("Cancel") { close(changed: false) }
-                    .font(.evryLabel)
-                    .foregroundStyle(palette.primary)
-                    .frame(minWidth: EvrySpace.tap, minHeight: EvrySpace.tap)
-                    .contentShape(Rectangle())
-                    .buttonStyle(.plain)
-                Spacer()
-            }
+            Spacer()
+            Button("Cancel") { close(changed: false) }
+                .font(.nunito(size: 15, weight: .bold))
+                .foregroundStyle(palette.textSec)
+                .padding(.horizontal, 10)
+                .frame(minHeight: EvrySpace.tap)
+                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+            Button("Save", action: attemptSave)
+                .font(.nunito(size: 15, weight: .bold))
+                .foregroundStyle(palette.onPrimary)
+                .padding(.horizontal, 16)
+                .frame(minHeight: 34)
+                .background(palette.primary, in: Capsule())
+                .frame(minHeight: EvrySpace.tap)
+                .buttonStyle(PressScaleStyle())
+                .disabled(readOnly || (!isNew && !hasChanges))
+                .opacity(readOnly || (!isNew && !hasChanges) ? 0.4 : 1)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
+        .padding(.horizontal, 20)
+        .padding(.top, 18)
         .padding(.bottom, 6)
     }
 
-    private var saveBar: some View {
-        Button(action: attemptSave) {
-            Text("Save")
-        }
-        .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
-        .disabled(readOnly || (!isNew && !hasChanges))
-        .padding(.horizontal, 20)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-        .background(palette.bg)
-    }
+    // MARK: Cards
 
-    // MARK: Sections
-
-    private var titleSection: some View {
-        field("Title", icon: "textformat") {
-            TextField("New event", text: $title)
+    private var mainCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TextField("New event", text: $title, axis: .vertical)
+                .font(.nunito(size: 19, weight: .bold))
+                .foregroundStyle(palette.text)
                 .focused($focus, equals: .title)
                 .submitLabel(.next)
-                .onSubmit { focus = .location }
-                .evryTextField(palette, focused: focus == .title)
-        }
-    }
-
-    private var dateSection: some View {
-        field("Date & time", icon: "calendar") {
-            VStack(spacing: 0) {
-                Toggle(isOn: $isAllDay.animation(EvryMotion.card)) {
-                    Text("All-day")
-                        .font(.evryBody)
-                        .foregroundStyle(palette.text)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .onChange(of: title) { _, newTitle in
+                    // Only fills an empty location (or one it filled itself).
+                    guard !readOnly, location.isEmpty || location == autoLocation else { return }
+                    let match = FrequentPlaces.match(for: newTitle)?.locationString
+                    withAnimation(EvryMotion.settle) {
+                        location = match ?? ""
+                        autoLocation = match
+                    }
                 }
-                .tint(palette.primary)
-                .frame(minHeight: EvrySpace.tap)
-                .padding(.horizontal, EvrySpace.gutter)
-
-                hairline
-                dateRow("Starts", date: $start, dateField: .startDate, timeField: .startTime)
-                hairline
-                dateRow("Ends", date: $end, dateField: .endDate, timeField: .endTime, minimum: start)
-            }
-            .padding(.vertical, 4)
-            .evryField(palette, cornerRadius: EvryRadius.field)
-        }
-    }
-
-    private var repeatSection: some View {
-        field("Repeat", icon: "arrow.triangle.2.circlepath") {
-            menuRow(selection: $repeatRule,
-                    options: EventRepeat.choices(including: original.repeatRule),
-                    label: \.label)
-        }
-    }
-
-    private var locationSection: some View {
-        field("Location", icon: "mappin.and.ellipse") {
-            TextField("Add a place", text: $location)
-                .focused($focus, equals: .location)
-                .submitLabel(.next)
-                .onSubmit { focus = .notes }
-                .evryTextField(palette, focused: focus == .location)
-        }
-    }
-
-    private var travelSection: some View {
-        field("Travel time", icon: "car") {
-            VStack(alignment: .leading, spacing: 6) {
-                menuRow(selection: $travel, options: EventTravel.allCases, label: \.label)
-                if travel != .none {
-                    Text("You'll get a reminder to leave \(travel.label.lowercased()) before it starts.")
-                        .font(.nunito(size: 13, weight: .semibold))
-                        .foregroundStyle(palette.textMuted)
-                        .padding(.leading, 4)
-                }
-            }
-        }
-    }
-
-    private var alertSection: some View {
-        field("Alert", icon: "bell") {
-            menuRow(selection: $alert,
-                    options: EventAlert.choices(including: original.alert),
-                    label: { $0.label(allDay: isAllDay) })
-        }
-    }
-
-    private var notesSection: some View {
-        field("Notes", icon: "note.text") {
-            TextField("Add notes", text: $notes, axis: .vertical)
-                .lineLimit(3...10)
+            hairline
+            TextField("Add notes…", text: $notes, axis: .vertical)
+                .font(.evryBody)
+                .foregroundStyle(palette.textSec)
+                .lineLimit(1...8)
                 .focused($focus, equals: .notes)
-                .evryTextField(palette, focused: focus == .notes)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
         }
+        .editCard(palette)
+    }
+
+    private var detailsCard: some View {
+        VStack(spacing: 0) {
+            row(icon: "sun.max", label: "All-day") {
+                Toggle("All-day", isOn: $isAllDay.animation(EvryMotion.card))
+                    .labelsHidden()
+                    .tint(palette.primary)
+            }
+            hairline
+            dateRow("Starts", icon: "calendar", date: $start, dateField: .startDate, timeField: .startTime)
+            hairline
+            dateRow("Ends", icon: "calendar.badge.checkmark", date: $end, dateField: .endDate,
+                    timeField: .endTime, minimum: start)
+            hairline
+            row(icon: "arrow.triangle.2.circlepath", label: "Repeat") {
+                inlineMenu(selection: $repeatRule,
+                           options: EventRepeat.choices(including: original.repeatRule),
+                           label: \.label)
+            }
+            hairline
+            row(icon: "mappin.and.ellipse", label: "Place") {
+                TextField("Add a place", text: $location)
+                    .multilineTextAlignment(.trailing)
+                    .focused($focus, equals: .location)
+                    .submitLabel(.done)
+            }
+            hairline
+            row(icon: "car", label: "Travel time") {
+                inlineMenu(selection: $travel, options: EventTravel.allCases, label: \.label)
+            }
+            hairline
+            row(icon: "bell", label: "Alert") {
+                inlineMenu(selection: $alert,
+                           options: EventAlert.choices(including: original.alert),
+                           label: { $0.label(allDay: isAllDay) })
+            }
+        }
+        .font(.evryBody)
+        .foregroundStyle(palette.text)
+        .editCard(palette)
     }
 
     // MARK: Building blocks
 
-    private func field<Content: View>(_ label: String, icon: String,
-                                      @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            QuickAddLabel(text: label, icon: icon, palette: palette)
-            content()
-        }
-    }
-
     private var hairline: some View {
-        Rectangle().fill(palette.hairline).frame(height: 1)
-            .padding(.leading, EvrySpace.gutter)
+        Rectangle().fill(palette.hairline).frame(height: 1).padding(.leading, 14)
     }
 
-    /// "Starts  [Mon, Oct 12]  [9:00 AM]" — Nunito chips that expand an inline
-    /// picker beneath the row.
-    @ViewBuilder
-    private func dateRow(_ label: String, date: Binding<Date>, dateField: DateField,
-                         timeField: DateField, minimum: Date? = nil) -> some View {
-        HStack(spacing: 8) {
+    private func rowIcon(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.nunito(size: 15, weight: .semibold))
+            .foregroundStyle(palette.primary)
+            .frame(width: 24)
+            .accessibilityHidden(true)
+    }
+
+    /// A compact details row: icon, label, and its control on the right.
+    private func row<Control: View>(icon: String, label: String,
+                                    @ViewBuilder control: () -> Control) -> some View {
+        HStack(spacing: 10) {
+            rowIcon(icon)
             Text(label)
-                .font(.evryBody)
+                .font(.nunito(size: 15, weight: .semibold))
                 .foregroundStyle(palette.text)
+                .fixedSize()
             Spacer(minLength: 8)
-            chip(date.wrappedValue.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().year()),
-                 field: dateField)
-            if !isAllDay {
-                chip(date.wrappedValue.formatted(.dateTime.hour().minute()), field: timeField)
+            control()
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: 50)
+    }
+
+    /// "Starts  [Mon, Oct 12]  [9:00 AM]" — chips that open an inline picker
+    /// beneath the row.
+    @ViewBuilder
+    private func dateRow(_ label: String, icon: String, date: Binding<Date>, dateField: DateField,
+                         timeField: DateField, minimum: Date? = nil) -> some View {
+        row(icon: icon, label: label) {
+            HStack(spacing: 6) {
+                chip(date.wrappedValue.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()),
+                     field: dateField)
+                if !isAllDay {
+                    chip(date.wrappedValue.formatted(.dateTime.hour().minute()), field: timeField)
+                }
             }
         }
-        .frame(minHeight: EvrySpace.tap)
-        .padding(.horizontal, EvrySpace.gutter)
-        .padding(.vertical, 2)
 
         if expanded == dateField {
             pickerContainer {
@@ -388,6 +402,7 @@ struct EventEditorView: View {
             .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
+    /// A white outlined chip (filled sky while its picker is open).
     private func chip(_ text: String, field: DateField) -> some View {
         let on = expanded == field
         return Button {
@@ -396,25 +411,23 @@ struct EventEditorView: View {
             withAnimation(EvryMotion.card) { expanded = on ? nil : field }
         } label: {
             Text(text)
-                .font(.nunito(size: 15, weight: .bold))
-                .foregroundStyle(palette.text)
+                .font(.nunito(size: 14, weight: .bold))
+                .foregroundStyle(on ? Color.evryNavy : palette.text)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
                 .padding(.horizontal, 12)
-                .frame(minHeight: 36)
-                .background(on ? palette.skySoft : palette.hover.opacity(palette.dark ? 1 : 0.6),
-                            in: Capsule())
-                .overlay(Capsule().strokeBorder(on ? palette.text : .clear, lineWidth: 1.5))
+                .frame(minHeight: 32)
+                .background(on ? Color.evrySky : palette.card, in: Capsule())
+                .overlay(Capsule().strokeBorder(on ? .clear : palette.border, lineWidth: 1))
                 .frame(minHeight: EvrySpace.tap)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
-    /// A white field row that opens a menu of options: the current choice in
-    /// Nunito with an up/down chevron, like the rest of the app's pickers.
-    private func menuRow<T: Hashable>(selection: Binding<T>, options: [T],
-                                      label: @escaping (T) -> String) -> some View {
+    /// The current choice with an up/down chevron, opening a menu of options.
+    private func inlineMenu<T: Hashable>(selection: Binding<T>, options: [T],
+                                         label: @escaping (T) -> String) -> some View {
         Menu {
             ForEach(options, id: \.self) { option in
                 Button {
@@ -429,19 +442,15 @@ struct EventEditorView: View {
                 }
             }
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
                 Text(label(selection.wrappedValue))
-                    .font(.evryBody)
-                    .foregroundStyle(palette.text)
-                Spacer(minLength: 8)
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.nunito(size: 13, weight: .bold))
-                    .foregroundStyle(palette.primary)
+                    .font(.nunito(size: 11, weight: .bold))
                     .accessibilityHidden(true)
             }
-            .padding(.horizontal, EvrySpace.gutter)
-            .frame(minHeight: EvrySpace.storeHeight)
-            .evryField(palette, cornerRadius: EvryRadius.field)
+            .font(.nunito(size: 15, weight: .semibold))
+            .foregroundStyle(palette.text)
+            .frame(minHeight: EvrySpace.tap)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

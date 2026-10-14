@@ -94,6 +94,8 @@ struct ContentView: View {
     @State private var confirmExitFocus = false
     @State private var showPomodoro = false
     @State private var showChat = false
+    /// The Inbox's swipe-layout menu (the add handle rides along with its card).
+    @State private var inboxDrawer = InboxDrawerState()
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
@@ -139,6 +141,7 @@ struct ContentView: View {
         }
         .environment(projectNavState)
         .environment(notesNavState)
+        .environment(inboxDrawer)
         // Pays out XP the moment a daily task or habit goal is completed.
         .background(DailyGoalXPWatcher())
         .tint(palette.primary)
@@ -246,12 +249,16 @@ struct ContentView: View {
         // guided tour or the daily recap sheet, every Evry on the page
         // underneath steps away (each of those resets it for its own Evry).
         .environment(\.evryAway, showChat || tourCoordinator.isActive || showDailyRecap)
-        // The chat with Evry — rises from the bottom over the current page.
-        .overlay {
-            if showChat {
-                EvryChatOverlay(isPresented: $showChat, onEnterFocusMode: enterFocusMode)
-                    .environment(\.evryAway, false)
-            }
+        // The chat with Evry — a system sheet, so on iOS 26+ it floats as a
+        // Liquid Glass bottom card with display-concentric corners.
+        .sheet(isPresented: $showChat) {
+            EvryChatOverlay(isPresented: $showChat, onEnterFocusMode: enterFocusMode)
+                .environment(\.evryAway, false)
+                .presentationDetents([.fraction(0.82), .large])
+                .presentationDragIndicator(.visible)
+                // Solid white (navy in dark mode) instead of translucent glass,
+                // keeping the floating card shape and concentric corners.
+                .presentationBackground(palette.bg)
         }
         .sheet(item: $editingTask) { task in
             EditTaskSheet(task: task, onDelete: deleteTask)
@@ -301,7 +308,8 @@ struct ContentView: View {
         TabView(selection: $selectedTab) {
             if tabInboxVisible {
                 InboxView(palette: palette, onEdit: { editingTask = $0 }, onDelete: deleteTask, onEnterFocusMode: enterFocusMode,
-                          onOpenChat: { showChat = true })
+                          onOpenChat: { showChat = true },
+                          onSelectTab: { tab in withAnimation(.easeInOut(duration: 0.25)) { selectedTab = tab } })
                     .tabPageBackground(palette)
                     .tabItem { EvryTabLabel(tab: .inbox) }
                     .tag(AppTab.inbox)
@@ -331,7 +339,9 @@ struct ContentView: View {
                 .tabItem { EvryTabLabel(tab: .profile) }
                 .tag(AppTab.profile)
         }
-        .tint(palette.primary)
+        // The tab bar's tint — what the glass selector colours as it passes
+        // over a tab. Each page re-applies the navy tint (tabPageBackground).
+        .tint(EvryTabBarAppearance.selectedBlue)
         .onChange(of: selectedTab) { _, _ in
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }
@@ -367,6 +377,9 @@ struct ContentView: View {
                     onPomodoro: { origin in handleFillOrigin = origin; showHandlePomodoro = true }
                 )
                 .padding(.bottom, 42)
+                // Part of the main screen: slides with the Inbox card when its
+                // menu opens, rather than going anywhere.
+                .modifier(DrawerFollower(active: selectedTab == .inbox))
                 // Pinned above the tab bar regardless of the keyboard, so when a
                 // quick-add card closes the pill always pops back in at its home
                 // spot (instead of riding the keyboard down or up from below).
@@ -700,5 +713,7 @@ extension View {
     /// behind the keyboard instead of the app's grey.
     func tabPageBackground(_ palette: Palette) -> some View {
         background(palette.bg.ignoresSafeArea())
+            // The page's own controls stay navy; the blue is the tab bar's.
+            .tint(palette.primary)
     }
 }

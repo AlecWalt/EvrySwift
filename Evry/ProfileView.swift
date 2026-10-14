@@ -2,12 +2,13 @@
 //  ProfileView.swift
 //  Evry
 //
-//  Profile tab — on the brand sky: settings and search, the person's name and
-//  level title, their photo with its level crest over the level card, today's
-//  goals as tiles, membership, stats tiles, the week chart and settings sheet.
+//  Profile tab — search and settings, the person's name and level title, their
+//  photo ringed by level progress, today's goals as progress bars, membership,
+//  stats tiles, the week chart and settings sheet. Pull down to search.
 //
 
 import SwiftUI
+import EventKit
 import SwiftData
 import StoreKit
 import PhotosUI
@@ -54,6 +55,7 @@ struct ProfileView: View {
     @Query private var habits: [Habit]
 
     @Environment(\.requestReview) private var requestReview
+    @Environment(CalendarService.self) private var calendarService
     @Environment(TourCoordinator.self) private var tourCoordinator
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -71,7 +73,27 @@ struct ProfileView: View {
     @AppStorage(EvryXP.totalKey) private var xpTotal = 0
     /// The level the crest currently shows (animates on level-up).
     @State private var shownLevel = 1
-    @State private var crestPop = 0
+    /// The level ring's fill (0…1). Driven by hand rather than straight from
+    /// `level.fraction`, so a level-up can fill the ring all the way, celebrate,
+    /// and only then start the next level from empty.
+    @State private var ringFraction: Double = 0
+    /// Bumped to play the level-up burst.
+    @State private var levelUpBurst = 0
+    /// The level just reached, shown briefly under the photo.
+    @State private var levelUpBanner: Int? = nil
+    /// Guards against an older ring animation finishing after a newer one.
+    @State private var ringGeneration = 0
+    /// The XP the ring last showed, so a level-up earned elsewhere still plays
+    /// here the next time the profile opens.
+    @AppStorage("profile_seen_xp") private var seenXP = -1
+    @AppStorage("daily_pomo_goal") private var dailyFocusGoal = 60
+    /// The frequent places from setup (JSON) — shown in the developer area.
+    @AppStorage(FrequentPlaces.key) private var frequentPlacesData = Data()
+    /// How far the page is pulled down past its top (pull far enough to search).
+    @State private var pullDistance: CGFloat = 0
+    @State private var pullArmed = false
+    @State private var scrollInteracting = false
+    private static let pullToSearch: CGFloat = 80
 
     private var tasks: [TaskItem] { allTasks.filter { !$0.isTrashed } }
     private var stats: TaskStats { computeStats(tasks) }
@@ -87,9 +109,9 @@ struct ProfileView: View {
         return date.formatted(.dateTime.month(.abbreviated).year())
     }
 
-    /// The page background: the brand's sky (a sky-tinted navy in dark mode).
+    /// The page background: white (navy in dark mode).
     private var pageBackground: Color {
-        palette.dark ? Color.evryNavy.mix(with: .evrySky, by: 0.22) : .evrySky
+        palette.bg
     }
 
     private var level: EvryXP.Progress { EvryXP.progress(for: xpTotal) }
@@ -97,39 +119,48 @@ struct ProfileView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 14) {
+            VStack(spacing: 0) {
                 header
+                    .padding(.horizontal, EvrySpace.gutter)
                 avatar
-                    .padding(.top, 6)
-                levelCard
-                    .padding(.top, -34)   // the photo sits over the card's top edge
-                todayTiles
-                if membershipPlan != "pro" {
-                    upgradeCard
-                }
-                statsTiles
-                activitySection
-                developerSection
+                    .padding(.top, 10)
+                container
+                    .padding(.top, -53)    // the photo sits over the container's top edge
+                    .padding(.horizontal, 8)
             }
-            .padding(.horizontal, EvrySpace.gutter)
             .padding(.top, 8)
-            .padding(.bottom, 110)
         }
+        // Pull down from the top to open search.
+        .onScrollGeometryChange(for: CGFloat.self) { geo in
+            max(0, -(geo.contentOffset.y + geo.contentInsets.top))
+        } action: { _, pull in
+            pullDistance = pull
+            guard scrollInteracting else { return }
+            if pull >= Self.pullToSearch && !pullArmed {
+                pullArmed = true
+                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+            } else if pull < Self.pullToSearch * 0.8 && pullArmed {
+                pullArmed = false
+            }
+        }
+        .onScrollPhaseChange { _, phase in
+            scrollInteracting = phase == .interacting
+            // Opens as the finger lets go, if it was pulled far enough.
+            if phase != .interacting && pullArmed {
+                pullArmed = false
+                showGlobalSearch = true
+            }
+        }
+        .overlay(alignment: .top) { pullHint }
         .background(pageBackground.ignoresSafeArea())
         .onAppear {
             profileImageData = UserDefaults.standard.data(forKey: "profile_image_data")
             if firstUsed.isEmpty {
                 firstUsed = profileISO8601.string(from: Date())
             }
-            shownLevel = level.level
+            syncRingOnAppear()
         }
-        .onChange(of: level.level) { old, new in
-            // Levelling up: the crest pops and the phone taps.
-            guard new > old else { shownLevel = new; return }
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            withAnimation(reduceMotion ? .easeOut(duration: 0.2) : EvryMotion.pop) { shownLevel = new }
-            crestPop += 1
-        }
+        .onChange(of: xpTotal) { old, new in playProgress(from: old, to: new) }
         .onChange(of: selectedPhoto) { _, item in
             // Load the full image, then let the user crop/zoom before saving.
             Task {
@@ -157,10 +188,100 @@ struct ProfileView: View {
         }
     }
 
+    /// A magnifying glass that fades in above the header as the page is pulled
+    /// down, filling in once it's pulled far enough to open search.
+    private var pullHint: some View {
+        let progress = min(1, pullDistance / Self.pullToSearch)
+        return Image(systemName: "magnifyingglass")
+            .font(.nunito(size: 17, weight: .bold))
+            .foregroundStyle(pullArmed ? palette.onPrimary : palette.text)
+            .frame(width: 40, height: 40)
+            .background(pullArmed ? palette.primary : palette.hover, in: Circle())
+            .scaleEffect(0.6 + 0.4 * progress)
+            .opacity(Double(progress))
+            .offset(y: max(0, pullDistance / 2 - 20))
+            .animation(EvryMotion.pop, value: pullArmed)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    // MARK: Level ring
+
+    private func syncRingOnAppear() {
+        // First visit, or XP was reset: just show where things stand.
+        guard seenXP >= 0, seenXP <= xpTotal, seenXP != xpTotal else {
+            seenXP = xpTotal
+            shownLevel = level.level
+            ringFraction = level.fraction
+            return
+        }
+        // Progress made since the profile was last seen: start from there and
+        // play it in, once the page has settled.
+        let from = seenXP
+        let start = EvryXP.progress(for: from)
+        shownLevel = start.level
+        ringFraction = start.fraction
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { playProgress(from: from, to: xpTotal) }
+    }
+
+    /// Moves the ring from one XP total to another. Within a level it simply
+    /// glides. Across a level it fills the rest of the ring, bursts, shows the
+    /// new level, then empties out of sight and fills to the new progress.
+    private func playProgress(from oldXP: Int, to newXP: Int) {
+        let old = EvryXP.progress(for: oldXP)
+        let new = EvryXP.progress(for: newXP)
+        seenXP = newXP
+        ringGeneration += 1
+        let generation = ringGeneration
+
+        guard new.level > old.level else {
+            withAnimation(EvryMotion.settle) {
+                shownLevel = new.level
+                ringFraction = new.fraction
+            }
+            return
+        }
+        if reduceMotion {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            withAnimation(.easeOut(duration: 0.2)) {
+                shownLevel = new.level
+                ringFraction = new.fraction
+            }
+            return
+        }
+
+        // 1. Close the circle.
+        withAnimation(.easeInOut(duration: 0.6)) { ringFraction = 1 } completion: {
+            guard generation == ringGeneration else { return }
+            // 2. Celebrate.
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            levelUpBurst += 1
+            withAnimation(EvryMotion.pop) {
+                shownLevel = new.level
+                levelUpBanner = new.level
+            }
+            Task { @MainActor in
+                // 3. Empty the ring under the burst (no backwards sweep), then
+                //    fill to the new level's progress.
+                try? await Task.sleep(for: .milliseconds(550))
+                guard generation == ringGeneration else { return }
+                var reset = Transaction()
+                reset.disablesAnimations = true
+                withTransaction(reset) { ringFraction = 0 }
+                try? await Task.sleep(for: .milliseconds(40))
+                guard generation == ringGeneration else { return }
+                withAnimation(.easeOut(duration: 0.8)) { ringFraction = new.fraction }
+                try? await Task.sleep(for: .milliseconds(1600))
+                guard generation == ringGeneration else { return }
+                withAnimation(.easeOut(duration: 0.3)) { levelUpBanner = nil }
+            }
+        }
+    }
+
     // MARK: Header
 
-    /// Settings on the left, search on the right, the name and level title
-    /// centred between them.
+    /// Search on the left, settings on the right, the name, level title and
+    /// level centred between them. Tap the title for the crests.
     private var header: some View {
         ZStack {
             VStack(spacing: 2) {
@@ -170,18 +291,24 @@ struct ProfileView: View {
                     .foregroundStyle(Color.evryNavy)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                Text(tier.title)
-                    .font(.nunito(size: 15, weight: .semibold))
-                    .foregroundStyle(Color.evryNavy.opacity(0.8))
-                    .contentTransition(.opacity)
-                    .animation(EvryMotion.settle, value: tier)
+                Button { showCrests = true } label: {
+                    Text("\(tier.title) · Lv. \(shownLevel)")
+                        .font(.nunito(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.evryNavy.opacity(0.8))
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                        .animation(EvryMotion.settle, value: shownLevel)
+                }
+                .buttonStyle(PressScaleStyle(scale: 0.97))
+                .accessibilityLabel("\(tier.title), level \(level.level), \(Int((level.fraction * 100).rounded())) percent to the next level")
+                .accessibilityHint("Shows your crests")
             }
             .padding(.horizontal, 60)
 
             HStack {
-                circleButton("gearshape.fill", label: "Open settings") { showSettings = true }
-                Spacer()
                 circleButton("magnifyingglass", label: "Search tasks, notes and projects") { showGlobalSearch = true }
+                Spacer()
+                circleButton("gearshape.fill", label: "Open settings") { showSettings = true }
             }
         }
         .foregroundStyle(palette.dark ? Color.evryWhite : .evryNavy)
@@ -201,11 +328,11 @@ struct ProfileView: View {
 
     // MARK: Avatar
 
-    /// The person's photo (or initials), large and centred, with their crest
-    /// pinned to it. Tap to change the photo.
+    /// The person's photo (or initials), large and centred, ringed by their
+    /// progress to the next level. Tap to change the photo.
     private var avatar: some View {
         PhotosPicker(selection: $selectedPhoto, matching: .images, photoLibrary: .shared()) {
-            ZStack(alignment: .bottomTrailing) {
+            ZStack {
                 ZStack {
                     Circle()
                         .fill(profileImageData != nil ? Color.clear : (userName.isEmpty ? palette.skySoft : avatarColor(for: userName)))
@@ -227,121 +354,98 @@ struct ProfileView: View {
                 .frame(width: 148, height: 148)
                 .overlay(Circle().strokeBorder(Color.evryWhite, lineWidth: 6))
 
-                EvryCrest(level: shownLevel, size: 40)
-                    // A white medallion so the crest reads on the sky page.
-                    .frame(width: 60, height: 60)
-                    .background(Color.evryWhite, in: Circle())
-                    .keyframeAnimator(initialValue: 1.0, trigger: crestPop) { view, scale in
-                        view.scaleEffect(scale)
-                    } keyframes: { _ in
-                        SpringKeyframe(1.35, duration: 0.25, spring: .snappy)
-                        SpringKeyframe(1, duration: 0.45, spring: .bouncy)
-                    }
-                    .offset(x: 4, y: 4)
+                // The level ring: a white track hugging the photo (with a soft
+                // shadow so it reads on the white page), filling with sky
+                // clockwise from the top.
+                Circle()
+                    .stroke(Color.evryWhite, lineWidth: 12)
+                    .frame(width: 162, height: 162)
+                    .shadow(color: Color.evryNavy.opacity(palette.dark ? 0.35 : 0.14), radius: 5, y: 2)
+                Circle()
+                    .trim(from: 0, to: max(0.001, min(1, ringFraction)))
+                    .stroke(Color.evrySky, style: StrokeStyle(lineWidth: 12, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 162, height: 162)
+            }
+            .frame(width: 174, height: 174)
+            .background { LevelUpBurst(trigger: levelUpBurst) }
+            // Levelling up: the whole ring pops.
+            .keyframeAnimator(initialValue: 1.0, trigger: levelUpBurst) { view, scale in
+                view.scaleEffect(scale)
+            } keyframes: { _ in
+                SpringKeyframe(1.12, duration: 0.22, spring: .snappy)
+                SpringKeyframe(0.97, duration: 0.18, spring: .snappy)
+                SpringKeyframe(1, duration: 0.45, spring: .bouncy)
+            }
+            .overlay(alignment: .bottom) {
+                if let reached = levelUpBanner {
+                    Text("Level \(reached) reached")
+                        .font(.nunito(size: 14, weight: .heavy))
+                        .foregroundStyle(Color.evryNavy)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(Color.evrySky, in: Capsule())
+                        .overlay(Capsule().strokeBorder(Color.evryWhite, lineWidth: 2))
+                        .offset(y: 10)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
             }
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Change profile photo")
-        .accessibilityValue("Level \(level.level)")
+        .accessibilityValue("Level \(level.level), \(Int((level.fraction * 100).rounded())) percent to the next level")
         .zIndex(1)
     }
 
-    // MARK: Level card
+    // MARK: Container
 
-    private var levelMessage: String {
-        let toNext = level.toNext
-        if let next = tier.next {
-            let levelsAway = next.startLevel - level.level
-            return levelsAway == 1
-                ? "\(toNext) XP to level \(level.level + 1), and a new crest. Reach your daily goals to earn XP."
-                : "\(toNext) XP to level \(level.level + 1). Your next crest arrives at level \(next.startLevel)."
-        }
-        return "You’ve reached the grandest crest. \(toNext) XP to level \(level.level + 1)."
-    }
-
-    /// What the level means and how far through it you are. Tap for the crests.
-    private var levelCard: some View {
-        Button { showCrests = true } label: {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(levelMessage)
-                    .font(.nunito(size: 15))
-                    .lineSpacing(3)
-                    .foregroundStyle(palette.textSec)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 34)   // room for the photo above
-
-                paletteDivider(palette)
-
-                HStack(spacing: 10) {
-                    EvryCrest(level: shownLevel, size: 26)
-                    Text("Lv. \(level.level)")
-                        .font(.nunito(size: 16, weight: .heavy))
-                        .foregroundStyle(palette.text)
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                    ProgressBarView(fraction: level.fraction, palette: palette)
-                        .frame(height: 8)
-                    Text("\(Int((level.fraction * 100).rounded()))%")
-                        .font(.nunito(size: 15, weight: .heavy))
-                        .foregroundStyle(palette.text)
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                }
-                .animation(EvryMotion.settle, value: level)
+    /// Everything below the photo, in one white container. It runs past the
+    /// bottom of the page, so the sky only shows at the top and as slim slivers
+    /// down the sides.
+    private var container: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            todayTiles
+            if membershipPlan != "pro" {
+                upgradeRow
             }
-            .padding(EvrySpace.grid)
-            .evryCard(palette, shadow: false)
-            .contentShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
+            statsTiles
+            activitySection
+            developerSection
         }
-        .buttonStyle(PressScaleStyle(scale: 0.98))
-        .accessibilityLabel("Level \(level.level), \(Int((level.fraction * 100).rounded())) percent to the next level")
-        .accessibilityHint("Shows your crests")
+        .padding(.horizontal, 16)
+        .padding(.top, 64)        // room for the photo, which overlaps the top edge
+        .padding(.bottom, 100)    // clear of the tab bar
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(alignment: .top) {
+            UnevenRoundedRectangle(topLeadingRadius: EvryRadius.panel, topTrailingRadius: EvryRadius.panel,
+                                   style: .continuous)
+                .fill(palette.card)
+                // Extends well below the content, so overscrolling never shows sky.
+                .padding(.bottom, -1200)
+        }
     }
 
-    // MARK: Upgrade card
-
-    /// Trial-aware subtitle for the upgrade card.
-    private var trialSubtitle: String {
-        let days = MembershipAccess.daysRemaining()
-        if days > 0 {
-            return "\(days) day\(days == 1 ? "" : "s") left in your free trial"
-        }
-        return "Your free trial has ended. Keep everything with a membership."
+    /// A panel inside the white container: white, with the same light outline
+    /// as the app's other cards and buttons marking its edge.
+    private func inset<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .background(palette.card, in: RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous)
+                .strokeBorder(palette.border, lineWidth: 1))
     }
 
-    private var upgradeCard: some View {
-        VStack(spacing: 16) {
-            HStack(spacing: 14) {
-                Image(systemName: "sparkles")
-                    .font(.nunito(size: 24, weight: .semibold))
-                    .foregroundStyle(Color.evryNavy)
-                    .frame(width: 64, height: 64)
-                    .background(palette.skySoft, in: Circle())
-                    .overlay(Circle().strokeBorder(Color.evrySky, lineWidth: 1))
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Keep everything, always")
-                        .font(.nunito(size: 18, weight: .bold))
-                        .foregroundStyle(palette.text)
-                    Text(trialSubtitle)
-                        .font(.nunito(size: 14))
-                        .foregroundStyle(palette.textSec)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
-            Button("Start your membership") { showMembershipPromo = true }
-                .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
-        }
-        .padding(EvrySpace.grid)
-        .evryCard(palette, shadow: false)
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text)
+            .font(.evrySmall)
+            .foregroundStyle(palette.textSec)
+            .padding(.leading, 4)
+            .padding(.bottom, -8)
     }
 
-    // MARK: Today (daily goals as tiles)
+    // MARK: Today
 
-    /// Today's goals in the tile layout: tasks across the top, then habits and
-    /// focus side by side.
+    /// Today's tasks, habits and focus — three progress bars, one per line, in
+    /// a single inset.
     private var todayTiles: some View {
         let today = Calendar.current.startOfDay(for: Date())
         let dueTasks = tasks.filter { t in
@@ -352,94 +456,153 @@ struct ProfileView: View {
         let dueHabits = habits.filter { !$0.isFormed && $0.isScheduled(on: today) }
         let habitsDone = dueHabits.filter { HabitStats(habit: $0).todayDone }.count
         let focus = FocusLog.minutes(on: Date())
+        let focusGoal = max(1, dailyFocusGoal)
 
-        return VStack(spacing: 10) {
-            goalTile(icon: "checkmark.square.fill",
-                     value: dueTasks.isEmpty ? "–" : "\(tasksDone)/\(dueTasks.count)",
-                     label: dueTasks.isEmpty ? "Nothing due today" : "Today’s tasks done",
-                     fraction: dueTasks.isEmpty ? nil : Double(tasksDone) / Double(dueTasks.count),
-                     reached: !dueTasks.isEmpty && tasksDone == dueTasks.count)
-            HStack(spacing: 10) {
-                goalTile(icon: "arrow.clockwise.circle.fill",
-                         value: dueHabits.isEmpty ? "–" : "\(habitsDone)/\(dueHabits.count)",
-                         label: dueHabits.isEmpty ? "No habits today" : "Habits today",
-                         fraction: nil,
-                         reached: !dueHabits.isEmpty && habitsDone == dueHabits.count)
-                goalTile(icon: "timer",
-                         value: focus >= 60 ? "\(focus / 60)h \(focus % 60)m" : "\(focus)m",
-                         label: "Focus today", fraction: nil, reached: false)
+        return VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Today")
+            inset {
+                VStack(spacing: 14) {
+                    goalBar(icon: "checkmark.square.fill", label: "Tasks",
+                            value: dueTasks.isEmpty ? "–" : "\(tasksDone)/\(dueTasks.count)",
+                            fraction: dueTasks.isEmpty ? 0 : Double(tasksDone) / Double(dueTasks.count),
+                            reached: !dueTasks.isEmpty && tasksDone == dueTasks.count)
+                    goalBar(icon: "arrow.triangle.2.circlepath", label: "Habits",
+                            value: dueHabits.isEmpty ? "–" : "\(habitsDone)/\(dueHabits.count)",
+                            fraction: dueHabits.isEmpty ? 0 : Double(habitsDone) / Double(dueHabits.count),
+                            reached: !dueHabits.isEmpty && habitsDone == dueHabits.count)
+                    goalBar(icon: "timer", label: "Focus",
+                            value: "\(minutesLabel(focus)) / \(minutesLabel(focusGoal))",
+                            fraction: Double(focus) / Double(focusGoal),
+                            reached: focus >= focusGoal)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
 
-    private func goalTile(icon: String, value: String, label: String, fraction: Double?, reached: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Image(systemName: reached ? "checkmark.circle.fill" : icon)
-                    .font(.nunito(size: 17, weight: .bold))
-                    .foregroundStyle(palette.primary)
-                    .contentTransition(.symbolEffect(.replace))
-                    .symbolEffect(.bounce, value: reduceMotion ? false : reached)
-                    .accessibilityHidden(true)
-                Text(value)
-                    .font(.nunito(size: 20, weight: .heavy))
-                    .foregroundStyle(palette.text)
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-            }
-            Text(reached ? "\(label) · Goal reached" : label)
-                .font(.nunito(size: 14, weight: reached ? .bold : .regular))
-                .foregroundStyle(palette.textSec)
-            if let fraction {
-                ProgressBarView(fraction: fraction, palette: palette)
-                    .padding(.top, 6)
-            }
+    private func minutesLabel(_ m: Int) -> String {
+        m >= 60 ? (m % 60 == 0 ? "\(m / 60)h" : "\(m / 60)h \(m % 60)m") : "\(m)m"
+    }
+
+    /// One line of the Today panel: icon and name, the bar, and the count.
+    private func goalBar(icon: String, label: String, value: String, fraction: Double, reached: Bool) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: reached ? "checkmark.circle.fill" : icon)
+                .font(.nunito(size: 15, weight: .bold))
+                .foregroundStyle(palette.primary)
+                .frame(width: 20, height: 20)
+                .contentTransition(.symbolEffect(.replace))
+                .symbolEffect(.bounce, value: reduceMotion ? false : reached)
+                .accessibilityHidden(true)
+            Text(label)
+                .font(.nunito(size: 15, weight: .bold))
+                .foregroundStyle(palette.text)
+                .frame(width: 58, alignment: .leading)
+            ProgressBarView(fraction: max(0, min(1, fraction)), palette: palette)
+                .frame(height: 8)
+            Text(value)
+                .font(.nunito(size: 14, weight: .heavy))
+                .foregroundStyle(palette.text)
+                .monospacedDigit()
+                .lineLimit(1)
+                .contentTransition(.numericText())
+                .frame(minWidth: 44, alignment: .trailing)
+                .fixedSize()
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .evryCard(palette, shadow: false)
         .animation(EvryMotion.settle, value: reached)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label) today")
+        .accessibilityValue(reached ? "\(value), done" : value)
     }
 
-    // MARK: Stats tiles
+    // MARK: Membership
+
+    /// Trial-aware subtitle for the membership row.
+    private var trialSubtitle: String {
+        let days = MembershipAccess.daysRemaining()
+        if days > 0 {
+            return "\(days) day\(days == 1 ? "" : "s") left in your free trial"
+        }
+        return "Your free trial has ended. Keep everything with a membership."
+    }
+
+    private var upgradeRow: some View {
+        inset {
+            HStack(spacing: 12) {
+                Image(systemName: "sparkles")
+                    .font(.nunito(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.evryNavy)
+                    .frame(width: 40, height: 40)
+                    .background(Color.evrySky, in: Circle())
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Keep everything, always")
+                        .font(.nunito(size: 15, weight: .bold))
+                        .foregroundStyle(palette.text)
+                    Text(trialSubtitle)
+                        .font(.nunito(size: 13))
+                        .foregroundStyle(palette.textSec)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 4)
+                Button("Join") { showMembershipPromo = true }
+                    .font(.nunito(size: 15, weight: .bold))
+                    .foregroundStyle(palette.onPrimary)
+                    .padding(.horizontal, 18)
+                    .frame(minHeight: 40)
+                    .background(palette.primary, in: Capsule())
+                    .frame(minHeight: EvrySpace.tap)
+                    .contentShape(Capsule())
+                    .buttonStyle(PressScaleStyle())
+                    .accessibilityLabel("Start your membership")
+            }
+            .padding(12)
+        }
+    }
+
+    // MARK: Stats
 
     private var statsTiles: some View {
         let overdueCount = tasks.filter { !$0.completed && isOverdueDate($0.dueDate) }.count
         let activeTasks = tasks.filter { !$0.completed && !$0.isNote }.count
-        let cells: [(icon: String, value: String, label: String, alert: Bool)] = [
-            ("calendar", "\(stats.weekDone)", "Done this week", false),
-            ("calendar.badge.checkmark", "\(stats.monthDone)", "Done this month", false),
-            ("tray.full.fill", "\(activeTasks)", "Active tasks", false),
-            ("exclamationmark.circle.fill", "\(overdueCount)", "Overdue", overdueCount > 0),
-            ("checkmark.seal.fill", "\(stats.totalDone)", "Done all-time", false),
-            ("person.crop.circle", joinedLabel, "Member since", false),
+        let cells: [(value: String, label: String, alert: Bool)] = [
+            ("\(stats.weekDone)", "This week", false),
+            ("\(stats.monthDone)", "This month", false),
+            ("\(stats.totalDone)", "All-time", false),
+            ("\(activeTasks)", "Active", false),
+            ("\(overdueCount)", "Overdue", overdueCount > 0),
+            (joinedLabel, "Member since", false),
         ]
-        return VStack(alignment: .leading, spacing: 6) {
-            SectionLabel(text: "Your stats", palette: palette)
-                .foregroundStyle(Color.evryNavy)
-                .padding(.horizontal, 4)
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+        return VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Your stats")
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                 ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            Image(systemName: cell.icon)
-                                .font(.nunito(size: 15, weight: .bold))
-                                .foregroundStyle(palette.primary)
-                                .accessibilityHidden(true)
-                            Text(cell.value)
-                                .font(.nunito(size: 18, weight: .heavy))
-                                .foregroundStyle(palette.text)
+                    inset {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 4) {
+                                if cell.alert {
+                                    Image(systemName: "exclamationmark.circle.fill")
+                                        .font(.nunito(size: 12, weight: .bold))
+                                        .foregroundStyle(palette.text)
+                                        .accessibilityHidden(true)
+                                }
+                                Text(cell.value)
+                                    .font(.nunito(size: 17, weight: .heavy))
+                                    .foregroundStyle(palette.text)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.6)
+                            }
+                            Text(cell.label)
+                                .font(.nunito(size: 12, weight: cell.alert ? .bold : .regular))
+                                .foregroundStyle(palette.textSec)
                                 .lineLimit(1)
-                                .minimumScaleFactor(0.7)
+                                .minimumScaleFactor(0.85)
                         }
-                        Text(cell.label)
-                            .font(.nunito(size: 13, weight: cell.alert ? .bold : .regular))
-                            .foregroundStyle(palette.textSec)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .evryCard(palette, shadow: false)
                     .accessibilityElement(children: .combine)
                 }
             }
@@ -451,16 +614,9 @@ struct ProfileView: View {
     private var activitySection: some View {
         let maxCount = max(1, stats.weekData.map(\.count).max() ?? 1)
 
-        return VStack(alignment: .leading, spacing: 4) {
-            SectionLabel(text: "Activity", palette: palette)
-                .foregroundStyle(Color.evryNavy)
-                .padding(.horizontal, 4)
-
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Last 7 days")
-                    .font(.evrySmall)
-                    .foregroundStyle(palette.textSec)
-
+        return VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Last 7 days")
+            inset {
                 HStack(alignment: .bottom, spacing: 8) {
                     ForEach(stats.weekData) { day in
                         VStack(spacing: 6) {
@@ -470,7 +626,7 @@ struct ProfileView: View {
                             UnevenRoundedRectangle(topLeadingRadius: EvryRadius.tail, topTrailingRadius: EvryRadius.tail,
                                                    style: .continuous)
                                 .fill(day.isToday ? palette.primary : Color.evrySky.opacity(palette.dark ? 0.35 : 1))
-                                .frame(height: max(3, CGFloat(day.count) / CGFloat(maxCount) * 52 + (day.count > 0 ? 4 : 0)))
+                                .frame(height: max(3, CGFloat(day.count) / CGFloat(maxCount) * 44 + (day.count > 0 ? 4 : 0)))
                             Text(narrowDateFormatter.string(from: day.date))
                                 .font(.nunito(size: 12, weight: day.isToday ? .bold : .semibold))
                                 .foregroundStyle(day.isToday ? palette.text : palette.textMuted)
@@ -480,58 +636,131 @@ struct ProfileView: View {
                         .accessibilityLabel("\(day.date.formatted(.dateTime.weekday(.wide))): \(day.count) done")
                     }
                 }
-                .frame(height: 84)
+                .frame(height: 72)
+                .padding(14)
             }
-            .padding(EvrySpace.grid)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .evryCard(palette, shadow: false)
         }
     }
 
     // MARK: Developer section
 
     private var developerSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            SectionLabel(text: "Developer", palette: palette)
-                .foregroundStyle(Color.evryNavy)
-                .padding(.horizontal, 4)
-
-            VStack(spacing: 0) {
-                devButton("Add \(EvryXP.perGoal) XP") {
-                    EvryXP.add(EvryXP.perGoal)
-                }
-                paletteDivider(palette).padding(.leading, 16)
-                devButton("Reset XP and level") {
-                    EvryXP.reset()
-                }
-                paletteDivider(palette).padding(.leading, 16)
-                devButton("Preview setup flow") {
-                    showSetupFlow = true
-                }
-                paletteDivider(palette).padding(.leading, 16)
-                devButton("Preview review popup") {
-                    requestReview()
-                }
-                paletteDivider(palette).padding(.leading, 16)
-                devButton("Trial: reset to \(MembershipAccess.trialDays) days") {
-                    membershipPlan = ""
-                    firstUsed = ISO8601DateFormatter().string(from: Date())
-                }
-                paletteDivider(palette).padding(.leading, 16)
-                devButton("Trial: 3 days left") {
-                    membershipPlan = ""
-                    let d = Calendar.current.date(byAdding: .day, value: -(MembershipAccess.trialDays - 3), to: Date()) ?? Date()
-                    firstUsed = ISO8601DateFormatter().string(from: d)
-                }
-                paletteDivider(palette).padding(.leading, 16)
-                devButton("Trial: expire now (show wall)") {
-                    membershipPlan = ""
-                    let d = Calendar.current.date(byAdding: .day, value: -40, to: Date()) ?? Date()
-                    firstUsed = ISO8601DateFormatter().string(from: d)
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Developer")
+            inset {
+                VStack(spacing: 0) {
+                    devButton("Add \(EvryXP.perGoal) XP") {
+                        EvryXP.add(EvryXP.perGoal)
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Reset XP and level") {
+                        EvryXP.reset()
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Add sample events today") {
+                        addSampleEvents()
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Preview setup flow") {
+                        showSetupFlow = true
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Preview review popup") {
+                        requestReview()
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Trial: reset to \(MembershipAccess.trialDays) days") {
+                        membershipPlan = ""
+                        firstUsed = ISO8601DateFormatter().string(from: Date())
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Trial: 3 days left") {
+                        membershipPlan = ""
+                        let d = Calendar.current.date(byAdding: .day, value: -(MembershipAccess.trialDays - 3), to: Date()) ?? Date()
+                        firstUsed = ISO8601DateFormatter().string(from: d)
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Trial: expire now (show wall)") {
+                        membershipPlan = ""
+                        let d = Calendar.current.date(byAdding: .day, value: -40, to: Date()) ?? Date()
+                        firstUsed = ISO8601DateFormatter().string(from: d)
+                    }
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
-            .evryField(palette)
+            savedPlacesPanel
+        }
+    }
+
+    /// Dev: the frequent places collected in setup, as stored.
+    private var savedPlacesPanel: some View {
+        let places = (try? JSONDecoder().decode([FrequentPlace].self, from: frequentPlacesData)) ?? []
+        return VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Saved places")
+                .padding(.top, 10)
+            inset {
+                VStack(spacing: 0) {
+                    if places.isEmpty {
+                        Text("No places saved yet.")
+                            .font(.evryBody)
+                            .foregroundStyle(palette.textSec)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                    }
+                    ForEach(places) { place in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(place.label)
+                                .font(.nunito(size: 15, weight: .bold))
+                                .foregroundStyle(palette.text)
+                            Text(place.name)
+                                .font(.nunito(size: 14))
+                                .foregroundStyle(palette.text)
+                            if !place.address.isEmpty && place.address != place.name {
+                                Text(place.address)
+                                    .font(.nunito(size: 13))
+                                    .foregroundStyle(palette.textSec)
+                            }
+                            Text(String(format: "%.5f, %.5f", place.latitude, place.longitude))
+                                .font(.nunito(size: 12))
+                                .foregroundStyle(palette.textMuted)
+                                .monospacedDigit()
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        paletteDivider(palette).padding(.leading, 16)
+                    }
+                    if !places.isEmpty {
+                        devButton("Clear saved places") {
+                            frequentPlacesData = Data()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Dev: a spread of events around now, to try the Schedule rail — one done,
+    /// one on now, two still to come, plus an all-day one.
+    private func addSampleEvents() {
+        Task { @MainActor in
+            if !calendarService.isAuthorized { await calendarService.requestAccess() }
+            guard calendarService.isAuthorized else { return }
+            let now = Date()
+            func at(_ minutes: Double) -> Date { now.addingTimeInterval(minutes * 60) }
+            _ = calendarService.createEvent(title: "Morning stand-up", start: at(-150), end: at(-120))
+            _ = calendarService.createEvent(title: "Design review", start: at(-20), end: at(40))
+            _ = calendarService.createEvent(title: "Lunch with Sam", start: at(90), end: at(150))
+            _ = calendarService.createEvent(title: "Dentist", start: at(240), end: at(300))
+            let store = calendarService.eventStore
+            let allDay = EKEvent(eventStore: store)
+            allDay.title = "Mum’s birthday"
+            allDay.isAllDay = true
+            allDay.startDate = Calendar.current.startOfDay(for: now)
+            allDay.endDate = allDay.startDate
+            allDay.calendar = store.defaultCalendarForNewEvents
+            try? store.save(allDay, span: .thisEvent)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
         }
     }
 
@@ -1670,6 +1899,7 @@ private struct LayoutSettingsView: View {
     @AppStorage("inbox_hide_completed") private var hideCompleted = false
     @AppStorage("inbox_hide_notes") private var hideNotes = false
     @AppStorage("inbox_hide_reschedule") private var hideReschedule = false
+    @AppStorage("inbox_swipe_layout") private var swipeLayout = true
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
     // Profile is always present, so only the toggleable tabs count toward the
@@ -1698,6 +1928,9 @@ private struct LayoutSettingsView: View {
                     inboxRow("Hide completed tasks", icon: "eye.slash", isOn: $hideCompleted)
                     inboxRow("Hide notes", icon: "note.text.badge.plus", isOn: $hideNotes)
                     inboxRow("Hide reschedule button", icon: "calendar.badge.minus", isOn: $hideReschedule)
+                    // Swipe between Schedule and Tasks (and right for the menu),
+                    // instead of the Tasks / Schedule selector.
+                    inboxRow("Swipe navigation", icon: "hand.draw", isOn: $swipeLayout)
                 }
                 .padding(.horizontal, EvrySpace.gutter)
                 .padding(.vertical, 20)
@@ -2012,6 +2245,7 @@ private struct CalendarsSettingsView: View {
                         .frame(maxWidth: .infinity)
                     } else if calendarService.allCalendarInfos.isEmpty {
                         EmptyStateView(
+                            icon: "calendar",
                             title: "No calendars yet",
                             text: "Add a calendar on your iPhone and it’ll show up here.",
                             palette: palette
@@ -2152,6 +2386,7 @@ struct GlobalSearchSheet: View {
                     VStack(spacing: 0) {
                         if searchText.trimmingCharacters(in: .whitespaces).isEmpty {
                             EmptyStateView(
+                                icon: "magnifyingglass",
                                 title: "Search everything",
                                 text: "Find tasks, notes, projects and tags in one place.",
                                 palette: palette
@@ -2159,7 +2394,7 @@ struct GlobalSearchSheet: View {
                             .padding(.top, 28)
                         } else if results.isEmpty {
                             EmptyStateView(
-                                systemImage: "magnifyingglass",
+                                icon: "magnifyingglass",
                                 title: "Nothing matches “\(searchText.trimmingCharacters(in: .whitespaces))”",
                                 text: "Try a different word, or check the spelling.",
                                 palette: palette
@@ -2321,6 +2556,7 @@ struct TrashView: View {
                     VStack {
                         Spacer()
                         EmptyStateView(
+                            icon: "trash",
                             title: "Nothing here",
                             text: "Deleted tasks stay here for 30 days, in case you change your mind.",
                             palette: palette
@@ -2427,6 +2663,8 @@ struct ProfilePhotoCropper: View {
     var onDone: (Data) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    /// The screen's scale, from the environment (UIScreen.main is deprecated).
+    @Environment(\.displayScale) private var displayScale
 
     // Committed transform, plus live gesture deltas.
     @State private var scale: CGFloat = 1
@@ -2519,7 +2757,7 @@ struct ProfilePhotoCropper: View {
             .frame(width: side, height: side)
             .clipped()
         let renderer = ImageRenderer(content: content)
-        renderer.scale = UIScreen.main.scale
+        renderer.scale = displayScale
         guard let rendered = renderer.uiImage else { return nil }
         let thumb = rendered.preparingThumbnail(of: CGSize(width: 300, height: 300)) ?? rendered
         return thumb.jpegData(compressionQuality: 0.8)
@@ -2536,5 +2774,59 @@ private extension View {
             }
             .compositingGroup()
         )
+    }
+}
+
+// MARK: - Level-up burst
+
+/// The level-up flourish behind the profile ring: two sky shockwaves and a
+/// ring of sparkles flung outward, all fading as they go.
+private struct LevelUpBurst: View {
+    let trigger: Int
+
+    @State private var progress: Double = 0
+    @State private var visible = false
+
+    private let sparkles = 10
+
+    var body: some View {
+        ZStack {
+            if visible {
+                ForEach(0..<2, id: \.self) { i in
+                    Circle()
+                        .stroke(Color.evrySky, lineWidth: i == 0 ? 6 : 3)
+                        .frame(width: 162, height: 162)
+                        .scaleEffect(1 + progress * (i == 0 ? 0.45 : 0.75))
+                        .opacity(1 - progress)
+                }
+                ForEach(0..<sparkles, id: \.self) { i in
+                    let angle = Double(i) / Double(sparkles) * 2 * .pi
+                    let radius = 86 + progress * 58
+                    Image(systemName: i.isMultiple(of: 2) ? "sparkle" : "star.fill")
+                        .font(.system(size: i.isMultiple(of: 2) ? 18 : 10, weight: .bold))
+                        .foregroundStyle(i.isMultiple(of: 3) ? Color.evryNavy : Color.evrySky)
+                        .scaleEffect(0.4 + progress * 0.8)
+                        .rotationEffect(.degrees(progress * 90))
+                        .offset(x: cos(angle) * radius, y: sin(angle) * radius)
+                        .opacity(1 - progress)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onChange(of: trigger) { _, _ in
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) {
+                progress = 0
+                visible = true
+            }
+            DispatchQueue.main.async {
+                withAnimation(.easeOut(duration: 0.95)) { progress = 1 } completion: {
+                    visible = false
+                    progress = 0
+                }
+            }
+        }
     }
 }

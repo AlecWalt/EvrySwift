@@ -219,6 +219,11 @@ private let timePatterns: [TimePattern] = [
     TimePattern(regex: rx(#"\b(?:at\s+)?(\d{1,2})\s*([ap])\.?m?\.?\b"#)) { g in
         amPm(Int(g[1]) ?? 0, 0, g[2])
     },
+    // 24-hour clock ("15:00", "at 9:30") — after the am/pm forms, so "3:30 pm"
+    // is still read with its suffix.
+    TimePattern(regex: rx(#"\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b"#)) { g in
+        (Int(g[1]) ?? 0, Int(g[2]) ?? 0)
+    },
     TimePattern(regex: rx(#"\b(?:at\s+)?noon\b"#)) { _ in (12, 0) },
     TimePattern(regex: rx(#"\b(?:at\s+)?midnight\b"#)) { _ in (0, 0) },
 ]

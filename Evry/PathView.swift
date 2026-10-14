@@ -85,6 +85,7 @@ struct PathView: View {
                 VStack {
                     Spacer()
                     EmptyStateView(
+                        icon: "checkmark.circle",
                         title: "That’s everything for now",
                         text: "Take a breath and enjoy the rest of your day.",
                         palette: palette

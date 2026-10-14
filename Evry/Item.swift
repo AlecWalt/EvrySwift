@@ -50,6 +50,7 @@ enum TaskPriority: String, Codable, CaseIterable, Identifiable {
 
     /// SF Symbol that marks a non-normal priority — drawn in navy ink; the
     /// glyph's shape (two marks, one mark, a down arrow) tells the levels apart.
+    /// (Task cards mark high priority with a sky outline instead.)
     var symbol: String? {
         switch self {
         case .high: "exclamationmark.2"
@@ -139,7 +140,10 @@ final class TaskItem {
         priority: TaskPriority = .normal,
         notes: String = "",
         location: String = "",
-        isNote: Bool = false
+        isNote: Bool = false,
+        /// Fill the location from a saved place the title mentions ("go to the
+        /// gym"). Off where the caller already decided (quick add).
+        autoLocation: Bool = true
     ) {
         self.title = title
         // Every task has a due date — with none given it lands on today.
@@ -147,7 +151,11 @@ final class TaskItem {
         self.tags = tags
         self.priorityRaw = priority.rawValue
         self.notes = notes
-        self.location = location
+        if location.isEmpty && autoLocation && !isNote {
+            self.location = FrequentPlaces.match(for: title)?.locationString ?? ""
+        } else {
+            self.location = location
+        }
         self.isNote = isNote
     }
 

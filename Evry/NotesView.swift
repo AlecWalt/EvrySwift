@@ -139,11 +139,12 @@ struct NotesView: View {
 
                         if folders.isEmpty {
                             EmptyStateView(
+                                icon: "folder",
                                 title: "No folders yet",
                                 text: "Folders keep related notes together. Swipe up on the handle below to make your first one.",
                                 palette: palette
                             )
-                            .padding(.top, 30)
+                            .padding(.top, 28)
                         }
                     }
                     .padding(.horizontal, EvrySpace.gutter)
@@ -516,6 +517,7 @@ struct NotesListView: View {
 
     private var emptyState: some View {
         EmptyStateView(
+            icon: searchText.isEmpty ? "note.text" : "magnifyingglass",
             title: searchText.isEmpty ? "No notes yet" : "Nothing matches that",
             text: searchText.isEmpty
                 ? "Jot down whatever’s on your mind. Swipe up on the handle below to start a note."

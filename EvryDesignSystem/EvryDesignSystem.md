@@ -295,6 +295,16 @@ A conversation line: Evry's avatar beside a sky speech bubble, or the person's m
 
 The consumer supplies the message and size. Evry's lines are short, first person, friendly, and usually end with an offer (“Add it?”, “Shall I add a reminder?”).
 
+### EmptyState
+
+The standard for every empty page in the app (a day with no tasks, no habits, no folders, no search results…). Taken from the Inbox's empty day; built as `EmptyStateView` in the app.
+
+- **Icon (required):** one SF Symbol line glyph, 36pt Nunito-matched weight (regular), centred in a fixed 48×48pt frame, in `navy-60` (`white-60` on navy). The icon changes per page to say what's missing (`tray` for the Inbox, `arrow.triangle.2.circlepath` for Habits, `folder` / `note.text` for Notes, `magnifyingglass` for searches); its size, frame, colour and spacing never do.
+- **Title:** `text-title` (19pt, 600) in `navy`, 12pt below the icon. Short and calm: “Nothing due this day”, “No habits yet”.
+- **Body:** one line of `text-body` in `navy-80`, 8pt below the title, centred, saying what to do next (“Swipe up on the handle below to add…”) or something kind.
+- **Layout:** centred, 32pt padding, placed 28pt below the page header.
+- No mascot, illustration or button in an empty state (this also keeps Evry from appearing twice).
+
 ### Eyebrow
 
 A small sentence-case pill label above a heading. Hand-written from `Eyebrow` in `components/ui/primitives.tsx`.

@@ -6,8 +6,9 @@
 //  with live keyword highlighting, optional notes / checklist and location,
 //  swipe-to-schedule. Styled with the Evry tokens (white panel, navy ink,
 //  sky highlights) — meaning is carried by icons and words, never hue.
-//  EditTaskSheet — full task editor (title, notes, date, priority, repeat,
-//  tags, project, pin, subtasks) plus duplicate/snooze/delete actions.
+//  EditTaskSheet — the task editor in Evry's own style (not a system form):
+//  compact outlined cards for title/notes, details (due, time, repeat, place,
+//  tags, high priority, pinned), subtasks, and duplicate/tomorrow/delete actions.
 //
 
 import CoreLocation
@@ -40,6 +41,10 @@ struct AddTaskSheet: View {
     @State private var text = ""
     @State private var notes = ""
     @State private var location = ""
+    /// The location filled in from a saved place the title mentions (so it
+    /// can follow the title as it changes), and whether it was dismissed.
+    @State private var autoLocation: String? = nil
+    @State private var autoLocationDismissed = false
     @State private var showNotes = false
     @State private var showLocation = false
     @State private var locationQuery = ""
@@ -118,15 +123,20 @@ struct AddTaskSheet: View {
                 HighlightedTaskTextField(
                     // Return files the task under today; typed dates like "fri"
                     // or "next week" (or a swipe of the card) pick another day.
-                    placeholder: "Add task… fri, #tag, !high",
+                    placeholder: "Add task…",
                     text: $text,
                     palette: palette,
+                    // Sized so the single-line field matches the 44pt notes and
+                    // location buttons beside it.
+                    fontSize: 16,
+                    minFontSize: 14,
                     autoFocus: true,
                     onSubmit: { submit() },
                     focused: $titleFocused
                 )
                 .padding(.horizontal, 16)
-                .padding(.vertical, 16)
+                .padding(.vertical, 10)
+                .frame(minHeight: EvrySpace.tap)
                 // High priority thickens the ring (the badge above says why) —
                 // no red, the words and weight carry it.
                 .modifier(QuickAddFieldChrome(palette: palette, focused: titleFocused,
@@ -374,6 +384,7 @@ struct AddTaskSheet: View {
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     Button {
+                        if location == autoLocation { autoLocationDismissed = true }
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { location = "" }
                     } label: {
                         Image(systemName: "xmark")
@@ -451,6 +462,18 @@ struct AddTaskSheet: View {
         // drops the blank row(s) left at the end of the list.
         .onChange(of: focusedListItem) { _, focused in
             if focused == nil && listMode { trimTrailingEmptyListItems() }
+        }
+        // A title about a saved place ("go to the gym") fills its location in;
+        // it follows the title until the person picks or clears one themselves.
+        .onChange(of: text) { _, newText in
+            guard !autoLocationDismissed, location.isEmpty || location == autoLocation else { return }
+            let title = parseTaskInput(newText).title
+            let match = FrequentPlaces.match(for: title)?.locationString
+            guard match != autoLocation else { return }
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                location = match ?? ""
+                autoLocation = match
+            }
         }
         .onChange(of: showLocation) { _, newValue in
             if newValue {
@@ -632,7 +655,9 @@ struct AddTaskSheet: View {
             priority: isHighPriority ? .high : parsed.priority,
             // In list mode the description lives in subtasks, not the notes field.
             notes: listMode ? "" : notes.trimmingCharacters(in: .whitespacesAndNewlines),
-            location: location
+            location: location,
+            // The card already filled (or the person cleared) the location.
+            autoLocation: false
         )
         if listMode {
             task.subtasks = listItems.compactMap {
@@ -650,6 +675,8 @@ struct AddTaskSheet: View {
         text = ""
         notes = ""
         location = ""
+        autoLocation = nil
+        autoLocationDismissed = false
         titleFocused = true
         let resetForm = {
             showNotes = false
@@ -687,154 +714,34 @@ struct EditTaskSheet: View {
 
     @State private var newSubtask = ""
     @State private var tagsText = ""
-    @FocusState private var subtaskFieldFocused: Bool
+    @FocusState private var focus: Field?
+    private enum Field: Hashable { case title, notes, location, tags, subtask }
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
+    private let cal = Calendar.current
 
+    // The Evry editor: white cards with the light outline used across the app,
+    // compact rows inside them, and nothing borrowed from the system form.
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField("Title", text: $task.title, axis: .vertical)
-                        .font(.evryTitle)
-                    TextField("Notes", text: $task.notes, axis: .vertical)
-                        .font(.evryBody)
-                        .foregroundStyle(palette.textSec)
-                        .lineLimit(2...8)
+        VStack(spacing: 0) {
+            header
+            ScrollView {
+                VStack(spacing: 10) {
+                    mainCard
+                    if !task.isNote {
+                        detailsCard
+                        subtasksCard
+                        actions
+                    }
                 }
-                .listRowBackground(palette.card)
-
-                if !task.isNote {
-                    Section {
-                        // Every task has a due date, so there's no "no date" option.
-                        DatePicker(
-                            "Due date",
-                            selection: Binding(
-                                get: { task.dueDate ?? startOfDay(Date()) },
-                                set: { task.dueDate = $0 }
-                            )
-                        )
-                        Picker("Repeat", selection: Binding(
-                            get: { task.recurrence },
-                            set: { task.recurrence = $0 }
-                        )) {
-                            Text("Never").tag(RecurrenceFreq?.none)
-                            ForEach(RecurrenceFreq.allCases) { freq in
-                                Text(freq.label).tag(RecurrenceFreq?.some(freq))
-                            }
-                        }
-                    }
-                    .listRowBackground(palette.card)
-
-                    Section {
-                        Picker("Priority", selection: Binding(
-                            get: { task.priority },
-                            set: { task.priority = $0 }
-                        )) {
-                            ForEach([TaskPriority.normal, .low, .medium, .high]) { p in
-                                Text(p.label).tag(p)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-
-                        TextField("Tags, separated by commas", text: $tagsText)
-                            .autocorrectionDisabled()
-                            #if !os(macOS)
-                            .textInputAutocapitalization(.never)
-                            #endif
-                            .onChange(of: tagsText) {
-                                task.tags = tagsText
-                                    .split(separator: ",")
-                                    .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-                                    .filter { !$0.isEmpty }
-                            }
-
-                        Toggle("Pinned", isOn: $task.pinned)
-                            .tint(palette.primary)
-                    }
-                    .listRowBackground(palette.card)
-
-                    Section {
-                        ForEach(task.subtasks) { subtask in
-                            HStack {
-                                Button {
-                                    setSubtask(subtask, completed: !subtask.completed)
-                                } label: {
-                                    doneGlyph(subtask.completed, palette: palette, size: 20)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(subtask.completed ? "Done" : "Not done")
-                                Text(subtask.title)
-                                    .strikethrough(subtask.completed, color: palette.textPh)
-                                    .foregroundStyle(subtask.completed ? palette.textSec : palette.text)
-                            }
-                        }
-                        .onDelete { offsets in
-                            task.subtasks.remove(atOffsets: offsets)
-                        }
-
-                        HStack {
-                            TextField("Add subtask…", text: $newSubtask)
-                                .focused($subtaskFieldFocused)
-                                .submitLabel(.next)
-                                // Return commits the subtask and keeps the field
-                                // focused so the next one can be typed right away.
-                                .onSubmit(addSubtask)
-                            // The plus just opens/focuses the field, same as tapping it.
-                            Button { subtaskFieldFocused = true } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .foregroundStyle(palette.primary)
-                            }
-                            .accessibilityLabel("Add subtask")
-                        }
-                    } header: {
-                        Text("Subtasks")
-                            .font(.evrySmall)
-                            .foregroundStyle(palette.textSec)
-                            .textCase(nil)
-                    }
-                    .listRowBackground(palette.card)
-
-                    Section {
-                        Button {
-                            TaskActions.duplicate(task, context: context)
-                            dismiss()
-                        } label: {
-                            Label("Duplicate", systemImage: "plus.square.on.square")
-                        }
-                        if task.dueDate != nil {
-                            Button {
-                                TaskActions.snooze(task)
-                                dismiss()
-                            } label: {
-                                Label("Snooze to tomorrow", systemImage: "zzz")
-                            }
-                        }
-                        Button(role: .destructive) {
-                            dismiss()
-                            onDelete(task)
-                        } label: {
-                            Label("Delete task", systemImage: "trash")
-                        }
-                    }
-                    .listRowBackground(palette.card)
-                }
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+                .padding(.bottom, 24)
             }
-            .font(.evryBody)
-            .foregroundStyle(palette.text)
-            .scrollContentBackground(.hidden)
-            .background(palette.bg)
-            .navigationTitle("Edit task")
-            #if !os(macOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                        .font(.evryLabel)
-                }
-            }
+            .scrollDismissesKeyboard(.interactively)
         }
+        .background(palette.bg.ignoresSafeArea())
+        .presentationDragIndicator(.visible)
         .tint(palette.primary)
         .onAppear {
             if task.dueDate == nil { task.dueDate = startOfDay(Date()) }
@@ -845,6 +752,319 @@ struct EditTaskSheet: View {
         }
     }
 
+    // MARK: Header
+
+    private var header: some View {
+        HStack {
+            Text(task.isNote ? "Edit note" : "Edit task")
+                .font(.evryH3)
+                .foregroundStyle(palette.text)
+            Spacer()
+            Button("Done") { dismiss() }
+                .font(.nunito(size: 15, weight: .bold))
+                .foregroundStyle(palette.onPrimary)
+                .padding(.horizontal, 16)
+                .frame(minHeight: 34)
+                .background(palette.primary, in: Capsule())
+                .frame(minHeight: EvrySpace.tap)
+                .buttonStyle(PressScaleStyle())
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 18)
+        .padding(.bottom, 6)
+    }
+
+    // MARK: Title + notes
+
+    private var mainCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TextField("Title", text: $task.title, axis: .vertical)
+                .font(.nunito(size: 19, weight: .bold))
+                .foregroundStyle(palette.text)
+                .focused($focus, equals: .title)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+
+            divider
+
+            TextField("Add notes…", text: $task.notes, axis: .vertical)
+                .font(.evryBody)
+                .foregroundStyle(palette.textSec)
+                .lineLimit(1...8)
+                .focused($focus, equals: .notes)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+        }
+        .editCard(palette)
+    }
+
+    // MARK: Details
+
+    private var detailsCard: some View {
+        VStack(spacing: 0) {
+            row(icon: "calendar", label: "Due") {
+                DatePicker("Due", selection: dateBinding, displayedComponents: .date)
+                    .labelsHidden()
+                    .datePickerStyle(.compact)
+            }
+            divider
+            row(icon: "clock", label: "Time") {
+                if hasTime {
+                    HStack(spacing: 4) {
+                        DatePicker("Time", selection: timeBinding, displayedComponents: .hourAndMinute)
+                            .labelsHidden()
+                            .datePickerStyle(.compact)
+                        clearButton("Remove time") {
+                            withAnimation(EvryMotion.settle) { task.dueDate = startOfDay(due) }
+                        }
+                    }
+                } else {
+                    chipButton("Add time", action: addTime)
+                }
+            }
+            divider
+            row(icon: "arrow.triangle.2.circlepath", label: "Repeat") {
+                Menu {
+                    Picker("Repeat", selection: Binding(
+                        get: { task.recurrence },
+                        set: { task.recurrence = $0 }
+                    )) {
+                        Text("Never").tag(RecurrenceFreq?.none)
+                        ForEach(RecurrenceFreq.allCases) { freq in
+                            Text(freq.label).tag(RecurrenceFreq?.some(freq))
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(task.recurrence?.label ?? "Never")
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.nunito(size: 11, weight: .bold))
+                    }
+                    .font(.nunito(size: 15, weight: .semibold))
+                    .foregroundStyle(palette.text)
+                    .frame(minHeight: EvrySpace.tap)
+                }
+            }
+            divider
+            row(icon: "mappin.and.ellipse", label: "Place") {
+                TextField("Add a place", text: $task.location)
+                    .multilineTextAlignment(.trailing)
+                    .focused($focus, equals: .location)
+                    .submitLabel(.done)
+            }
+            divider
+            row(icon: "number", label: "Tags") {
+                TextField("work, home", text: $tagsText)
+                    .multilineTextAlignment(.trailing)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .focused($focus, equals: .tags)
+                    .submitLabel(.done)
+                    .onChange(of: tagsText) {
+                        task.tags = tagsText
+                            .split(separator: ",")
+                            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                            .filter { !$0.isEmpty }
+                    }
+            }
+            divider
+            row(icon: "flag", label: "High priority") {
+                Toggle("High priority", isOn: Binding(
+                    get: { task.priority == .high },
+                    set: { on in withAnimation(EvryMotion.hover) { task.priority = on ? .high : .normal } }
+                ))
+                .labelsHidden()
+                .tint(palette.primary)
+            }
+            divider
+            row(icon: "bookmark", label: "Pinned") {
+                Toggle("Pinned", isOn: $task.pinned)
+                    .labelsHidden()
+                    .tint(palette.primary)
+            }
+        }
+        .font(.evryBody)
+        .foregroundStyle(palette.text)
+        .editCard(palette)
+    }
+
+    // MARK: Subtasks
+
+    private var subtasksCard: some View {
+        VStack(spacing: 0) {
+            ForEach(task.subtasks) { subtask in
+                HStack(spacing: 10) {
+                    Button {
+                        setSubtask(subtask, completed: !subtask.completed)
+                        UISelectionFeedbackGenerator().selectionChanged()
+                    } label: {
+                        doneGlyph(subtask.completed, palette: palette, size: 20)
+                            .frame(width: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(subtask.completed ? "Done" : "Not done")
+                    Text(subtask.title)
+                        .font(.evryBody)
+                        .strikethrough(subtask.completed, color: palette.textPh)
+                        .foregroundStyle(subtask.completed ? palette.textSec : palette.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    clearButton("Remove subtask") {
+                        withAnimation(EvryMotion.settle) { task.subtasks.removeAll { $0.id == subtask.id } }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .frame(minHeight: 46)
+                divider
+            }
+            HStack(spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.nunito(size: 15, weight: .bold))
+                    .foregroundStyle(palette.primary)
+                    .frame(width: 24)
+                    .accessibilityHidden(true)
+                TextField("Add subtask…", text: $newSubtask)
+                    .font(.evryBody)
+                    .focused($focus, equals: .subtask)
+                    .submitLabel(.next)
+                    // Return adds it and keeps the field ready for the next one.
+                    .onSubmit(addSubtask)
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 46)
+        }
+        .editCard(palette)
+    }
+
+    // MARK: Actions
+
+    private var actions: some View {
+        HStack(spacing: 8) {
+            actionTile("Duplicate", icon: "plus.square.on.square") {
+                TaskActions.duplicate(task, context: context)
+                dismiss()
+            }
+            actionTile("Tomorrow", icon: "arrow.right") {
+                TaskActions.snooze(task)
+                dismiss()
+            }
+            actionTile("Delete", icon: "trash") {
+                dismiss()
+                onDelete(task)
+            }
+        }
+    }
+
+    private func actionTile(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.nunito(size: 16, weight: .semibold))
+                Text(title)
+                    .font(.nunito(size: 13, weight: .bold))
+            }
+            .foregroundStyle(palette.text)
+            .frame(maxWidth: .infinity, minHeight: 60)
+            .editCard(palette)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressScaleStyle())
+    }
+
+    // MARK: Pieces
+
+    private var divider: some View {
+        Rectangle().fill(palette.hairline).frame(height: 1).padding(.leading, 14)
+    }
+
+    private func rowIcon(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.nunito(size: 15, weight: .semibold))
+            .foregroundStyle(palette.primary)
+            .frame(width: 24)
+            .accessibilityHidden(true)
+    }
+
+    /// A compact details row: icon, label, and its control on the right.
+    private func row<Control: View>(icon: String, label: String,
+                                    @ViewBuilder control: () -> Control) -> some View {
+        HStack(spacing: 10) {
+            rowIcon(icon)
+            Text(label)
+                .font(.nunito(size: 15, weight: .semibold))
+                .foregroundStyle(palette.text)
+                .fixedSize()
+            Spacer(minLength: 8)
+            control()
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: 50)
+    }
+
+    private func chipButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.nunito(size: 14, weight: .bold))
+                .foregroundStyle(palette.text)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 32)
+                .background(palette.card, in: Capsule())
+                .overlay(Capsule().strokeBorder(palette.border, lineWidth: 1))
+                .frame(minHeight: EvrySpace.tap)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressScaleStyle())
+    }
+
+    private func clearButton(_ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.nunito(size: 11, weight: .bold))
+                .foregroundStyle(palette.textSec)
+                .frame(width: 32, height: EvrySpace.tap)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+
+    // MARK: Date & time
+
+    private var due: Date { task.dueDate ?? startOfDay(Date()) }
+
+    /// Midnight means "no time" (the app's convention).
+    private var hasTime: Bool {
+        let c = cal.dateComponents([.hour, .minute], from: due)
+        return (c.hour ?? 0) != 0 || (c.minute ?? 0) != 0
+    }
+
+    /// Changing the day keeps the time.
+    private var dateBinding: Binding<Date> {
+        Binding(get: { due }, set: { day in
+            let t = cal.dateComponents([.hour, .minute], from: due)
+            task.dueDate = cal.date(bySettingHour: t.hour ?? 0, minute: t.minute ?? 0, second: 0,
+                                    of: startOfDay(day)) ?? day
+        })
+    }
+
+    /// Changing the time keeps the day.
+    private var timeBinding: Binding<Date> {
+        Binding(get: { due }, set: { time in
+            let t = cal.dateComponents([.hour, .minute], from: time)
+            task.dueDate = cal.date(bySettingHour: t.hour ?? 0, minute: t.minute ?? 0, second: 0,
+                                    of: startOfDay(due)) ?? time
+        })
+    }
+
+    /// The next hour today, or 9 AM on another day.
+    private func addTime() {
+        let hour = cal.isDateInToday(due) ? min(23, cal.component(.hour, from: Date()) + 1) : 9
+        withAnimation(EvryMotion.settle) {
+            task.dueDate = cal.date(bySettingHour: hour, minute: 0, second: 0, of: startOfDay(due))
+        }
+    }
+
+    // MARK: Subtask edits
+
     private func setSubtask(_ subtask: SubtaskData, completed: Bool) {
         if let idx = task.subtasks.firstIndex(where: { $0.id == subtask.id }) {
             task.subtasks[idx].completed = completed
@@ -854,20 +1074,29 @@ struct EditTaskSheet: View {
     private func addSubtask() {
         let title = newSubtask.trimmingCharacters(in: .whitespaces)
         guard !title.isEmpty else { return }
-        task.subtasks.append(SubtaskData(title: title))
+        withAnimation(EvryMotion.settle) { task.subtasks.append(SubtaskData(title: title)) }
         newSubtask = ""
-        // Keep the keyboard up and the field active so the user can immediately
-        // type another subtask.
-        subtaskFieldFocused = true
+        // Keep the keyboard up for the next one.
+        focus = .subtask
+    }
+}
+
+extension View {
+    /// The editors' cards (task and event): white, with the same light outline
+    /// as the app's buttons and cards.
+    func editCard(_ palette: Palette) -> some View {
+        background(palette.card, in: RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous)
+                .strokeBorder(palette.border, lineWidth: 1))
     }
 }
 
 // MARK: - Shared sheet chrome (private to this file)
 
-/// FormField chrome for the quick-add fields: white fill, 1.5pt navy-20 border
-/// that turns full navy when focused, radius-card corners (these fields grow to
-/// several lines, so they take the card radius rather than the 16pt field one).
-/// `emphasised` (high priority) thickens the ring instead of tinting it.
+/// Field chrome for the quick-add fields: white fill and the same light 1pt
+/// outline as the card's round notes/location buttons (`evryButtonFace`), on
+/// radius-card corners — no dark ring, focused or not. `emphasised` (high
+/// priority) uses the sky outline high-priority tasks carry.
 private struct QuickAddFieldChrome: ViewModifier {
     let palette: Palette
     var focused: Bool
@@ -878,9 +1107,8 @@ private struct QuickAddFieldChrome: ViewModifier {
         content
             .background(palette.card, in: shape)
             .overlay(
-                shape.strokeBorder(
-                    focused || emphasised ? palette.text : (palette.dark ? Color.evryWhite35 : .evryNavy20),
-                    lineWidth: emphasised ? 2.5 : 1.5)
+                shape.strokeBorder(emphasised ? Color.evrySky : palette.border,
+                                   lineWidth: emphasised ? 2 : 1)
             )
     }
 }
@@ -1046,31 +1274,20 @@ struct LocationPickerSheet: View {
 
 // MARK: - Map item helpers (shared by the quick-add bubble and the picker sheet)
 
+// The app targets iOS 26.5, so these use MapKit's current address API only
+// (the old `placemark` is deprecated).
 private func mapItemLabel(_ item: MKMapItem, fallback: String) -> String {
     let name = item.name ?? fallback
-    let city: String
-    if #available(iOS 26.0, *) {
-        city = item.addressRepresentations?.cityName ?? ""
-    } else {
-        city = item.placemark.locality ?? item.placemark.administrativeArea ?? ""
-    }
+    let city = item.addressRepresentations?.cityName ?? ""
     return city.isEmpty ? name : "\(name), \(city)"
 }
 
 private func mapItemSubtitle(_ item: MKMapItem) -> String {
-    if #available(iOS 26.0, *) {
-        return item.address?.shortAddress ?? item.placemark.title ?? ""
-    } else {
-        return item.placemark.title ?? ""
-    }
+    item.address?.shortAddress ?? item.address?.fullAddress ?? ""
 }
 
 private func mapItemCoordinate(_ item: MKMapItem) -> CLLocationCoordinate2D? {
-    if #available(iOS 26.0, *) {
-        return item.location.coordinate
-    } else {
-        return item.placemark.coordinate
-    }
+    item.location.coordinate
 }
 
 /// Orders results by straight-line distance from `coord` so the nearest places

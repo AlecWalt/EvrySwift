@@ -5,7 +5,8 @@
 //  Onboarding. It opens on what Evry gives you — three short, calm slides (no
 //  mascot yet). Starting setup brings Evry in: it pops onto a white screen, does
 //  a happy hop and says hello, then asks — one thing at a time — for the
-//  person's name, their email, and (with the reasons spelled out) their location.
+//  person’s name, their email, their birthday, and (with the reasons spelled out) their location
+//  — then the places they visit often, each looked up and confirmed in turn.
 //
 //  Evry is a single view for the whole flow: it moves and resizes between steps
 //  rather than appearing per page, so Evry is never in two places at once.
@@ -20,12 +21,12 @@ import UIKit
 // MARK: - Steps
 
 private enum SetupStep: Int, Comparable {
-    case splash, hello, intro, welcome, name, email, location, trial, done
+    case splash, hello, intro, welcome, name, email, birthday, location, placesIntro, places, trial, done
 
     static func < (a: SetupStep, b: SetupStep) -> Bool { a.rawValue < b.rawValue }
 
     /// The steps shown as progress dots.
-    static let questions: [SetupStep] = [.name, .email, .location, .trial]
+    static let questions: [SetupStep] = [.name, .email, .birthday, .location, .placesIntro, .places, .trial]
 }
 
 // MARK: - Location helper
@@ -34,17 +35,35 @@ private enum SetupStep: Int, Comparable {
 private final class LocationHelper: NSObject, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
     var status: CLAuthorizationStatus = .notDetermined
+    /// Roughly where the person is — so places they name are searched nearby.
+    var coordinate: CLLocationCoordinate2D?
 
     override init() {
         super.init()
         manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyKilometer
         status = manager.authorizationStatus
     }
 
     func requestAccess() { manager.requestWhenInUseAuthorization() }
 
+    /// A one-off fix, if location is allowed.
+    func locate() {
+        guard coordinate == nil,
+              status == .authorizedWhenInUse || status == .authorizedAlways else { return }
+        manager.requestLocation()
+    }
+
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         status = manager.authorizationStatus
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        coordinate = locations.last?.coordinate
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        // No fix: places are searched without a nearby bias.
     }
 }
 
@@ -58,6 +77,10 @@ struct SetupFlowView: View {
 
     @AppStorage("user_name") private var savedName = ""
     @AppStorage("user_email") private var savedEmail = ""
+    /// yyyy-MM-dd, or empty if skipped.
+    @AppStorage("user_birthday") private var savedBirthday = ""
+    /// Starts on a neutral date so the wheels aren't parked on today.
+    @State private var birthday = Calendar.current.date(from: DateComponents(year: 2000, month: 1, day: 1)) ?? Date()
 
     @State private var step: SetupStep = .splash
     @State private var introPage = 0
@@ -74,9 +97,31 @@ struct SetupFlowView: View {
     @State private var controlsIn = false
     /// Bumped to play Evry's happy hop.
     @State private var happy = 0
+    /// The places intro has moved on to Evry's second line (a few seconds
+    /// after the first finishes).
+    @State private var secondLineIn = false
+    @State private var secondLineTimer: Task<Void, Never>? = nil
+    /// Bumped by a tap to finish Evry's current line at once.
+    @State private var bubbleSkip = 0
+
+    // Frequent places.
+    @State private var places: [FrequentPlace] = []
+    @State private var placeInput = ""
+    /// Evry's latest reply on the places step (nil = the opening question).
+    @State private var placeLine: String? = nil
+    @State private var resolvingPlace = false
+    /// Places Maps found for the last thing typed, best guess first.
+    @State private var candidates: [PlaceCandidate] = []
+    /// The kind of place the person said it is ("my gym, …"), if they did.
+    @State private var statedPlaceKind: String? = nil
+    /// They said "no" to home/work; Evry is waiting to hear what it is.
+    @State private var askingKind = false
+    /// Set after "work" etc. — the next answer is that place's name.
+    @State private var pendingPlaceLabel: String? = nil
 
     @FocusState private var focused: Field?
-    private enum Field { case name, email }
+    private enum Field { case name, email, place }
+    private var trimmedPlace: String { placeInput.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
     private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -116,7 +161,8 @@ struct SetupFlowView: View {
         .onChange(of: location.status) { _, status in
             // Once the person answers the system prompt, move on.
             guard step == .location, status != .notDetermined else { return }
-            go(to: .trial, focus: nil)
+            location.locate()
+            go(to: .placesIntro, focus: nil)
         }
     }
 
@@ -133,14 +179,21 @@ struct SetupFlowView: View {
                     .animation(EvryMotion.settle, value: mascotSize)
 
                 if bubbleIn {
-                    SpeechBubble(text: bubbleText, palette: palette) {
+                    SpeechBubble(text: bubbleText, palette: palette, skipToken: bubbleSkip) {
                         // The welcome's button arrives once Evry has finished saying hello.
                         if step == .welcome && !controlsIn {
                             withAnimation(EvryMotion.settle) { controlsIn = true }
                         }
+                        // On the places intro, Evry's second line replaces the
+                        // first after a pause.
+                        if step == .placesIntro && !secondLineIn { queueSecondLine() }
                     }
                         .padding(.top, 14)
                         .padding(.horizontal, 32)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: skipLine)
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityHint("Skips to Evry's next line")
                         .transition(.scale(scale: 0.6, anchor: .top).combined(with: .opacity))
                 }
 
@@ -156,6 +209,15 @@ struct SetupFlowView: View {
                 }
             }
             .frame(maxWidth: .infinity)
+            // A tap anywhere outside the field (empty space) puts the keyboard away.
+            .background {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if focused != nil { focused = nil } else { skipLine() }
+                    }
+                    .accessibilityHidden(true)
+            }
     }
 
     // MARK: Layout pieces
@@ -183,10 +245,16 @@ struct SetupFlowView: View {
             return BandLayout(top: off, bottom: 0.13, bottomBulge: 14, bottomTilt: 12)
         case .email:
             return BandLayout(top: off, bottom: 0.13, bottomBulge: -10, bottomTilt: -12)
+        case .birthday:
+            return BandLayout(top: off, bottom: 0.12, bottomBulge: 12, bottomTilt: -10)
         case .location:
             return BandLayout(top: off, bottom: 0.12, bottomBulge: 16, bottomTilt: 14)
+        case .placesIntro:
+            return BandLayout(top: off, bottom: 0.12, bottomBulge: -14, bottomTilt: -12)
+        case .places:
+            return BandLayout(top: off, bottom: 0.11, bottomBulge: 12, bottomTilt: 10)
         case .trial:
-            return BandLayout(top: 0.69, topBulge: -36, topTilt: 18, bottom: past, navy: true)
+            return BandLayout(top: 0.69, topBulge: -36, topTilt: 18, bottom: past)
         case .done:
             return BandLayout(top: 0.82, topBulge: -40, topTilt: -14, bottom: past)
         }
@@ -205,6 +273,7 @@ struct SetupFlowView: View {
         switch focused {
         case .name: !trimmedName.isEmpty
         case .email: !trimmedEmail.isEmpty
+        case .place: !trimmedPlace.isEmpty
         case nil: false
         }
     }
@@ -254,12 +323,17 @@ struct SetupFlowView: View {
         case .welcome: "Hi, I’m Evry! Let’s get started :)"
         case .name: "What should I call you?"
         case .email: "Nice to meet you, \(firstName)! What’s your email?"
+        case .birthday: "When’s your birthday? I’d love to celebrate with you!"
         case .location:
             switch location.status {
             case .denied, .restricted: "No problem — you can turn location on in Settings anytime."
             case .authorizedWhenInUse, .authorizedAlways: "Your location’s already on — thank you!"
             default: "Can I use your location?"
             }
+        case .placesIntro: secondLineIn
+            ? "I can also calculate driving time between locations and incorporate that into your schedule!"
+            : "If you provide me with locations you frequent, I can automatically assign them to tasks."
+        case .places: placeLine ?? "Tell me some of the spots you often visit! This could be work, school, or the gym for example"
         case .trial: "You’ll have access to Evry for \(MembershipAccess.trialDays) days! After that, we’ll ask if you’d like to sign up!"
         case .done: firstName.isEmpty ? "You’re all set!" : "You’re all set, \(firstName)!"
         }
@@ -277,8 +351,14 @@ struct SetupFlowView: View {
                 nameField.transition(pageTransition)
             case .email:
                 emailField.transition(pageTransition)
+            case .birthday:
+                birthdayPicker.transition(pageTransition)
             case .location:
                 locationReasons.transition(pageTransition)
+            case .placesIntro:
+                Color.clear.frame(height: 0)
+            case .places:
+                placesPicker.transition(pageTransition)
             case .trial:
                 trialBadge.transition(pageTransition)
             }
@@ -330,6 +410,17 @@ struct SetupFlowView: View {
             }
         }
         .animation(EvryMotion.settle, value: emailError)
+    }
+
+    /// Month, day and year wheels — no future dates.
+    private var birthdayPicker: some View {
+        DatePicker("Birthday", selection: $birthday, in: ...Date(), displayedComponents: .date)
+            .datePickerStyle(.wheel)
+            .labelsHidden()
+            .frame(width: columnWidth, height: 160)
+            .clipped()
+            .modifier(RiseIn(index: 0))
+            .accessibilityLabel("Your birthday")
     }
 
     /// The trial, at a glance: a big day count that pops in under Evry's line.
@@ -398,6 +489,289 @@ struct SetupFlowView: View {
         .modifier(RiseIn(index: index))
     }
 
+    // MARK: Frequent places
+
+    /// A tap while Evry talks: finish the line being typed, or — if the next
+    /// line is waiting its turn — bring it on now.
+    private func skipLine() {
+        if step == .placesIntro, !secondLineIn, secondLineTimer != nil {
+            secondLineTimer?.cancel()
+            secondLineTimer = nil
+            withAnimation(EvryMotion.settle) { secondLineIn = true }
+        } else {
+            bubbleSkip += 1
+        }
+    }
+
+    /// Evry's second intro line, about three seconds after the first is said.
+    private func queueSecondLine() {
+        secondLineTimer?.cancel()
+        secondLineTimer = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, step == .placesIntro else { return }
+            withAnimation(EvryMotion.settle) { secondLineIn = true }
+        }
+    }
+
+    /// Type a place → Evry looks it up and checks what it is → saved. While a
+    /// found place is showing, the field stays below it for typed replies
+    /// ("no, that's just a store I go to").
+    private var placesPicker: some View {
+        VStack(spacing: 12) {
+            if let candidate = candidates.first {
+                candidateCard(candidate)
+                    .id(candidate.id)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
+            }
+            placeField
+        }
+        .animation(EvryMotion.settle, value: candidates.first?.id)
+        .animation(EvryMotion.settle, value: askingKind)
+    }
+
+    private var placeFieldPrompt: String {
+        if askingKind { return "Like “a store I go to”" }
+        if !candidates.isEmpty { return "Or tell me in your own words" }
+        return pendingPlaceLabel == nil ? "A name or address" : "Its name or address"
+    }
+
+    private var placeField: some View {
+        HStack(spacing: 8) {
+            TextField("", text: $placeInput,
+                      prompt: Text(placeFieldPrompt).foregroundStyle(palette.textPh))
+                .textContentType(candidates.isEmpty ? .location : nil)
+                .textInputAutocapitalization(candidates.isEmpty ? .words : .sentences)
+                .submitLabel(.send)
+                .focused($focused, equals: .place)
+                .onSubmit(submitPlace)
+                .disabled(resolvingPlace)
+                .accessibilityLabel(candidates.isEmpty ? "A place you visit often" : "Your reply to Evry")
+            ZStack {
+                if resolvingPlace {
+                    ProgressView().tint(palette.primary)
+                } else {
+                    Button(action: submitPlace) {
+                        Image(systemName: "arrow.up")
+                            .font(.nunito(size: 15, weight: .heavy))
+                            .foregroundStyle(palette.onPrimary)
+                            .frame(width: 34, height: 34)
+                            .background(trimmedPlace.isEmpty ? palette.border : palette.primary, in: Circle())
+                    }
+                    .buttonStyle(PressScaleStyle())
+                    .disabled(trimmedPlace.isEmpty)
+                    .accessibilityLabel(candidates.isEmpty ? "Add place" : "Send reply")
+                }
+            }
+            .frame(width: 34, height: 34)
+        }
+        .evryTextField(palette, focused: focused == .place)
+        .animation(EvryMotion.hover, value: focused)
+        .animation(EvryMotion.hover, value: trimmedPlace.isEmpty)
+    }
+
+    /// The place Evry thinks they mean, with its check.
+    private func candidateCard(_ c: PlaceCandidate) -> some View {
+        let role = role(for: c)
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "mappin.and.ellipse")
+                    .font(.nunito(size: 15, weight: .bold))
+                    .foregroundStyle(Color.evryNavy)
+                    .frame(width: 34, height: 34)
+                    .background(Color.evrySky, in: Circle())
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(c.name)
+                        .font(.nunito(size: 16, weight: .bold))
+                        .foregroundStyle(palette.text)
+                    if !c.address.isEmpty && c.address != c.name {
+                        Text(c.address)
+                            .font(.nunito(size: 14))
+                            .foregroundStyle(palette.textSec)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text(askingKind ? "What is it?" : (role.check == .none ? role.label : "\(role.label)?"))
+                        .font(.nunito(size: 12, weight: .bold))
+                        .foregroundStyle(Color.evryNavy)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(palette.skySoft, in: Capsule())
+                        .padding(.top, 4)
+                }
+                Spacer(minLength: 0)
+            }
+            if askingKind {
+                // Waiting on a typed answer; the only button is the way out.
+                Button("Wrong place") { rejectCandidate() }
+                    .font(.nunito(size: 14, weight: .bold))
+                    .foregroundStyle(palette.textSec)
+                    .frame(maxWidth: .infinity, minHeight: EvrySpace.tap)
+            } else if role.check == .none {
+                HStack(spacing: 8) {
+                    Button("That’s it") { saveCandidate(as: role.label) }
+                        .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
+                    Button("Not it") { rejectCandidate() }
+                        .buttonStyle(EvrySecondaryButtonStyle(palette: palette, fullWidth: true))
+                }
+            } else {
+                // "Is that your home / where you work?" — plus a way out if it's
+                // the wrong place altogether.
+                VStack(spacing: 2) {
+                    HStack(spacing: 8) {
+                        Button("Yes") { saveCandidate(as: role.label) }
+                            .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
+                        Button("No") { askWhatItIs() }
+                            .buttonStyle(EvrySecondaryButtonStyle(palette: palette, fullWidth: true))
+                    }
+                    Button("Wrong place") { rejectCandidate() }
+                        .font(.nunito(size: 14, weight: .bold))
+                        .foregroundStyle(palette.textSec)
+                        .frame(minHeight: EvrySpace.tap)
+                }
+            }
+        }
+        .padding(12)
+        .evryCard(palette, cornerRadius: EvryRadius.field, shadow: false)
+    }
+
+    private func sayPlaceLine(_ line: String) {
+        withAnimation(EvryMotion.settle) { placeLine = line }
+    }
+
+    private func role(for c: PlaceCandidate) -> PlaceRole {
+        // Labels already confirmed (a "no" saves nothing, so it can be asked again).
+        PlaceLabels.role(for: c, stated: statedPlaceKind, saved: Set(places.map(\.label)))
+    }
+
+    /// Evry's line for a found place.
+    private func foundLine(_ c: PlaceCandidate, first: Bool) -> String {
+        let lead = first ? "I found \(describe(c))." : "How about \(describe(c))?"
+        switch role(for: c).check {
+        case .none: return first ? "\(lead) Is that the one?" : lead
+        case .home: return "\(lead) Is that your home?"
+        case .work: return "\(lead) Is that where you work?"
+        }
+    }
+
+    /// "North Mass — a fitness center at 1234 Mass Ave"; a house is just its address.
+    private func describe(_ c: PlaceCandidate) -> String {
+        if c.isAddress { return c.address.isEmpty ? c.name : c.address }
+        var out = c.name
+        if let kind = c.kind {
+            let article = "aeiou".contains(kind.first ?? "x") ? "an" : "a"
+            out += " — \(article) \(kind)"
+        }
+        if !c.address.isEmpty { out += " at \(c.address)" }
+        return out
+    }
+
+    /// The field's send: a new place, or — while a found place is showing —
+    /// a reply about it.
+    private func submitPlace() {
+        let text = trimmedPlace
+        guard !text.isEmpty, !resolvingPlace else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        placeInput = ""
+        if !candidates.isEmpty {
+            handleReply(text)
+            return
+        }
+        resolvingPlace = true
+        sayPlaceLine("Let me look that up…")
+        let label = pendingPlaceLabel
+        Task { @MainActor in
+            let result = await PlaceResolver.resolve(text, near: location.coordinate, pendingLabel: label)
+            resolvingPlace = false
+            switch result {
+            case .found(let stated, let found):
+                pendingPlaceLabel = nil
+                statedPlaceKind = stated
+                askingKind = false
+                focused = nil
+                withAnimation(EvryMotion.settle) { candidates = found }
+                sayPlaceLine(foundLine(found[0], first: true))
+            case .needsName(let label):
+                pendingPlaceLabel = label
+                sayPlaceLine("Which \(label.lowercased()) is it? Tell me its name or address.")
+                focused = .place
+            case .notFound:
+                sayPlaceLine("I couldn’t find “\(text)” nearby. Could you try its full name or address?")
+                focused = .place
+            }
+        }
+    }
+
+    /// A typed answer about the place showing: yes, no, the wrong place, or
+    /// what it actually is to them.
+    private func handleReply(_ text: String) {
+        guard let c = candidates.first else { return }
+        resolvingPlace = true
+        Task { @MainActor in
+            let reply = await PlaceResolver.interpretReply(text)
+            resolvingPlace = false
+            guard candidates.first?.id == c.id else { return }
+            switch reply {
+            case .yes:
+                saveCandidate(as: askingKind ? PlaceRole.fallbackLabel : role(for: c).label)
+            case .no:
+                // Already asked what it is and still just "no": a plain location.
+                if askingKind { saveCandidate(as: PlaceRole.fallbackLabel) } else { askWhatItIs() }
+            case .wrongPlace:
+                rejectCandidate()
+            case .kind(let label):
+                saveCandidate(as: label)
+            }
+        }
+    }
+
+    /// "No" to home/work: Evry asks what it is, and waits for a typed answer.
+    private func askWhatItIs() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(EvryMotion.settle) { askingKind = true }
+        sayPlaceLine("Oh! What is it to you, then?")
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(250))
+            if step == .places { focused = .place }
+        }
+    }
+
+    private func saveCandidate(as label: String) {
+        guard let c = candidates.first else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        if !reduceMotion { happy += 1 }
+        let place = c.place(label: label)
+        withAnimation(EvryMotion.settle) {
+            if !places.contains(where: { $0.name == place.name && $0.address == place.address }) {
+                places.append(place)
+            }
+            candidates = []
+            askingKind = false
+        }
+        sayPlaceLine("Got it! Any other spots?")
+        refocusPlaceField()
+    }
+
+    private func rejectCandidate() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(EvryMotion.settle) {
+            _ = candidates.removeFirst()
+            askingKind = false
+        }
+        if let next = candidates.first {
+            sayPlaceLine(foundLine(next, first: false))
+        } else {
+            sayPlaceLine("Hmm, I couldn’t find the right one. Could you try its full name or address?")
+            refocusPlaceField()
+        }
+    }
+
+    private func refocusPlaceField() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            if step == .places && candidates.isEmpty { focused = .place }
+        }
+    }
+
     // MARK: Controls
 
     @ViewBuilder
@@ -415,6 +789,11 @@ struct SetupFlowView: View {
                 Button("Continue", action: next)
                     .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
                     .disabled(trimmedEmail.isEmpty)
+            case .birthday:
+                Button("Continue", action: next)
+                    .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
+                Button("Skip", action: skipBirthday)
+                    .buttonStyle(EvrySecondaryButtonStyle(palette: palette, fullWidth: true))
             case .location:
                 if location.status == .notDetermined {
                     Button("Allow location") { location.requestAccess() }
@@ -425,10 +804,20 @@ struct SetupFlowView: View {
                     Button("Continue", action: next)
                         .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
                 }
+            case .placesIntro:
+                Button("Continue", action: next)
+                    .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
+            case .places:
+                if places.isEmpty {
+                    Button("Skip for now", action: next)
+                        .buttonStyle(EvrySecondaryButtonStyle(palette: palette, fullWidth: true))
+                } else {
+                    Button("Continue", action: next)
+                        .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
+                }
             case .trial:
-                // On the navy band: the sky button.
                 Button("Sounds good", action: finish)
-                    .buttonStyle(EvrySkyButtonStyle(fullWidth: true))
+                    .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
             case .splash, .hello, .intro, .done:
                 EmptyView()
             }
@@ -437,6 +826,7 @@ struct SetupFlowView: View {
         .animation(EvryMotion.settle, value: step)
         .animation(EvryMotion.hover, value: trimmedName.isEmpty)
         .animation(EvryMotion.hover, value: trimmedEmail.isEmpty)
+        .animation(EvryMotion.hover, value: places.isEmpty)
     }
 
     // MARK: Flow
@@ -444,6 +834,8 @@ struct SetupFlowView: View {
     private func prefill() {
         if name.isEmpty { name = savedName }
         if email.isEmpty { email = savedEmail }
+        if let saved = Self.birthdayFormat.date(from: savedBirthday) { birthday = saved }
+        if places.isEmpty { places = FrequentPlaces.load() }
     }
 
     /// Leaving the intro: the slides clear, then Evry arrives.
@@ -486,8 +878,17 @@ struct SetupFlowView: View {
                 return
             }
             savedEmail = trimmedEmail
+            go(to: .birthday, focus: nil)
+        case .birthday:
+            savedBirthday = Self.birthdayFormat.string(from: birthday)
             go(to: .location, focus: nil)
         case .location:
+            location.locate()
+            go(to: .placesIntro, focus: nil)
+        case .placesIntro:
+            go(to: .places, focus: .place)
+        case .places:
+            FrequentPlaces.save(places)
             go(to: .trial, focus: nil)
         case .trial, .done:
             finish()
@@ -498,8 +899,11 @@ struct SetupFlowView: View {
         switch step {
         case .name: go(to: .welcome, focus: nil, forward: false)
         case .email: go(to: .name, focus: .name, forward: false)
-        case .location: go(to: .email, focus: .email, forward: false)
-        case .trial: go(to: .location, focus: nil, forward: false)
+        case .birthday: go(to: .email, focus: .email, forward: false)
+        case .location: go(to: .birthday, focus: nil, forward: false)
+        case .placesIntro: go(to: .location, focus: nil, forward: false)
+        case .places: go(to: .placesIntro, focus: nil, forward: false)
+        case .trial: go(to: .places, focus: .place, forward: false)
         default: break
         }
     }
@@ -513,8 +917,13 @@ struct SetupFlowView: View {
         if focus == nil || !keyboardWasUp { focused = nil }
         withAnimation(reduceMotion ? .easeOut(duration: 0.25) : EvryMotion.settle) {
             emailError = false
+            // The intro's second line plays again each time it's reached.
+            if target == .placesIntro { secondLineIn = false }
+            secondLineTimer?.cancel()
+            secondLineTimer = nil
             step = target
         }
+        if target == .places { location.locate() }
         // A little hop each time Evry asks something new.
         if isForward && !reduceMotion { happy += 1 }
         guard let focus else { return }
@@ -548,6 +957,19 @@ struct SetupFlowView: View {
             dismiss()
         }
     }
+
+    private func skipBirthday() {
+        savedBirthday = ""
+        go(to: .location, focus: nil)
+    }
+
+    private static let birthdayFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
 
     private func isValidEmail(_ s: String) -> Bool {
         let parts = s.split(separator: "@", omittingEmptySubsequences: false)
@@ -1520,10 +1942,11 @@ private struct HappyMascot: View {
 private struct SpeechBubble: View {
     let text: String
     let palette: Palette
+    var skipToken = 0
     var onFinished: (() -> Void)? = nil
 
     var body: some View {
-        TypewriterText(text: text, onFinished: onFinished)
+        TypewriterText(text: text, skipToken: skipToken, onFinished: onFinished)
             .font(.nunito(size: 17, weight: .semibold))
             .foregroundStyle(palette.text)
             .multilineTextAlignment(.center)

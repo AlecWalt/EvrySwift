@@ -149,7 +149,7 @@ struct MembershipPromoView: View {
                     }.tag(3)
                     PromoPage(palette: palette,
                               title: "Notes that keep up",
-                              benefits: ["Rich text, lists and stickers",
+                              benefits: ["Rich text, lists and formatting",
                                          "Folders and search keep every idea findable"]) {
                         PromoNotesArt(palette: palette)
                     }.tag(4)
@@ -733,7 +733,6 @@ private struct PromoNotesArt: View {
 
     @State private var lines = 0
     @State private var struck = false
-    @State private var sticker = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -771,33 +770,18 @@ private struct PromoNotesArt: View {
         .padding(20)
         .frame(width: 250, alignment: .leading)
         .promoCard(palette)
-        .overlay(alignment: .topTrailing) {
-            // A sticker: a leaf on a sky disc (no emoji).
-            Image(systemName: "leaf.fill")
-                .font(.nunito(size: 20, weight: .bold))
-                .foregroundStyle(Color.evryNavy)
-                .frame(width: 44, height: 44)
-                .background(Color.evrySky, in: Circle())
-                .overlay(Circle().strokeBorder(Color.evryWhite, lineWidth: 3))
-                .rotationEffect(.degrees(sticker ? 12 : -30))
-                .scaleEffect(sticker ? 1 : 0.1)
-                .opacity(sticker ? 1 : 0)
-                .offset(x: 16, y: -20)
-        }
         .task {
             do {
                 while true {
-                    lines = 0; struck = false; sticker = false
+                    lines = 0; struck = false
                     try await Task.sleep(for: .milliseconds(500))
                     for i in 1...lineTexts.count {
                         withAnimation(EvryMotion.settle) { lines = i }
                         try await Task.sleep(for: .milliseconds(420))
                     }
                     withAnimation(.easeInOut(duration: 0.45)) { struck = true }
-                    try await Task.sleep(for: .milliseconds(600))
-                    withAnimation(EvryMotion.spring) { sticker = true }
-                    try await Task.sleep(for: .seconds(2.4))
-                    withAnimation(.easeOut(duration: 0.3)) { lines = 0; sticker = false; struck = false }
+                    try await Task.sleep(for: .seconds(3))
+                    withAnimation(.easeOut(duration: 0.3)) { lines = 0; struck = false }
                     try await Task.sleep(for: .milliseconds(350))
                 }
             } catch {}
@@ -972,7 +956,8 @@ struct MembershipPlansView: View {
 
     @AppStorage("membership_plan") private var membershipPlan = ""
     @AppStorage("pro_welcomed") private var proWelcomed = false
-    @State private var isYearly = true
+    /// Monthly by default — it's the better deal.
+    @State private var isMonthly = true
     @State private var showCancelConfirm = false
 
     private var isPro: Bool { membershipPlan == "pro" }
@@ -989,12 +974,12 @@ struct MembershipPlansView: View {
         .allowsHitTesting(false)
     }
 
-    private var salePrice: String     { isYearly ? "$7" : "$9" }
-    private var regularPrice: String  { isYearly ? "$9" : "$12" }
-    // Yearly $7/mo ($84/yr) vs monthly $9/mo ($108/yr) → save $24 (~22%).
+    // $3 a week or $6 a month.
+    private var price: String  { isMonthly ? "$6" : "$3" }
+    private var period: String { isMonthly ? "/mo" : "/wk" }
+    private var periodWord: String { isMonthly ? "month" : "week" }
     private var savingsNote: String {
-        isYearly ? "Billed $84 a year. Save $24, and the price is locked for life."
-                 : "Billed monthly. The price is locked for life."
+        isMonthly ? "Billed monthly. Cancel anytime." : "Billed weekly. Cancel anytime."
     }
 
     // Leads with the six features the promo card showcases (in the same order),
@@ -1005,7 +990,7 @@ struct MembershipPlansView: View {
         "Habits with streaks and 66-day goals",
         "Distill: talk or type, get organized tasks",
         "Pomo focus and focus mode",
-        "Rich notes with folders and stickers",
+        "Rich notes with folders",
         "Daily goals and a morning recap",
         "Kind reminders and a daily digest",
         "Add tasks with Siri and Shortcuts",
@@ -1018,20 +1003,13 @@ struct MembershipPlansView: View {
 
                     // SectionHeading: eyebrow, h2 and a lead in textSec.
                     VStack(spacing: 16) {
-                        // The wordmark alone: Evry itself perches on the plan
-                        // card (or sits in the status row) below.
-                        MembershipWordmark(palette: palette)
-                        EyebrowPill(text: isPro ? "Your membership" : "Evry membership", palette: palette)
-                        Text(isPro ? "You’re all set" : "Everything, together")
+                        // The full logo, with Evry perched on the plan card below.
+                        EvryLogo(palette: palette, markWidth: 32)
+                        Text(isPro ? "You’re all set" : "Evrything, together")
                             .font(.evryH2)
                             .tracking(EvryTracking.h2)
                             .foregroundStyle(palette.text)
                             .multilineTextAlignment(.center)
-                        Text("Tasks, habits, notes and your calendar, in one calm place.")
-                            .font(.evryLead)
-                            .foregroundStyle(palette.textSec)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.top, 8)
                     .padding(.bottom, 8)
@@ -1068,8 +1046,8 @@ struct MembershipPlansView: View {
             isPresented: $showCancelConfirm,
             title: "Cancel your Evry membership?",
             message: "You’ll keep full access until the end of your billing period.",
-            confirmTitle: "Cancel membership",
-            cancelTitle: "Keep membership"
+            confirmTitle: "Yes",
+            cancelTitle: "No"
         ) {
             membershipPlan = ""
             // Let a future re-subscribe replay the welcome celebration.
@@ -1086,8 +1064,8 @@ struct MembershipPlansView: View {
 
     private var billingToggle: some View {
         HStack(spacing: 0) {
-            BillingToggleTab(label: "Monthly", badge: nil,        active: !isYearly, palette: palette) { withAnimation(EvryMotion.settle) { isYearly = false } }
-            BillingToggleTab(label: "Yearly",  badge: "Save 22%", active:  isYearly, palette: palette) { withAnimation(EvryMotion.settle) { isYearly = true  } }
+            BillingToggleTab(label: "Weekly",  badge: nil,        active: !isMonthly, palette: palette) { withAnimation(EvryMotion.settle) { isMonthly = false } }
+            BillingToggleTab(label: "Monthly", badge: nil,        active:  isMonthly, palette: palette) { withAnimation(EvryMotion.settle) { isMonthly = true  } }
         }
         .padding(4)
         .background(palette.hover, in: Capsule())
@@ -1112,32 +1090,23 @@ struct MembershipPlansView: View {
                 Text("Evry membership")
                     .font(.evryH3)
                     .foregroundStyle(Color.evryWhite)
-                Text("More help from Evry across your whole day.")
-                    .font(.evryBody)
-                    .foregroundStyle(Color.evryWhite85)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.trailing, 64)   // clear of the mascot
 
             // Price row
             VStack(alignment: .leading, spacing: 4) {
-                Text(regularPrice + "/mo")
-                    .font(.nunito(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.evryWhite80)
-                    .strikethrough(true, color: Color.evryWhite80)
-                    .accessibilityLabel("Was \(regularPrice) a month")
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(salePrice)
+                    Text(price)
                         .font(.evryPrice)
                         .tracking(EvryTracking.price)
                         .foregroundStyle(Color.evryWhite)
                         .contentTransition(.numericText())
-                    Text("/mo")
+                    Text(period)
                         .font(.nunito(size: 16, weight: .semibold))
                         .foregroundStyle(Color.evryWhite80)
                 }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Now \(salePrice) a month")
+                .accessibilityLabel("\(price) a \(periodWord)")
                 Text(savingsNote)
                     .font(.nunito(size: 14))
                     .foregroundStyle(Color.evryWhite85)
@@ -1164,7 +1133,7 @@ struct MembershipPlansView: View {
                 membershipPlan = "pro"
                 dismiss()
             } label: {
-                Text("Subscribe for \(salePrice)/mo")
+                Text("Subscribe for \(price)\(period)")
             }
             .buttonStyle(EvrySkyButtonStyle(fullWidth: true))
             .padding(.top, 4)
@@ -1185,18 +1154,15 @@ struct MembershipPlansView: View {
     /// a cancel option (instead of the purchase UI).
     private var proStatusSection: some View {
         VStack(spacing: 20) {
-            VStack(alignment: .leading, spacing: 20) {
-                HStack(spacing: 12) {
-                    EvryMascot(size: 44)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Evry membership")
-                            .font(.evryH3)
-                            .foregroundStyle(palette.text)
-                        Text("Your membership is active")
-                            .font(.nunito(size: 14))
-                            .foregroundStyle(palette.textSec)
-                    }
-                    Spacer()
+            VStack(alignment: .leading, spacing: 16) {
+                // One line each — nothing wraps onto a second line.
+                HStack(spacing: 10) {
+                    Text("Evry membership")
+                        .font(.evryH3)
+                        .foregroundStyle(palette.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    Spacer(minLength: 8)
                     Label("Active", systemImage: "checkmark")
                         .labelStyle(.titleAndIcon)
                         .font(.evryCaption)
@@ -1204,20 +1170,14 @@ struct MembershipPlansView: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                         .background(Color.evrySky, in: Capsule())
+                        .fixedSize()
                 }
-
-                Rectangle().fill(palette.hairline).frame(height: 1)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Billing")
-                        .font(.evrySmall)
-                        .foregroundStyle(palette.textMuted)
-                    billingToggle
-                    Text(savingsNote)
-                        .font(.nunito(size: 14))
-                        .foregroundStyle(palette.textSec)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                billingToggle
+                Text(savingsNote)
+                    .font(.nunito(size: 14))
+                    .foregroundStyle(palette.textSec)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
             .padding(EvrySpace.grid)
             .evryCard(palette, cornerRadius: EvryRadius.panel)
@@ -1231,6 +1191,8 @@ struct MembershipPlansView: View {
                 .font(.nunito(size: 14))
                 .foregroundStyle(palette.textMuted)
                 .multilineTextAlignment(.center)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
                 .padding(.bottom, 8)
         }
     }
@@ -1298,12 +1260,19 @@ struct ProWelcomeView: View {
     private var calendarConnected: Bool { calendarService.isAuthorized }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            palette.bg.ignoresSafeArea()
-            EvryGlow(onNavy: palette.dark)
-                .offset(x: 150, y: -160)
-                .ignoresSafeArea()
+        // The 440pt glows sit in the background, so they can't widen the page
+        // past the screen (which pushed everything to its edges).
+        Group {
             if stage == 0 { celebration } else { setup }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            ZStack(alignment: .topTrailing) {
+                palette.bg
+                EvryGlow(onNavy: palette.dark)
+                    .offset(x: 150, y: -160)
+            }
+            .ignoresSafeArea()
         }
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
@@ -1319,7 +1288,6 @@ struct ProWelcomeView: View {
         VStack(spacing: EvrySpace.grid) {
             Spacer()
             ZStack {
-                EvryGlow(onNavy: palette.dark)
                 // A small burst of sky dots radiating outward (off under Reduce Motion).
                 if !reduceMotion {
                     ForEach(0..<12, id: \.self) { i in
@@ -1337,7 +1305,9 @@ struct ProWelcomeView: View {
                     .scaleEffect(celebrate || reduceMotion ? 1 : 0.4)
                     .animation(EvryMotion.spring, value: celebrate)
             }
+            .frame(maxWidth: .infinity)
             .frame(height: 200)
+            .background { EvryGlow(onNavy: palette.dark) }
 
             VStack(spacing: 16) {
                 Text("Thanks for subscribing")
@@ -1349,7 +1319,9 @@ struct ProWelcomeView: View {
                     .font(.evryLead)
                     .foregroundStyle(palette.textSec)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity)
             .opacity(celebrate ? 1 : 0)
             .offset(y: celebrate || reduceMotion ? 0 : 14)
             .animation(EvryMotion.reveal.delay(0.35), value: celebrate)
@@ -1361,8 +1333,11 @@ struct ProWelcomeView: View {
             }
             .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
         }
-        .padding(.horizontal, EvrySpace.grid)
+        // Clear margins on every side, inside the safe area.
+        .padding(.horizontal, 28)
+        .padding(.top, 24)
         .padding(.bottom, 32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: Guided setup
@@ -1452,23 +1427,6 @@ struct ProWelcomeView: View {
         }
         .padding(16)
         .evryCard(palette)
-    }
-}
-
-// MARK: - Wordmark
-
-/// The "Evry" wordmark alone (24pt, 800, +0.03em) — `EvryLogo` without its star
-/// mark, for screens where the mascot is already present.
-private struct MembershipWordmark: View {
-    let palette: Palette
-
-    var body: some View {
-        Text("Evry")
-            .font(.evryWordmark)
-            .tracking(EvryTracking.wordmark)
-            .foregroundStyle(palette.text)
-            .frame(minHeight: EvrySpace.tap)
-            .accessibilityLabel("Evry")
     }
 }
 

@@ -59,8 +59,9 @@ struct HabitsView: View {
             if habits.isEmpty {
                 // Evry (the mascot) welcomes an empty page.
                 EmptyStateView(
+                    icon: "arrow.triangle.2.circlepath",
                     title: "No habits yet",
-                    text: "Small routines, steady streaks. Swipe up on the handle below to add your first one.",
+                    text: "Swipe up on the handle below to add your first one.",
                     palette: palette
                 )
                 .padding(.top, 28)

@@ -274,38 +274,208 @@ extension EvryAssistant {
 
 // MARK: - Chat replies
 
-/// A running conversation with Evry, for free-typed messages in the chat.
-/// Keeps one session so Evry remembers what was said earlier in the chat.
+/// A compact, read-only picture of the person's things — what Evry may answer
+/// questions about. Built on the main actor from SwiftData / EventKit, then
+/// handed to the model as plain text.
+struct EvryAppData: Sendable {
+    struct Task: Sendable { let title: String; let due: Date?; let done: Bool; let priority: String; let folder: String?; let notes: String }
+    struct Note: Sendable { let title: String; let folder: String?; let text: String; let modified: Date }
+    struct Event: Sendable { let title: String; let start: Date; let end: Date; let allDay: Bool }
+    struct Habit: Sendable { let name: String; let doneToday: Bool }
+
+    var openTasks: [Task] = []
+    var recentlyDone: [Task] = []
+    var notes: [Note] = []
+    var events: [Event] = []
+    var habitsToday: [Habit] = []
+
+    /// The data as compact text for the model (kept small for its context).
+    var promptText: String {
+        let day = Date().formatted(.dateTime.weekday(.wide).day().month(.wide).year())
+        var out = ["Today is \(day)."]
+        func when(_ d: Date?) -> String {
+            guard let d else { return "no date" }
+            return d.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
+        }
+        out.append("OPEN TASKS (\(openTasks.count)):")
+        out += openTasks.prefix(30).map { t in
+            var line = "- \(t.title) — due \(when(t.due))"
+            if t.priority != "normal" { line += ", \(t.priority) priority" }
+            if let f = t.folder { line += ", folder \(f)" }
+            if !t.notes.isEmpty { line += ", notes: \(t.notes.prefix(80))" }
+            return line
+        }
+        out.append("DONE IN THE LAST 7 DAYS (\(recentlyDone.count)):")
+        out += recentlyDone.prefix(10).map { "- \($0.title)" }
+        out.append("NOTES (\(notes.count)):")
+        out += notes.prefix(12).map { n in
+            "- \"\(n.title.isEmpty ? "Untitled" : n.title)\"\(n.folder.map { " in \($0)" } ?? ""): \(n.text.prefix(160))"
+        }
+        out.append("CALENDAR, NEXT 14 DAYS (\(events.count)):")
+        out += events.prefix(25).map { e in
+            e.allDay
+                ? "- \(e.start.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))) all day: \(e.title)"
+                : "- \(when(e.start))–\(e.end.formatted(.dateTime.hour().minute())): \(e.title)"
+        }
+        out.append("HABITS TODAY (\(habitsToday.count)):")
+        out += habitsToday.map { "- \($0.name): \($0.doneToday ? "done" : "not done yet")" }
+        return out.joined(separator: "\n")
+    }
+}
+
+@Generable(description: "Evry's answer to a message in the chat")
+private struct ChatAnswer {
+    @Guide(description: "true if the message is about the person's own tasks, to-dos, reminders, notes, calendar, events, habits or focus — asking about them, summarising them, or asking Evry to add, change, complete, move or delete them — or a greeting, thanks, or a question about how to use the Evry app. false for anything else: general knowledge, news, weather, maths, coding, trivia, opinions, or advice unrelated to their own plans.")
+    var aboutApp: Bool
+
+    @Guide(description: "Evry's reply in the first person, warm and plain, using ONLY the person's data and what the tools reported. After using tools, ONLY a short friendly acknowledgment such as 'All set!' or 'Done, enjoy your workout.' — never list or repeat the tasks, events or changes, because the app shows them separately. Otherwise one or two short sentences; for a summary, a sentence then up to 5 lines, each on its own line starting with '• '. If the data doesn't contain the answer, say so kindly. Empty when aboutApp is false.")
+    var reply: String
+}
+
+/// A running conversation with Evry for free-typed messages: questions,
+/// summaries and actions on the person's tasks, notes, calendar and habits
+/// (actions run through `EvryActionDesk`'s tools) — and nothing else.
 @MainActor
 final class EvryConversation {
-    private var session: LanguageModelSession?
+    enum Reply {
+        case answer(String)
+        /// The message isn't about the app or the person's things.
+        case offTopic
+    }
 
-    /// Evry's short reply, or nil when the model isn't available (the chat then
-    /// offers its three features instead).
-    func reply(to message: String) async -> String? {
-        guard EvryAssistant.isAvailable else { return nil }
-        if session == nil {
-            session = LanguageModelSession(instructions: """
-                You are Evry, the friendly assistant inside the Evry app, which brings \
-                together tasks, habits, notes and a calendar. Speak in the first person, \
-                warm, calm and plain. Reply in ONE short sentence; use two only when \
-                truly necessary. \
-                Never describe yourself as an AI, artificial intelligence, a bot or a \
-                chatbot — you're simply Evry, the person's assistant. No emoji. No \
-                productivity pressure. You can help in three ways, and may suggest the \
-                one that fits: Distill (turn a jumble of thoughts into tasks), Pomo \
-                (start a focus session), and Write (turn a voice message into a tidy \
-                note). Today's date is \(Date().formatted(.dateTime.weekday().day().month().year())).
-                """)
+    /// Evry's polite refusal for anything outside the app.
+    static let offTopicLine = "I’m sorry, I can only help with questions about the app :("
+
+    /// The last few turns, so follow-up questions make sense.
+    private var history: [(you: String, evry: String)] = []
+
+    func reply(to message: String, data: EvryAppData, desk: EvryActionDesk) async -> Reply {
+        let result: Reply
+        if EvryAssistant.isAvailable, let modelReply = await modelReply(to: message, data: data, desk: desk) {
+            result = modelReply
+        } else if let done = Self.fallbackAction(message, desk: desk) {
+            result = .answer(done)
+        } else {
+            result = Self.fallbackReply(to: message, data: data)
         }
+        if case .answer(let text) = result {
+            history.append((message, text))
+            if history.count > 3 { history.removeFirst() }
+        }
+        return result
+    }
+
+    private func modelReply(to message: String, data: EvryAppData, desk: EvryActionDesk) async -> Reply? {
+        // A fresh session per turn: the data changes between questions, and the
+        // on-device model's context is small. Recent turns ride along as text.
+        let session = LanguageModelSession(tools: desk.tools, instructions: """
+            You are Evry, the friendly assistant inside the Evry app, which brings \
+            together tasks, habits, notes and a calendar. You ONLY help with the \
+            person's own tasks, notes, calendar, habits and focus, and with how to \
+            use Evry. Answer only from the data you're given — never invent tasks, \
+            notes or events. Speak in the first person, warm, calm and plain. Never \
+            describe yourself as an AI, artificial intelligence, a bot or a chatbot. \
+            No emoji. No productivity pressure.
+            You can act in the app with your tools. When the person asks you to add, \
+            remind, change, complete, move, rename, delete, check in or start \
+            something, call the matching tool, then reply with only a short \
+            acknowledgment — don't list what you created or changed; the app shows \
+            it. A reminder is a task with a time. Never say you did something without \
+            calling a tool. Deleting needs the person's tap: say it's waiting for \
+            them to confirm below. To summarise or answer about a note, read it first.
+            """)
+        let recent = history.map { "Person: \($0.you)\nEvry: \($0.evry)" }.joined(separator: "\n")
+        let prompt = """
+            The person's current data:
+            \(data.promptText)
+
+            \(recent.isEmpty ? "" : "Recent conversation:\n\(recent)\n")
+            Their message: \(message)
+            """
         do {
-            let response = try await session?.respond(to: message)
-            let text = response?.content.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return text.isEmpty ? nil : text
+            let response = try await session.respond(to: prompt, generating: ChatAnswer.self)
+            let answer = response.content
+            guard answer.aboutApp else { return .offTopic }
+            let text = Self.formatBullets(answer.reply.trimmingCharacters(in: .whitespacesAndNewlines))
+            return text.isEmpty ? nil : .answer(text)
         } catch {
-            // A failed turn can leave the session unusable — start fresh next time.
-            session = nil
             return nil
         }
+    }
+
+    /// Every bullet on its own line: "Here's today: • A • B" →
+    /// "Here's today:\n• A\n• B". Dash/star bullets become "•" too.
+    static func formatBullets(_ text: String) -> String {
+        var out = text
+        // "- item" / "* item" at a line start → "• item".
+        out = out.replacingOccurrences(of: #"(?m)^\s*[-*]\s+"#, with: "• ", options: .regularExpression)
+        // A bullet mid-line starts a new line.
+        out = out.replacingOccurrences(of: #"[ \t]*•[ \t]*"#, with: "\n• ", options: .regularExpression)
+        // Tidy: no blank lines between bullets, none at the very start.
+        out = out.replacingOccurrences(of: #"\n\s*\n• "#, with: "\n• ", options: .regularExpression)
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: Without the model
+
+    /// "Remind me to…", "add…": a task straight from the message, for when the
+    /// model can't run. Returns Evry's line, or nil if it isn't a request.
+    static func fallbackAction(_ message: String, desk: EvryActionDesk) -> String? {
+        let lower = message.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let leads = ["remind me to ", "remind me ", "add a task to ", "add a task ", "add task ",
+                     "new task ", "create a task to ", "create a task ", "add ", "i need to ", "todo ", "to do "]
+        guard let lead = leads.first(where: { lower.hasPrefix($0) }) else { return nil }
+        let rest = String(message.dropFirst(lead.count))
+        // The date words go to the time; the rest is the title.
+        var title = rest
+        for word in [" today", " tomorrow", " tonight", " this evening"] {
+            title = title.replacingOccurrences(of: word, with: "", options: .caseInsensitive)
+        }
+        title = parseTaskInput(title).title
+        while title.lowercased().hasSuffix(" at") || title.lowercased().hasSuffix(" on") {
+            title = String(title.dropLast(3))
+        }
+        guard !title.isEmpty else { return nil }
+        _ = desk.createTask(title: title.prefix(1).uppercased() + title.dropFirst(),
+                            when: rest, highPriority: false, notes: "")
+        return "Done — it’s on your list."
+    }
+
+    /// Keyword answers, for when the on-device model can't run: plain summaries
+    /// of whatever the message mentions, and a polite refusal for the rest.
+    static func fallbackReply(to message: String, data: EvryAppData) -> Reply {
+        let m = message.lowercased()
+        func mentions(_ words: [String]) -> Bool { words.contains { m.contains($0) } }
+        func list(_ items: [String]) -> String { items.prefix(5).map { "• \($0)" }.joined(separator: "\n") }
+
+        if mentions(["calendar", "event", "meeting", "schedule", "appointment", "plans"]) {
+            guard !data.events.isEmpty else { return .answer("Your calendar looks clear for the next two weeks.") }
+            let items = data.events.map { e in
+                "\(e.allDay ? e.start.formatted(.dateTime.weekday(.abbreviated).day()) : e.start.formatted(.dateTime.weekday(.abbreviated).hour().minute())) \(e.title)"
+            }
+            return .answer("Here’s what’s coming up on your calendar:\n\(list(items))")
+        }
+        if mentions(["note"]) {
+            guard !data.notes.isEmpty else { return .answer("You don’t have any notes yet.") }
+            let items = data.notes.map { $0.title.isEmpty ? "Untitled" : $0.title }
+            return .answer("You have \(data.notes.count) note\(data.notes.count == 1 ? "" : "s"). The latest:\n\(list(items))")
+        }
+        if mentions(["habit", "routine", "streak"]) {
+            guard !data.habitsToday.isEmpty else { return .answer("No habits are due today.") }
+            let done = data.habitsToday.filter(\.doneToday).count
+            return .answer("You’ve done \(done) of \(data.habitsToday.count) habits today:\n\(list(data.habitsToday.map { "\($0.name)\($0.doneToday ? " (done)" : "")" }))")
+        }
+        if mentions(["task", "to-do", "todo", "to do", "due", "overdue", "inbox", "today", "tomorrow", "week", "finish", "done", "summar"]) {
+            guard !data.openTasks.isEmpty else { return .answer("You’re all caught up — there are no open tasks.") }
+            let items = data.openTasks.map { t in
+                t.due.map { "\(t.title) (\($0.formatted(.dateTime.weekday(.abbreviated).day())))" } ?? t.title
+            }
+            return .answer("You have \(data.openTasks.count) open task\(data.openTasks.count == 1 ? "" : "s"):\n\(list(items))")
+        }
+        let words = Set(m.split(whereSeparator: { !$0.isLetter }).map(String.init))
+        if !words.isDisjoint(with: ["hi", "hello", "hey", "thanks", "thank", "evry", "help"]) || mentions(["what can you", "how do i"]) {
+            return .answer("I can add and change your tasks, events and notes, or answer questions about them and summarise them for you.")
+        }
+        return .offTopic
     }
 }

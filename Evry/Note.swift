@@ -126,23 +126,6 @@ enum NoteTint {
     }
 }
 
-// MARK: - Sticker
-
-/// An emoji sticker placed on a note. Position is normalized (0…1) to the note's
-/// canvas so it survives rotation/size changes; scale and rotation are free.
-struct NoteSticker: Identifiable, Codable, Hashable {
-    var id: UUID = UUID()
-    var emoji: String
-    var x: Double            // normalized center X (0…1)
-    var y: Double            // normalized center Y (0…1)
-    var scale: Double = 1
-    var rotation: Double = 0 // radians
-    /// Optional PNG data for an image sticker imported from the photo library
-    /// (e.g. an Apple sticker). When set, it's drawn instead of `emoji`. Decodes
-    /// as nil for stickers saved before image support.
-    var imageData: Data? = nil
-}
-
 // MARK: - Note
 
 @Model
@@ -163,8 +146,6 @@ final class Note {
     var tags: [String] = []
     var sortOrder: Int = 0
     var folder: Folder?
-    /// JSON-encoded emoji stickers — access through `stickers`.
-    var stickersData: Data = Data()
     /// Optional custom background color (hex RGB). nil = the default editor bg.
     var backgroundColorHex: Int?
 
@@ -194,12 +175,6 @@ final class Note {
         }
     }
 
-    /// Emoji stickers placed on the note.
-    var stickers: [NoteSticker] {
-        get { (try? JSONDecoder().decode([NoteSticker].self, from: stickersData)) ?? [] }
-        set { stickersData = (try? JSONEncoder().encode(newValue)) ?? Data() }
-    }
-
     /// The note's custom background tint, if one was chosen — always a brand
     /// sky step (legacy multi-colour picks are mapped onto the same steps).
     var backgroundColor: Color? {
@@ -221,7 +196,6 @@ final class Note {
     var isEmpty: Bool {
         title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && stickers.isEmpty
     }
 
     /// First non-empty body line, for the list-row preview.

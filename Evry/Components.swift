@@ -341,38 +341,29 @@ extension View {
 
 // MARK: - Empty state
 
-/// The app's one empty-state layout (Inbox, Habits, Notes): Evry the mascot
-/// (or a supplied image / symbol), a title, and a single hint line.
+/// The empty-page standard (see EvryDesignSystem.md → EmptyState), taken from
+/// the Inbox: one SF Symbol icon at a fixed size and frame, a text-title line
+/// and one body line, centred. The icon is required and varies per page; its
+/// size, colour and spacing never do. No mascot or illustrations here.
 struct EmptyStateView: View {
-    var imageName: String?
-    /// SF Symbol shown above the title instead of the mascot.
-    var systemImage: String? = nil
-    /// Shows Evry above the title when no image or symbol is supplied.
-    var showsMascot = true
+    /// SF Symbol for this page (e.g. "tray", "folder"). Required.
+    let icon: String
     let title: String
     let text: String
     let palette: Palette
 
+    /// Fixed by the standard.
+    static let iconSize: CGFloat = 36
+    static let iconFrame: CGFloat = 48
+
     var body: some View {
         VStack(spacing: 0) {
-            if imageName == nil, systemImage == nil, showsMascot {
-                EvryMascot(size: 96, float: true)
-                    .padding(.bottom, 16)
-            }
-            if let imageName {
-                Image(imageName)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 336)
-                    .padding(.bottom, 18)
-            }
-            if let systemImage {
-                Image(systemName: systemImage)
-                    .font(.nunito(size: 36))
-                    .foregroundStyle(palette.textPh)
-                    .padding(.bottom, 12)
-                    .accessibilityHidden(true)   // decorative
-            }
+            Image(systemName: icon)
+                .font(.nunito(size: Self.iconSize))
+                .foregroundStyle(palette.textPh)
+                .frame(width: Self.iconFrame, height: Self.iconFrame)
+                .padding(.bottom, 12)
+                .accessibilityHidden(true)   // decorative
             Text(title)
                 .font(.evryTitle)
                 .foregroundStyle(palette.text)
@@ -1071,6 +1062,13 @@ struct SwipeActionRow<Content: View>: View {
 
 // MARK: - Swipe catcher (horizontal-only pan that coexists with vertical scroll)
 
+/// Where on screen a row swipe may start. In the Inbox's swipe layout the left
+/// and right thirds switch between Schedule and Tasks, so row swipes (complete /
+/// delete) only begin in the middle third.
+enum RowSwipeZone {
+    @MainActor static var middleThirdOnly = false
+}
+
 /// Installs a `UIPanGestureRecognizer` on the enclosing `UIScrollView` that only
 /// *begins* when a drag is horizontal AND started over this row. Vertical drags
 /// never begin it, so they fall through to the scroll view — this is the same way
@@ -1150,6 +1148,17 @@ private struct SwipeCatcher: UIViewRepresentable {
             guard let scroll else { return }
             switch g.state {
             case .began:
+                // Outer thirds belong to view switching in the swipe layout —
+                // bail out before the row moves at all.
+                if RowSwipeZone.middleThirdOnly, let window = host?.window {
+                    let x = g.location(in: window).x - g.translation(in: window).x
+                    let third = window.bounds.width / 3
+                    if x <= third || x >= third * 2 {
+                        g.isEnabled = false
+                        g.isEnabled = true
+                        return
+                    }
+                }
                 startX = g.translation(in: scroll).x
                 active = true
                 onChanged(0)
@@ -1177,8 +1186,146 @@ private struct SwipeCatcher: UIViewRepresentable {
             guard let pan = g as? UIPanGestureRecognizer, let host, let scroll else { return false }
             let vel = pan.velocity(in: scroll)
             guard abs(vel.x) > abs(vel.y) else { return false }
+            if RowSwipeZone.middleThirdOnly, let window = host.window {
+                let x = pan.location(in: window).x - pan.translation(in: window).x
+                let third = window.bounds.width / 3
+                guard x > third && x < third * 2 else { return false }
+            }
             let loc = pan.location(in: host)
             return host.bounds.insetBy(dx: -6, dy: -2).contains(loc)
+        }
+    }
+}
+
+// MARK: - Hold-and-drag catcher (long press that coexists with vertical scroll)
+
+/// A hold-then-drag on a row inside a scroll view. Installs a
+/// `UILongPressGestureRecognizer` on the enclosing `UIScrollView` (like
+/// `SwipeCatcher`) that only receives touches starting over this row. Until
+/// the hold completes it never interferes: any movement past 10pt fails it and
+/// the scroll view scrolls as normal. Once the hold completes it keeps
+/// reporting the finger (in window coordinates) until release — the same way
+/// table-view drag-reordering works. A SwiftUI `LongPress.sequenced(before:
+/// Drag)` here stole vertical scrolls inside folders, so don't swap back.
+struct HoldDragCatcher: UIViewRepresentable {
+    var minimumDuration: TimeInterval = 0.5
+    /// The hold completed at this point. Return false to decline it.
+    var onLift: (CGPoint) -> Bool
+    var onMove: (CGPoint) -> Void
+    /// The finger lifted (`false`) or the system cancelled the gesture (`true`).
+    var onEnd: (_ cancelled: Bool) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView()
+        v.backgroundColor = .clear
+        v.isUserInteractionEnabled = false
+        context.coordinator.host = v
+        context.coordinator.attach(minimumDuration: minimumDuration)
+        return v
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onLift = onLift
+        context.coordinator.onMove = onMove
+        context.coordinator.onEnd = onEnd
+        context.coordinator.attach(minimumDuration: minimumDuration)
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(onLift: onLift, onMove: onMove, onEnd: onEnd) }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onLift: (CGPoint) -> Bool
+        var onMove: (CGPoint) -> Void
+        var onEnd: (Bool) -> Void
+        weak var host: UIView?
+        private weak var scroll: UIScrollView?
+        private var press: UILongPressGestureRecognizer?
+        private var active = false
+
+        init(onLift: @escaping (CGPoint) -> Bool, onMove: @escaping (CGPoint) -> Void, onEnd: @escaping (Bool) -> Void) {
+            self.onLift = onLift
+            self.onMove = onMove
+            self.onEnd = onEnd
+        }
+
+        func attach(minimumDuration: TimeInterval) {
+            guard press == nil, host != nil else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.press == nil, let host = self.host,
+                      let scroll = Self.enclosingScroll(host) else { return }
+                let p = UILongPressGestureRecognizer(target: self, action: #selector(self.handle(_:)))
+                p.minimumPressDuration = minimumDuration
+                p.allowableMovement = 10
+                p.cancelsTouchesInView = false   // taps and buttons still work
+                p.delaysTouchesBegan = false
+                p.delegate = self
+                scroll.addGestureRecognizer(p)
+                self.press = p
+                self.scroll = scroll
+            }
+        }
+
+        func detach() {
+            // Torn down mid-hold (e.g. its card was removed): let the drag go,
+            // outside the view update that's dismantling us.
+            if active {
+                active = false
+                let end = onEnd
+                DispatchQueue.main.async { end(true) }
+            }
+            if let press, let scroll { scroll.removeGestureRecognizer(press) }
+            press = nil
+            scroll = nil
+        }
+
+        private static func enclosingScroll(_ v: UIView) -> UIScrollView? {
+            var cur = v.superview
+            while let c = cur {
+                if let s = c as? UIScrollView { return s }
+                cur = c.superview
+            }
+            return nil
+        }
+
+        @objc private func handle(_ g: UILongPressGestureRecognizer) {
+            let point = g.location(in: nil)   // window coordinates (SwiftUI .global)
+            switch g.state {
+            case .began:
+                guard onLift(point) else {
+                    g.isEnabled = false
+                    g.isEnabled = true
+                    return
+                }
+                active = true
+            case .changed:
+                guard active else { return }
+                onMove(point)
+            case .ended:
+                guard active else { return }
+                active = false
+                onEnd(false)
+            case .cancelled, .failed:
+                guard active else { return }
+                active = false
+                onEnd(true)
+            default:
+                break
+            }
+        }
+
+        // Only touches that start over this row.
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard let host, host.window != nil else { return false }
+            return host.bounds.contains(touch.location(in: host))
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
         }
     }
 }
@@ -1189,6 +1336,14 @@ private struct SwipeCatcher: UIViewRepresentable {
 // keyboard starts animating concurrently with the sheet animation instead of after it.
 private final class _TaskTextView: UITextView {
     var autoFocus = false
+    /// Called after each layout pass, so the height can be re-measured once
+    /// the width is known.
+    var onLayout: (() -> Void)?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayout?()
+    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -1210,12 +1365,19 @@ private struct InlineTaskInput: UIViewRepresentable {
     var minFontSize: CGFloat
     var palette: Palette
     var onSubmit: () -> Void
+    /// The text's measured height — the SwiftUI side animates its frame to it,
+    /// so growing onto a new line (or shrinking back) glides instead of jumping.
+    @Binding var height: CGFloat
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> _TaskTextView {
         let tv = _TaskTextView()
         tv.autoFocus = autoFocus
+        tv.onLayout = { [weak tv, coordinator = context.coordinator] in
+            guard let tv else { return }
+            coordinator.reportHeight(tv)
+        }
         tv.backgroundColor = .clear
         tv.delegate = context.coordinator
         tv.font = .nunito(size: context.coordinator.currentSize)
@@ -1270,9 +1432,19 @@ private struct InlineTaskInput: UIViewRepresentable {
         /// Renders the keyword highlighting directly in the text view (preserving
         /// the caret) so the cursor always tracks the visible text, including wraps.
         func applyHighlight(to tv: _TaskTextView) {
+            let previousSize = currentSize
             currentSize = fittedSize(for: tv)
             let selected = tv.selectedRange
-            tv.attributedText = attributedTaskInputNS(parent.text, palette: parent.palette, fontSize: currentSize)
+            let styled = attributedTaskInputNS(parent.text, palette: parent.palette, fontSize: currentSize)
+            if currentSize != previousSize && tv.window != nil {
+                // Stepping down (or up) a size cross-fades rather than snapping.
+                UIView.transition(with: tv, duration: 0.2,
+                                  options: [.transitionCrossDissolve, .allowUserInteraction]) {
+                    tv.attributedText = styled
+                }
+            } else {
+                tv.attributedText = styled
+            }
             // New typing stays in the plain body style rather than inheriting a keyword's.
             tv.typingAttributes = [
                 .font: UIFont.nunito(size: currentSize),
@@ -1289,6 +1461,25 @@ private struct InlineTaskInput: UIViewRepresentable {
             parent.text = tv.text
             if let t = tv as? _TaskTextView { applyHighlight(to: t) }
             tv.invalidateIntrinsicContentSize()
+            reportHeight(tv)
+        }
+
+        /// Measures the text at the view's width and hands the height to
+        /// SwiftUI — animated, except the very first measurement.
+        func reportHeight(_ tv: UITextView) {
+            let width = tv.bounds.width
+            guard width > 0 else { return }
+            let h = ceil(tv.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height)
+            guard abs(h - parent.height) > 0.5 else { return }
+            let first = parent.height == 0
+            let binding = parent.$height
+            DispatchQueue.main.async {
+                if first {
+                    binding.wrappedValue = h
+                } else {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { binding.wrappedValue = h }
+                }
+            }
         }
         func textViewDidBeginEditing(_ tv: UITextView) { parent.focused.wrappedValue = true }
         func textViewDidEndEditing(_ tv: UITextView) { parent.focused.wrappedValue = false }
@@ -1308,6 +1499,8 @@ struct HighlightedTaskTextField: View {
     var onSubmit: () -> Void
     var focused: Binding<Bool>
 
+    @State private var measuredHeight: CGFloat = 0
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             InlineTaskInput(
@@ -1317,8 +1510,12 @@ struct HighlightedTaskTextField: View {
                 fontSize: fontSize,
                 minFontSize: minFontSize,
                 palette: palette,
-                onSubmit: onSubmit
+                onSubmit: onSubmit,
+                height: $measuredHeight
             )
+            // Follows the measured height with a spring, so the field (and the
+            // card around it) grows and shrinks smoothly as lines come and go.
+            .frame(height: measuredHeight > 0 ? measuredHeight : nil)
 
             if text.isEmpty {
                 Text(placeholder)
@@ -1948,10 +2145,16 @@ struct TypewriterText: View {
     let text: String
     /// Seconds per character (shortened for long lines so typing stays brisk).
     var speed: Double = 0.03
+    /// A light tick as the letters land, like typing.
+    var haptics = true
+    /// Bumping this finishes the line at once (tap to skip ahead).
+    var skipToken = 0
     var onFinished: (() -> Void)? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var shown = 0
+    /// The line was finished early by a skip.
+    @State private var skipped = false
 
     var body: some View {
         Text(typed)
@@ -1960,6 +2163,13 @@ struct TypewriterText: View {
             .contentTransition(.identity)
             .accessibilityLabel(text)
             .task(id: text) { await type() }
+            .onChange(of: skipToken) { _, _ in
+                let count = Array(text).count
+                guard shown < count else { return }
+                skipped = true
+                shown = count
+                onFinished?()
+            }
     }
 
     /// The text with everything past the cursor made clear.
@@ -1980,15 +2190,28 @@ struct TypewriterText: View {
             return
         }
         shown = 0
+        skipped = false
         // Long lines speed up so a full line never takes much over ~1.6s.
         let step = min(speed, 1.6 / Double(characters.count))
+        let tick = UIImpactFeedbackGenerator(style: .soft)
+        if haptics { tick.prepare() }
+        var lettersSinceTick = 0
         for i in characters.indices {
             // Linger just after punctuation, like a breath between phrases.
             let prev: Character = i > 0 ? characters[i - 1] : " "
             let pause: Double = ".!?".contains(prev) ? 6 : (",—:;".contains(prev) ? 3 : 1)
             try? await Task.sleep(for: .seconds(step * pause))
-            if Task.isCancelled { return }
+            if Task.isCancelled || skipped { return }
             shown = i + 1
+            // A soft tick about every other letter (not on spaces) — feels like
+            // typing without buzzing.
+            if haptics, !characters[i].isWhitespace {
+                lettersSinceTick += 1
+                if lettersSinceTick >= 2 {
+                    lettersSinceTick = 0
+                    tick.impactOccurred(intensity: 0.45)
+                }
+            }
         }
         onFinished?()
     }

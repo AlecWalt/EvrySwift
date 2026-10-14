@@ -165,17 +165,18 @@ struct TaskRowView: View {
                             .foregroundStyle(palette.primary)
                             .accessibilityLabel("Pinned")
                     }
-                    // Priority: a navy glyph leading the title, in line with it
-                    // (rather than a chip underneath). The glyph's shape carries
-                    // the level ("!!" high, "!" medium, "↓" low) — no colour coding.
-                    if let mark = task.priority.symbol, !task.completed {
+                    // Priority: a glyph leading the title, in line with it (rather
+                    // than a chip underneath) — "!" medium, "↓" low. High priority
+                    // is the card's sky outline instead (see `taskCard`).
+                    if task.priority != .high, let mark = task.priority.symbol, !task.completed {
                         Image(systemName: mark)
                             .font(.nunito(size: 14, weight: .heavy))
                             .foregroundStyle(task.priority == .low ? palette.textSec : palette.text)
                             .accessibilityLabel("\(task.priority.label) priority")
                     }
+                    // Same type as the Schedule's cards: a bold 17pt title.
                     Text(task.title)
-                        .font(.nunito(size: 17))
+                        .font(.nunito(size: 17, weight: .bold))
                         .foregroundStyle(task.completed ? palette.textSec : palette.text)
                         .strikethrough(task.completed, color: palette.textPh)
                         .multilineTextAlignment(.leading)
@@ -247,6 +248,15 @@ struct TaskRowView: View {
         // Flat at rest: white fill + the card hairline, no shadow. (The Inbox
         // adds a light lift only while a row is being dragged.)
         .evryField(palette, cornerRadius: cornerRadius)
+        // High priority: a sky outline around the whole card.
+        .overlay {
+            if task.priority == .high && !task.completed {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Color.evrySky, lineWidth: 2)
+                    .accessibilityHidden(true)
+            }
+        }
+        .accessibilityHint(task.priority == .high && !task.completed ? "High priority" : "")
         .opacity(task.completed ? 0.62 : 1)
         .contentShape(Rectangle())
         .onTapGesture { if isSelecting { onSelect() } else { onEdit() } }
@@ -315,7 +325,9 @@ struct TaskRowView: View {
     /// — the shared `ChipView` pill, one step up.
     private func metaChip(_ text: String, foreground: Color, background: Color) -> some View {
         Text(text)
-            .font(.nunito(size: 13, weight: .medium))
+            // Bold 13pt, like the Schedule cards' time line.
+            .font(.nunito(size: 13, weight: .bold))
+            .monospacedDigit()
             .lineLimit(1)
             .padding(.horizontal, 8)
             .padding(.vertical, 2)

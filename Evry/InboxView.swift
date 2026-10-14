@@ -18,6 +18,8 @@ struct InboxView: View {
     var onEnterFocusMode: () -> Void = {}
     /// Opens the chat with Evry (presented from the root, over everything).
     var onOpenChat: () -> Void = {}
+    /// Switches the app's tab (from the swipe layout's menu).
+    var onSelectTab: (AppTab) -> Void = { _ in }
 
     @Environment(\.modelContext) private var context
     @Environment(Appearance.self) private var appearance
@@ -29,6 +31,45 @@ struct InboxView: View {
     // Current timeline day (0 = today). Owned here so the shared header can show
     // the day title; the paging drag itself lives in InboxTimelineView.
     @State private var timelineDayOffset = 0
+    /// Tasks or Schedule — Schedule by default.
+    @State private var mode: InboxMode = .schedule
+    /// The swipe layout: no selector — swipe between Schedule and Tasks, and
+    /// swipe right on Schedule to reveal the menu. (Off = the selector layout.)
+    @AppStorage("inbox_swipe_layout") private var swipeLayout = true
+    /// How far the main card has slid aside for the menu (shared with the root,
+    /// so the add handle rides along).
+    @Environment(InboxDrawerState.self) private var drawer
+    private var menuProgress: CGFloat { drawer.progress }
+    @State private var menuAtDragStart: CGFloat = 0
+    /// The finger's offset at the moment a swipe was recognised — subtracted, so
+    /// the card starts moving from where it is instead of jumping ahead.
+    @State private var lockDX: CGFloat = 0
+    /// The menu has settled fully open (the tab bar steps away only then, and
+    /// returns once it's fully closed — so nothing reflows mid-swipe).
+    @State private var menuSettledOpen = false
+    @State private var openHapticFired = false
+    /// The tab bar can be faded directly (see TabBarFader).
+    @State private var tabBarFades = true
+    /// Length of the current settle (open/close after release), so the tab bar
+    /// fade finishes with the card.
+    @State private var settleDuration: Double = 0.26
+    /// Safe-area insets measured while the menu is closed. The menu and card lay
+    /// out with these, so the tab bar hiding/returning never reflows them.
+    @State private var restInsets = EdgeInsets()
+    /// Live finger offset while swiping between Schedule and Tasks.
+    @State private var pageDrag: CGFloat = 0
+    @State private var navDrag: NavDrag = .none
+    /// Bottom of the header, in global space — swipes that start up there
+    /// belong to the header (e.g. swiping the day's name).
+    @State private var headerMaxY: CGFloat = 0
+    /// Bottom of the task list, in global space — swipes that start below it
+    /// (empty space) switch views from anywhere, not just the outer thirds.
+    @State private var tasksListMaxY: CGFloat = .infinity
+    private enum NavDrag { case none, ignored, page, menu }
+    /// The week strip, opened by tapping the day's name.
+    @State private var weekOpen = false
+    /// Direction of the last day change, so the title slides the right way.
+    @State private var dayForward = true
     @AppStorage("inbox_hide_completed") private var hideCompleted = false
     @AppStorage("inbox_hide_notes") private var hideNotes = false
     @AppStorage("inbox_hide_reschedule") private var hideReschedule = false
@@ -42,6 +83,8 @@ struct InboxView: View {
     @State private var pendingGroupTasks: [TaskItem] = []
     // Drag reorder
     @State private var draggingID: UUID? = nil
+    // A task being dragged from Tasks onto the Schedule.
+    @State private var scheduleDrag = ScheduleDragState()
     // Accomplishments
     @State private var showAccomplishments = false
     // Reschedule on 0.2s hold
@@ -62,6 +105,14 @@ struct InboxView: View {
     private var tasks: [TaskItem] { allTasks.filter { !$0.isTrashed && (!hideNotes || !$0.isNote) } }
 
     var body: some View {
+        if swipeLayout {
+            swipeLayoutBody
+        } else {
+            mainContent
+        }
+    }
+
+    private var mainContent: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
                 if !inFocusMode {
@@ -70,27 +121,59 @@ struct InboxView: View {
                         .padding(.top, 24)
                         .padding(.bottom, 8)
                         .contentShape(Rectangle())
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { headerMaxY = $0 }
                         // Raise above the timeline so the tools menu's floating
                         // bubbles fan down over the content.
                         .zIndex(1)
                 }
 
-                let overdueCount = globalOverdueTasks.count
-                if overdueCount > 0 {
-                    overdueBanner(count: overdueCount)
-                        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: overdueCount)
+                if swipeLayout {
+                    // Schedule and Tasks side by side; the visible one follows
+                    // the finger while swiping between them.
+                    GeometryReader { geo in
+                        let w = geo.size.width
+                        HStack(spacing: 0) {
+                            schedulePage
+                                .frame(width: w)
+                            tasksPage
+                                .frame(width: w)
+                        }
+                        .offset(x: (mode == .tasks ? -w : 0) + pageDrag)
+                        // While a view swipe is underway the page rides along
+                        // under the finger — so a swipe that began on a checkbox
+                        // would end on it and count as a tap. No taps mid-swipe.
+                        // (Page swipes only — the menu swipe moves the whole card,
+                        // so nothing shifts under the finger, and disabling would
+                        // briefly dim buttons as it ends.)
+                        .disabled(navDrag == .page)
+                        // Hold the page's own vertical scroll still during any
+                        // sideways swipe, so it can't nudge or bounce underneath.
+                        .scrollDisabled(navDrag == .page || navDrag == .menu)
+                    }
+                    .clipped()
+                } else {
+                    ZStack {
+                        // Tasks stays alive (hidden) while one of its tasks is
+                        // being dragged onto the Schedule, so the drag carries on.
+                        if mode == .tasks || scheduleDrag.isEngaged {
+                            tasksPage
+                                .opacity(mode == .tasks ? 1 : 0)
+                                .transition(.opacity)
+                        }
+                        if mode == .schedule {
+                            schedulePage.transition(.opacity)
+                        }
+                    }
                 }
-
-                InboxTimelineView(
-                    tasks: tasks, palette: palette, onEdit: onEdit, onDelete: onDelete,
-                    isSelecting: $isSelecting, selectedIDs: $selectedIDs,
-                    draggingID: $draggingID,
-                    dayOffset: $timelineDayOffset,
-                    onToggleSelect: toggleSelect
-                )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(inFocusMode ? Color.clear : palette.bg)
+            .overlay {
+                if scheduleDrag.isActive {
+                    ScheduleDragOverlay(drag: scheduleDrag, palette: palette, mode: mode,
+                                        onSwitch: { setMode($0) })
+                }
+            }
 
             if isSelecting {
                 MultiSelectBar(
@@ -136,44 +219,408 @@ struct InboxView: View {
         }
     }
 
-    // MARK: Header
+    private var schedulePage: some View {
+        ScheduleView(dayOffset: timelineDayOffset, palette: palette,
+                     tasks: tasks, drag: scheduleDrag, onEditTask: onEdit)
+    }
 
-    private var header: some View {
+    private var tasksPage: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 12) {
-                timelineHeaderTitle
+            let overdueCount = globalOverdueTasks.count
+            if overdueCount > 0 {
+                overdueBanner(count: overdueCount)
+                    .animation(.spring(response: 0.4, dampingFraction: 0.85), value: overdueCount)
+            }
 
-                Spacer()
+            InboxTimelineView(
+                tasks: tasks, palette: palette, onEdit: onEdit, onDelete: onDelete,
+                isSelecting: $isSelecting, selectedIDs: $selectedIDs,
+                draggingID: $draggingID,
+                scheduleDrag: scheduleDrag,
+                dayOffset: $timelineDayOffset,
+                onToggleSelect: toggleSelect,
+                // In the swipe layout, sideways swipes move between views instead.
+                pagesDays: !swipeLayout,
+                onListBottomChange: { tasksListMaxY = $0 }
+            )
+        }
+    }
 
-                // Evry's mark: opens the chat with Evry (Distill, Pomo, Write).
-                Button(action: onOpenChat) {
-                    Image("EvryPlainMark")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 34, height: 34)
-                        // Leaves while the chat is open — Evry is there instead.
-                        .evryPresence()
-                        .frame(width: EvrySpace.tap, height: EvrySpace.tap)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PressScaleStyle(scale: 0.88))
-                .accessibilityLabel("Chat with Evry")
+    // MARK: Swipe layout
+
+    /// The main screen as a card over the menu. Swiping right on Schedule slides
+    /// the card aside (shrinking into a rounded Liquid Glass card) to reveal the
+    /// menu on the left; swiping left goes to Tasks. On Tasks, swipes in the
+    /// middle third act on the task rows, and swipes in the outer thirds go back
+    /// to Schedule.
+    private var swipeLayoutBody: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let insets = restInsets
+            let fullHeight = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
+            ZStack(alignment: .topLeading) {
+                palette.bg
+
+                // The menu: a wheel of days. Turning it moves the card's day.
+                InboxDateWheel(dayOffset: $timelineDayOffset, palette: palette)
+                .padding(.top, insets.top)
+                .padding(.bottom, insets.bottom)
+                // Still, like Claude's: the card simply slides over it. Fully gone
+                // while closed (it's behind the card anyway), so VoiceOver never
+                // finds it there.
+                .opacity(menuProgress <= 0.001 ? 0 : 1)
+                .allowsHitTesting(menuProgress > 0.98)
+                .accessibilityHidden(menuProgress < 0.98)
+
+                // The card spans the whole screen — its white runs under the status
+                // bar and home indicator, with the insets applied inside — so as it
+                // slides aside it's a full-height card, not one that stops short.
+                mainContent
+                    .padding(.top, insets.top)
+                    .padding(.bottom, insets.bottom)
+                    .frame(width: w, height: fullHeight)
+                    .modifier(GlassCardModifier(progress: menuProgress, palette: palette))
+                    .overlay {
+                        // While open, a tap on the card closes the menu.
+                        if menuProgress > 0.02 {
+                            Color.white.opacity(0.001)
+                                .onTapGesture { closeMenu() }
+                                .accessibilityLabel("Close menu")
+                                .accessibilityAddTraits(.isButton)
+                        }
+                    }
+                    .offset(x: InboxDrawerMenu.width * menuProgress)
+            }
+            .ignoresSafeArea()
+            .simultaneousGesture(navGesture(width: w))
+            .onAppear { restInsets = geo.safeAreaInsets }
+            .onChange(of: geo.safeAreaInsets) { _, new in
+                // Only track insets while closed (tab bar in its usual place).
+                if !menuSettledOpen && menuProgress <= 0.001 { restInsets = new }
+            }
+        }
+        // The tab bar fades with the menu, in step with the finger (and eases
+        // over the settle when released). If it can't be faded, it's hidden
+        // once the menu is fully open instead.
+        .toolbar(menuSettledOpen && !tabBarFades ? .hidden : .automatic, for: .tabBar)
+        .onChange(of: menuProgress) { old, p in
+            // A jump (a settle animation, not a drag frame) eases over.
+            let alpha = max(0, 1 - p * 1.4)
+            tabBarFades = TabBarFader.set(alpha: alpha, animated: abs(p - old) > 0.08, duration: settleDuration)
+            if p >= 0.999 && !menuSettledOpen { menuSettledOpen = true }
+            if p <= 0.001 && menuSettledOpen { menuSettledOpen = false }
+        }
+        .onAppear { RowSwipeZone.middleThirdOnly = mode == .tasks }
+        .onDisappear {
+            RowSwipeZone.middleThirdOnly = false
+            TabBarFader.set(alpha: 1, animated: false)
+        }
+        .onChange(of: mode) { _, m in RowSwipeZone.middleThirdOnly = m == .tasks }
+    }
+
+    private var currentDayHasTasks: Bool {
+        let day = addDays(Date(), timelineDayOffset)
+        return tasks.contains { t in
+            guard let due = t.dueDate else { return false }
+            return Calendar.current.isDate(due, inSameDayAs: day)
+        }
+    }
+
+    private func setMode(_ m: InboxMode) {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+            mode = m
+            pageDrag = 0
+        }
+    }
+
+    private func closeMenu(then action: (() -> Void)? = nil) {
+        let duration = settle(to: 0, velocity: 0)
+        if let action {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(Int(duration * 1000) + 20))
+                action()
             }
         }
     }
 
+    /// Finishes the slide carrying the finger's momentum: a critically damped
+    /// spring (no bounce) that starts at exactly the release speed, then glides
+    /// to rest — no speed break when you let go, no overshoot or wobble at the
+    /// end. Returns roughly how long it takes.
+    @discardableResult
+    private func settle(to target: CGFloat, velocity: CGFloat) -> Double {
+        let remaining = target - drawer.progress
+        // The spring's initial velocity is relative to the distance left:
+        // (points/s ÷ menu width) = progress/s, ÷ remaining = "remainings"/s.
+        let progressPerSecond = velocity / InboxDrawerMenu.width
+        let relative = abs(remaining) > 0.001 ? Double(progressPerSecond / remaining) : 0
+        // Only carry momentum that's heading the right way.
+        let initial = max(relative, 0)
+        // A critically damped spring overshoots (and snaps back — the jitter at
+        // high speeds) once its starting speed passes its natural frequency
+        // ω = 2π / duration. So a faster flick gets a *shorter* spring, keeping
+        // the release speed while staying just under that limit.
+        let base = 0.38
+        let limit = 0.85 * 2 * Double.pi / base
+        let duration = initial > limit ? max(0.14, 0.85 * 2 * Double.pi / initial) : base
+        // At the shortest spring, cap the speed too, so it can never overshoot.
+        let startSpeed = min(initial, 0.85 * 2 * Double.pi / duration)
+        settleDuration = duration * 0.75
+        withAnimation(.interpolatingSpring(duration: duration, bounce: 0, initialVelocity: startSpeed)) {
+            drawer.progress = target
+        }
+        return duration
+    }
+
+    private func navGesture(width w: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+            .onChanged { v in
+                let dx = v.translation.width, dy = v.translation.height
+                if navDrag == .none {
+                    // Decide once, at the start: header swipes, vertical drags,
+                    // reorders and multi-select are left alone.
+                    guard abs(dx) > abs(dy) * 1.2 else {
+                        if abs(dy) > 10 { navDrag = .ignored }
+                        return
+                    }
+                    if isSelecting || draggingID != nil || scheduleDrag.isEngaged || v.startLocation.y < headerMaxY {
+                        navDrag = .ignored
+                    } else if menuProgress > 0.5 {
+                        navDrag = .menu
+                    } else if mode == .schedule {
+                        navDrag = dx > 0 ? .menu : .page
+                    } else {
+                        // Tasks: over the rows, only the outer thirds switch
+                        // views (the middle third swipes the task). Below the
+                        // list, or on a day with no tasks, anywhere does.
+                        let x = v.startLocation.x
+                        let overRows = currentDayHasTasks && v.startLocation.y < tasksListMaxY
+                        navDrag = (!overRows || x < w / 3 || x > w * 2 / 3) ? .page : .ignored
+                    }
+                    menuAtDragStart = menuProgress
+                    lockDX = dx
+                    openHapticFired = menuAtDragStart >= 0.999
+                }
+                // Measured from where the swipe was recognised: 1:1 and linear,
+                // no leap at the start.
+                let travel = dx - lockDX
+                switch navDrag {
+                case .menu:
+                    let p = min(max(menuAtDragStart + travel / InboxDrawerMenu.width, 0), 1)
+                    var t = Transaction()
+                    t.disablesAnimations = true
+                    withTransaction(t) { drawer.progress = p }
+                    // The open tap lands just before it's all the way out.
+                    if p >= 0.9 && !openHapticFired {
+                        openHapticFired = true
+                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    }
+                    if p < 0.8 { openHapticFired = false }
+                case .page:
+                    // Schedule can only move towards Tasks (left); Tasks only back
+                    // towards Schedule (right). The other way rubber-bands.
+                    let toward = mode == .schedule ? min(travel, 0) : max(travel, 0)
+                    let away = mode == .schedule ? max(travel, 0) : min(travel, 0)
+                    pageDrag = toward + away * 0.2
+                default:
+                    break
+                }
+            }
+            .onEnded { v in
+                let kind = navDrag
+                navDrag = .none
+                switch kind {
+                case .menu:
+                    // A deliberate flick decides on its own; otherwise go by where
+                    // the momentum would carry the card.
+                    let projected = menuAtDragStart + (v.predictedEndTranslation.width - lockDX) / InboxDrawerMenu.width
+                    let open = abs(v.velocity.width) > 350 ? v.velocity.width > 0 : projected > 0.5
+                    // Carries on at the finger's speed, in a straight line — and a
+                    // single soft tap as it opens (unless the drag already gave it).
+                    settle(to: open ? 1 : 0, velocity: v.velocity.width)
+                    if open && !openHapticFired {
+                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    }
+                    openHapticFired = false
+                case .page:
+                    let dx = v.predictedEndTranslation.width - lockDX
+                    let flip = mode == .schedule ? dx < -w * 0.3 : dx > w * 0.3
+                    if flip { UISelectionFeedbackGenerator().selectionChanged() }
+                    setMode(flip ? (mode == .schedule ? .tasks : .schedule) : mode)
+                default:
+                    break
+                }
+            }
+    }
+
+    // MARK: Header
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Day ⇄ week: tapping the day pushes it off to the left and the week
+            // slides in from the right; the chevron flips and moves to the edge.
+            ZStack(alignment: .leading) {
+                if weekOpen {
+                    InboxWeekStrip(dayOffset: $timelineDayOffset, palette: palette)
+                        .padding(.leading, EvrySpace.tap - 14)   // room for the chevron at the edge
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            // Fades quickly on the way out, so it's gone before the
+                            // Evry mark returns.
+                            removal: .move(edge: .trailing)
+                                .combined(with: .opacity.animation(.easeOut(duration: 0.16)))))
+                } else {
+                    HStack(alignment: .center, spacing: 12) {
+                        timelineHeaderTitle
+                        Spacer(minLength: EvrySpace.tap)
+                    }
+                    .transition(.asymmetric(insertion: .move(edge: .leading).combined(with: .opacity),
+                                            removal: .move(edge: .leading).combined(with: .opacity)))
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+            // One chevron for both states: just after the day's name pointing
+            // right, or at the screen's edge pointing left. It slides and turns.
+            .overlay(alignment: .leading) {
+                weekChevron
+                    .offset(x: weekOpen ? -14 : titleWidth + 2)
+                    .animation(.spring(response: 0.45, dampingFraction: 0.86), value: weekOpen)
+                    .animation(EvryMotion.settle, value: titleWidth)
+            }
+            // The Evry mark stays put and simply fades while the week is shown —
+            // coming back only once the week strip has cleared.
+            .overlay(alignment: .trailing) {
+                evryButton
+                    .opacity(weekOpen ? 0 : 1)
+                    .scaleEffect(weekOpen ? 0.8 : 1)
+                    .animation(weekOpen ? .easeOut(duration: 0.15) : .easeOut(duration: 0.22).delay(0.3),
+                               value: weekOpen)
+                    .allowsHitTesting(!weekOpen)
+                    .accessibilityHidden(weekOpen)
+            }
+
+            if swipeLayout {
+                pageHint
+            } else {
+                InboxModeSelector(mode: $mode, palette: palette)
+            }
+        }
+        .onChange(of: timelineDayOffset) { old, new in dayForward = new >= old }
+        .onChange(of: mode) { _, m in
+            // Multi-select belongs to the task list.
+            if m == .schedule && isSelecting { cancelSelection() }
+        }
+    }
+
+    /// Which view is showing, in the swipe layout: the view's name and two dots.
+    private var pageHint: some View {
+        HStack(spacing: 8) {
+            Text(mode.title)
+                .font(.evrySmall)
+                .foregroundStyle(palette.textSec)
+                .contentTransition(.opacity)
+            HStack(spacing: 4) {
+                ForEach(InboxMode.allCases.reversed()) { m in
+                    Capsule()
+                        .fill(m == mode ? palette.primary : palette.border)
+                        .frame(width: m == mode ? 14 : 6, height: 6)
+                }
+            }
+        }
+        .animation(EvryMotion.settle, value: mode)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(mode.title) view")
+        .accessibilityHint("Swipe left for Tasks, or right for the menu.")
+    }
+
+    /// Width of the day's name, so the chevron can sit just after it.
+    @State private var titleWidth: CGFloat = 0
+
+    private func toggleWeek() {
+        UISelectionFeedbackGenerator().selectionChanged()
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) { weekOpen.toggle() }
+    }
+
+    /// The chevron: points right beside the day's name, flips to point left at
+    /// the screen's edge while the week is showing. Tapping it goes back.
+    private var weekChevron: some View {
+        Button(action: toggleWeek) {
+            Image(systemName: "chevron.right")
+                .font(.nunito(size: 16, weight: .heavy))
+                .foregroundStyle(palette.textSec)
+                .rotationEffect(.degrees(weekOpen ? 180 : 0))
+                .frame(width: EvrySpace.tap, height: EvrySpace.tap)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(weekOpen ? "Back to the day" : "Show the week")
+    }
+
+    // Evry's mark: opens the chat with Evry (Distill, Pomo, Write).
+    private var evryButton: some View {
+        Button(action: onOpenChat) {
+            Image("EvryPlainMark")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 34, height: 34)
+                // Leaves while the chat is open — Evry is there instead.
+                .evryPresence()
+                .frame(width: EvrySpace.tap, height: EvrySpace.tap)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressScaleStyle(scale: 0.88))
+        .accessibilityLabel("Chat with Evry")
+    }
+
+    /// The day's name, then the chevron. Tap to show the week; swipe the name to
+    /// go a day forward or back. (Other days add their date, so it's clear which
+    /// Monday this is.)
     private var timelineHeaderTitle: some View {
         let date = addDays(Date(), timelineDayOffset)
         let isToday = timelineDayOffset == 0
-        // Weekday is the hero; the full date (ordinal day) is the supporting line,
-        // with a "Today" eyebrow pill. Shared PageTitle keeps this identical across tabs.
-        return PageTitle(
-            title: date.formatted(.dateTime.weekday(.wide)),
-            subtitle: "\(date.formatted(.dateTime.month(.wide))) \(date.ordinalDayString)",
-            badge: isToday ? "Today" : nil,
-            palette: palette
-        )
-        .animation(.easeInOut(duration: 0.3), value: timelineDayOffset)
+        return HStack(alignment: .center, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(date.formatted(.dateTime.weekday(.wide)))
+                    .font(.evryH2)
+                    .tracking(EvryTracking.h2)
+                    .foregroundStyle(palette.text)
+                    .lineLimit(1)
+                    .id(timelineDayOffset)
+                    .transition(.push(from: dayForward ? .trailing : .leading))
+                if !isToday {
+                    Text(date.formatted(.dateTime.month(.abbreviated).day()))
+                        .font(.nunito(size: 16, weight: .semibold))
+                        .foregroundStyle(palette.textMuted)
+                        .transition(.opacity)
+                }
+            }
+            .clipped()
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { titleWidth = $0 }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: toggleWeek)
+            .gesture(
+                DragGesture(minimumDistance: 16)
+                    .onEnded { v in
+                        guard abs(v.translation.width) > 40, abs(v.translation.width) > abs(v.translation.height) else { return }
+                        UISelectionFeedbackGenerator().selectionChanged()
+                        withAnimation(EvryMotion.settle) { timelineDayOffset += v.translation.width < 0 ? 1 : -1 }
+                    }
+            )
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(isToday ? "Today, \(date.formatted(.dateTime.weekday(.wide)))"
+                                        : date.formatted(.dateTime.weekday(.wide).month(.wide).day()))
+            .accessibilityHint("Swipe to change the day.")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: timelineDayOffset += 1
+                case .decrement: timelineDayOffset -= 1
+                @unknown default: break
+                }
+            }
+        }
+        // Leaves room for the chevron, which sits just after the name.
+        .padding(.trailing, EvrySpace.tap)
+        .animation(EvryMotion.settle, value: timelineDayOffset)
     }
 
     // MARK: Overdue helpers
@@ -308,8 +755,14 @@ private struct InboxTimelineView: View {
     @Binding var isSelecting: Bool
     @Binding var selectedIDs: Set<UUID>
     @Binding var draggingID: UUID?
+    let scheduleDrag: ScheduleDragState
     @Binding var dayOffset: Int
     var onToggleSelect: (TaskItem) -> Void
+    /// Swipe the blank area below the list to change day (off in the swipe layout,
+    /// where horizontal swipes move between Schedule and Tasks instead).
+    var pagesDays = true
+    /// Reports where the task list ends (global y), for the swipe layout.
+    var onListBottomChange: (CGFloat) -> Void = { _ in }
 
     // Day-paging slide offset. Local @State so a drag never re-renders the parent.
     @State private var swipeDelta: CGFloat = 0
@@ -354,6 +807,7 @@ private struct InboxTimelineView: View {
                         .offset(x: swipeDelta)
                 }
                 .frame(height: listH)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { onListBottomChange($0) }
                 // The task region is flat — no inner-shadow well darkening the
                 // rows; rows soften out at the edges via `timelineScrollFade`.
                 // Everything below this region pages the day.
@@ -364,7 +818,7 @@ private struct InboxTimelineView: View {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
-                    .gesture(dayPagingGesture(width: w))
+                    .gesture(pagesDays ? dayPagingGesture(width: w) : nil)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
@@ -402,6 +856,7 @@ private struct InboxTimelineView: View {
             isSelecting: $isSelecting,
             selectedIDs: $selectedIDs,
             draggingID: $draggingID,
+            scheduleDrag: scheduleDrag,
             onToggleSelect: onToggleSelect,
             allTaskCount: tasks.count,
             reportsHeight: off == dayOffset
@@ -459,6 +914,7 @@ private struct TimelineDayPage: View {
     @Binding var isSelecting: Bool
     @Binding var selectedIDs: Set<UUID>
     @Binding var draggingID: UUID?
+    let scheduleDrag: ScheduleDragState
     var onToggleSelect: (TaskItem) -> Void
     /// Live finger offset of a reorder drag. Local to this page (not a binding up
     /// to InboxView) so each drag frame only re-renders this list, not the page.
@@ -546,7 +1002,7 @@ private struct TimelineDayPage: View {
                     // Shared empty state, matching Habits and Notes — but no
                     // mascot: the header's Evry mark is always on screen here.
                     EmptyStateView(
-                        systemImage: "tray",
+                        icon: "tray",
                         title: "Nothing due this day",
                         text: isToday ? "Swipe up on the handle below to add a task." : "Enjoy the free day.",
                         palette: palette
@@ -637,7 +1093,7 @@ private struct TimelineDayPage: View {
         }
         // Lock vertical scroll while reordering or mid swipe-to-complete/delete so
         // the container doesn't scroll under an active horizontal swipe.
-        .scrollDisabled(draggingID != nil || taskSwiping || dragSel.isActive)
+        .scrollDisabled(draggingID != nil || taskSwiping || dragSel.isActive || scheduleDrag.isEngaged)
         .onChange(of: isSelecting) { _, selecting in if !selecting { dragOffset = 0 } }
         // Leading, accent-coloured indicator instead of the grey system one.
         .evryScrollIndicator(palette)
@@ -772,6 +1228,8 @@ private struct TimelineDayPage: View {
             return dragOffset + CGFloat((od - oi) + (gi - gd)) * stride
         }()
         let elevated = inGroup
+        let isLifted = scheduleDrag.liftedID == task.uid
+        let isCarried = isLifted && scheduleDrag.task?.uid == task.uid
         SwipeActionRow(
             leadingAction: task.isNote || task.completed ? nil : SwipeActionRow.Action(
                 label: "Done", icon: "checkmark", color: Palette.doneFill,
@@ -781,7 +1239,7 @@ private struct TimelineDayPage: View {
                 label: "Delete", icon: "trash.fill", color: Palette.danger,
                 action: { onDelete(task) }
             ),
-            isDragging: draggingID != nil,
+            isDragging: draggingID != nil || scheduleDrag.isEngaged,
             onHorizontalSwipeChanged: { active in
                 taskSwiping = active
                 if active {
@@ -855,14 +1313,17 @@ private struct TimelineDayPage: View {
                     .padding(.trailing, 6)
             }
         }
-        .scaleEffect(isSelf ? 1.04 : 1.0)
+        .scaleEffect(isSelf || (isLifted && !isCarried) ? 1.04 : 1.0)
+        // While it's carried to the Schedule, the row stays behind as a faint ghost.
+        .opacity(isCarried ? 0.35 : 1)
         // Rows are flat at rest; only rows being dragged get a very subtle lift
         // (navy-tinted; black only in dark mode). `elevated` is only true mid-drag.
-        .shadow(color: elevated ? (palette.dark ? Color.black : .evryNavy).opacity(palette.dark ? 0.3 : 0.08) : .clear,
-                radius: elevated ? 10 : 0, y: elevated ? 4 : 0)
+        .shadow(color: elevated || isLifted ? (palette.dark ? Color.black : .evryNavy).opacity(palette.dark ? 0.3 : 0.08) : .clear,
+                radius: elevated || isLifted ? 10 : 0, y: elevated || isLifted ? 4 : 0)
         .offset(y: yOff)
         .zIndex(elevated ? 1 : 0)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isSelf)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isLifted)
         // Only the stepped neighbour offset is animated — the finger-follow stays direct.
         .animation(.spring(response: 0.25, dampingFraction: 0.8), value: neighborShift)
         .popover(isPresented: Binding(
@@ -871,25 +1332,15 @@ private struct TimelineDayPage: View {
         )) {
             rescheduleMenu(for: task)
         }
-        // Multi-select on a 0.5s hold. Simultaneous (not `.onLongPressGesture`) so
-        // it never blocks the ScrollView's vertical pan when starting on a task.
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.5, maximumDistance: 10)
-                .onEnded { _ in
-                    guard draggingID == nil, !isSelecting, !taskSwiping else { return }
-                    showRescheduleFor = nil
-                    suppressTapAction = true
-                    let gen = UIImpactFeedbackGenerator(style: .heavy)
-                    gen.impactOccurred()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        gen.impactOccurred(intensity: 0.7)
-                    }
-                    withAnimation(.spring(response: 0.3)) {
-                        isSelecting = true
-                        selectedIDs.insert(task.uid)
-                    }
-                }
-        )
+        // A 0.5s hold lifts the row: drag it to carry the task onto the
+        // Schedule, or let go in place to multi-select. A UIKit long press on
+        // the scroll view (`HoldDragCatcher`) rather than a SwiftUI sequenced
+        // gesture, which stole vertical scrolls inside folders.
+        .background(HoldDragCatcher(
+            onLift: { p in holdBegan(task, at: p) },
+            onMove: { p in holdMoved(task, to: p) },
+            onEnd: { cancelled in holdEnded(task, cancelled: cancelled) }
+        ))
         // Reorder is intentionally handle-only (multi-select mode) so a plain
         // tap-and-drag on a row never steals the ScrollView's vertical pan —
         // keeping scroll-over-tasks reliable.
@@ -907,6 +1358,50 @@ private struct TimelineDayPage: View {
         // top/bottom edges of the day list, so tasks fade out rather than
         // hard-clipping at the container.
         .timelineScrollFade()
+    }
+
+    /// The hold completed: lift the row (declined mid-reorder, multi-select or
+    /// a swipe).
+    private func holdBegan(_ task: TaskItem, at point: CGPoint) -> Bool {
+        guard draggingID == nil, !isSelecting, !taskSwiping, !scheduleDrag.isEngaged else { return false }
+        showRescheduleFor = nil
+        suppressTapAction = true
+        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            scheduleDrag.lift(task, at: point, from: .tasks)
+        }
+        return true
+    }
+
+    /// The lifted row is moving: carry it towards the Schedule. Notes and
+    /// finished tasks don't go on the schedule — they only multi-select.
+    private func holdMoved(_ task: TaskItem, to point: CGPoint) {
+        guard !task.isNote, !task.completed else { return }
+        if scheduleDrag.move(task, to: point) {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+    }
+
+    /// The finger lifted: land a carried task on the Schedule, or — if the row
+    /// was only held — start multi-select, as a plain hold always has.
+    private func holdEnded(_ task: TaskItem, cancelled: Bool) {
+        guard scheduleDrag.liftedID == task.uid else { return }
+        if cancelled {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { scheduleDrag.reset() }
+            return
+        }
+        if scheduleDrag.isActive {
+            let placed = scheduleDrag.dropTime != nil
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { _ = scheduleDrag.finish() }
+            if placed { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+            return
+        }
+        UIImpactFeedbackGenerator(style: .heavy).impactOccurred(intensity: 0.7)
+        withAnimation(.spring(response: 0.3)) {
+            scheduleDrag.reset()
+            isSelecting = true
+            selectedIDs.insert(task.uid)
+        }
     }
 
     private func rowTap(_ action: () -> Void) {
