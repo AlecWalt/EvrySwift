@@ -31,6 +31,7 @@ struct ContentView: View {
     @Environment(Appearance.self) private var appearance
     @Environment(PomodoroModel.self) private var pomodoro
     @Environment(MembershipRouter.self) private var membershipRouter
+    @Environment(CalendarService.self) private var calendarService
 
     @AppStorage("membership_plan") private var membershipPlan = ""
     // Trial clock (first launch) + the hard-wall state derived from it.
@@ -146,7 +147,8 @@ struct ContentView: View {
             projectNavState.requestedTab = nil
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { processPendingSiriTasks(); checkDailyRecap(); evaluateAccess() }
+            // Calendar access may have been turned on in Settings meanwhile.
+            if phase == .active { processPendingSiriTasks(); checkDailyRecap(); evaluateAccess(); calendarService.refreshStatus() }
         }
         // A cold launch starts already active (no scenePhase change), so pick up
         // anything Siri queued while the app wasn't running here too.
