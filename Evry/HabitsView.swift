@@ -45,7 +45,7 @@ struct HabitsView: View {
         let today = Calendar.current.startOfDay(for: Date())
         let stats = Dictionary(habits.map { ($0.uid, HabitStats(habit: $0)) }, uniquingKeysWith: { a, _ in a })
         // Built habits are records now, so they no longer count toward today.
-        let due = habits.filter { !$0.isFormed && $0.isScheduled(on: today) }
+        let due = habits.filter { $0.isDue(on: today) }
         let doneToday = due.filter { stats[$0.uid]?.todayDone == true }.count
         let allDone = !due.isEmpty && doneToday == due.count
         let focused = habits.first { $0.uid == focusedID } ?? habits.first

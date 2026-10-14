@@ -220,6 +220,10 @@ struct HabitStatsTests {
         #expect(stats.currentStreak == 3)
         #expect(stats.todayDone)
         #expect(stats.completedDays == 3)
+        // The cheap helpers agree with the full stats.
+        #expect(habit.isDoneToday == stats.todayDone)
+        #expect(habit.checkIns(on: Date()) == stats.today)
+        #expect(habit.isDue(on: Date()))
     }
 }
 

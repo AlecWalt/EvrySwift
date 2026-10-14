@@ -452,8 +452,8 @@ struct ProfileView: View {
         }
         let tasksDone = dueTasks.filter(\.completed).count
         // Habits due today (built habits are records, so they don't count).
-        let dueHabits = habits.filter { !$0.isFormed && $0.isScheduled(on: today) }
-        let habitsDone = dueHabits.filter { HabitStats(habit: $0).todayDone }.count
+        let dueHabits = habits.filter { $0.isDue(on: today) }
+        let habitsDone = dueHabits.filter(\.isDoneToday).count
         let focus = FocusLog.minutes(on: Date())
         let focusGoal = max(1, dailyFocusGoal)
 

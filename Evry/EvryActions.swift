@@ -249,7 +249,7 @@ final class EvryActionDesk {
     func checkInHabit(named name: String) -> String {
         let habits = ((try? context.fetch(FetchDescriptor<Habit>())) ?? []).filter { !$0.isFormed }
         guard let habit = find(name, in: habits, title: \.name) else { return "There's no habit matching \"\(name)\"." }
-        guard !HabitStats(habit: habit).todayDone else { return "\"\(habit.name)\" is already done today." }
+        guard !habit.isDoneToday else { return "\"\(habit.name)\" is already done today." }
         HabitActions.checkIn(habit, context: context)
         record(.habit, habit.name, "Done for today")
         return "Checked in \"\(habit.name)\"."

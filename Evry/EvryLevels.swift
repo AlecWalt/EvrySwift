@@ -233,20 +233,27 @@ struct SunburstShape: Shape {
 /// Invisible watcher (placed once at the app root) that awards XP the moment
 /// today's task goal or habit goal is completed — wherever it's completed.
 struct DailyGoalXPWatcher: View {
-    @Query private var tasks: [TaskItem]
+    /// Only today's due tasks — it sits at the app root, so an unfiltered query
+    /// re-ran this on every edit to any task.
+    @Query private var dueTasks: [TaskItem]
     @Query private var habits: [Habit]
+
+    init() {
+        let start = Calendar.current.startOfDay(for: Date())
+        let end = Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start
+        _dueTasks = Query(filter: #Predicate<TaskItem> { t in
+            if let due = t.dueDate { t.deletedAt == nil && !t.isNote && due >= start && due < end } else { false }
+        })
+    }
 
     private struct GoalState: Equatable { var tasksMet = false; var habitsMet = false }
 
     private var state: GoalState {
         let today = Calendar.current.startOfDay(for: Date())
-        let dueTasks = tasks.filter { t in
-            !t.isTrashed && !t.isNote && (t.dueDate.map { Calendar.current.isDate($0, inSameDayAs: today) } ?? false)
-        }
-        let dueHabits = habits.filter { !$0.isFormed && $0.isScheduled(on: today) }
+        let dueHabits = habits.filter { $0.isDue(on: today) }
         return GoalState(
             tasksMet: !dueTasks.isEmpty && dueTasks.allSatisfy(\.completed),
-            habitsMet: !dueHabits.isEmpty && dueHabits.allSatisfy { HabitStats(habit: $0).todayDone }
+            habitsMet: !dueHabits.isEmpty && dueHabits.allSatisfy(\.isDoneToday)
         )
     }
 

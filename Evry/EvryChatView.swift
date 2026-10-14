@@ -944,8 +944,8 @@ struct EvryChatOverlay: View {
         }
 
         let habits = ((try? context.fetch(FetchDescriptor<Habit>())) ?? [])
-            .filter { !$0.isFormed && $0.isScheduled(on: start) }
-            .map { EvryAppData.Habit(name: $0.name, doneToday: HabitStats(habit: $0).todayDone) }
+            .filter { $0.isDue(on: start) }
+            .map { EvryAppData.Habit(name: $0.name, doneToday: $0.isDoneToday) }
 
         return EvryAppData(openTasks: open.map(record), recentlyDone: done.map(record),
                            notes: notes, events: events, habitsToday: habits)

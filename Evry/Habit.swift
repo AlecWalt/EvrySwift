@@ -63,6 +63,19 @@ final class Habit {
         weekdays.isEmpty || weekdays.contains(calendar.component(.weekday, from: day))
     }
 
+    /// Due on `day`: still being built (not yet formed) and scheduled then.
+    func isDue(on day: Date) -> Bool { !isFormed && isScheduled(on: day) }
+
+    /// Check-ins logged on `day` — a single pass over the entries, for places
+    /// that only need "done today?" rather than the full `HabitStats` walk.
+    func checkIns(on day: Date) -> Int {
+        let start = Calendar.current.startOfDay(for: day)
+        return (entries ?? []).reduce(0) { $0 + ($1.day == start ? 1 : 0) }
+    }
+
+    /// Today's target is met.
+    var isDoneToday: Bool { checkIns(on: Date()) >= max(1, dailyTarget) }
+
     /// Check-ins per day, keyed by start of day, built in one pass.
     var countsByDay: [Date: Int] {
         var counts: [Date: Int] = [:]
@@ -249,7 +262,10 @@ enum HabitActions {
     /// Stamps (or clears) `formedAt` as completed days cross the long-term goal.
     /// Called after every change to a habit's history or goal length.
     static func refreshFormed(_ habit: Habit, context: ModelContext) {
-        let reached = HabitStats(habit: habit).goalReached
+        // Only the completed-day count matters here (no streak walk needed).
+        let target = max(1, habit.dailyTarget)
+        let completedDays = habit.countsByDay.values.filter { $0 >= target }.count
+        let reached = completedDays >= max(1, habit.goalDays)
         if reached && habit.formedAt == nil {
             habit.formedAt = Date()
         } else if !reached && habit.formedAt != nil {
