@@ -274,6 +274,7 @@ struct ContentView: View {
                 case .longBreak: showToast("Nice work! Time for a longer break.")
                 }
             }
+            pomodoro.onTargetReached = { showToast("All your focus sessions are done. Nice work!") }
         }
     }
 

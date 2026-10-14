@@ -369,6 +369,48 @@ struct DayKeyTests {
     }
 }
 
+// MARK: - Pomodoro
+
+/// Runs `body` with the Pomodoro snapshot and today's focus minutes saved
+/// and restored, so tests don't disturb the app's own state.
+@MainActor private func withCleanPomodoro(_ body: () -> Void) {
+    let defaults = UserDefaults.standard
+    let keys = ["pomodoro_state_v1", "focus_min_" + AccomplishmentsStore.dateKey(Date())]
+    let saved = keys.map { defaults.object(forKey: $0) }
+    keys.forEach { defaults.removeObject(forKey: $0) }
+    defer { for (k, v) in zip(keys, saved) { defaults.set(v, forKey: k) } }
+    body()
+}
+
+@MainActor
+struct PomodoroTests {
+    @Test func skippingFocusLogsOnlyTheTimeSpent() {
+        withCleanPomodoro {
+            let model = PomodoroModel()
+            model.start()
+            model.tick(at: Date().addingTimeInterval(10 * 60 + 5))
+            model.skip()
+            #expect(model.completedSessions == 0)
+            #expect(model.phase == .shortBreak)
+            #expect(FocusLog.minutes(on: Date()) == 10)
+            model.reset()
+        }
+    }
+
+    @Test func catchesUpOnPhasesMissedInTheBackground() {
+        withCleanPomodoro {
+            let model = PomodoroModel()   // Classic: 25 / 5
+            model.start()
+            // Back after focus (25) + break (5) + 3 minutes of the next focus.
+            model.tick(at: Date().addingTimeInterval(33 * 60))
+            #expect(model.phase == .work)
+            #expect(model.completedSessions == 1)
+            #expect(abs(model.remaining - 22 * 60) < 5)
+            model.reset()
+        }
+    }
+}
+
 // MARK: - Store queries
 
 @MainActor
