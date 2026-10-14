@@ -19,7 +19,6 @@ import SwiftUI
 /// rest those all sit just beyond the screen's edges, so nothing changes as it
 /// moves — it simply slides.
 struct GlassCardModifier: ViewModifier {
-    let progress: CGFloat
     let palette: Palette
 
     /// Fixed, close to the display's corner radius.
@@ -50,6 +49,82 @@ final class InboxDrawerState {
     var progress: CGFloat = 0
     /// How far the card slides aside — the width of the menu behind it.
     static let menuWidth: CGFloat = 288
+}
+
+// The pieces of the Inbox that follow the menu frame by frame each read
+// `InboxDrawerState` themselves, so a drag re-renders only them — never the
+// whole Inbox (both pages, both lists, the date wheel).
+
+/// The menu behind the card: fully gone while closed (so VoiceOver never finds
+/// it there), and only interactive once the card has slid all the way aside.
+struct DrawerMenuVisibility: ViewModifier {
+    @Environment(InboxDrawerState.self) private var drawer
+
+    func body(content: Content) -> some View {
+        let p = drawer.progress
+        content
+            .opacity(p <= 0.001 ? 0 : 1)
+            .allowsHitTesting(p > 0.98)
+            .accessibilityHidden(p < 0.98)
+    }
+}
+
+/// Slides the main card aside with the menu; while it's open, a tap on the
+/// card closes it.
+struct DrawerCardSlide: ViewModifier {
+    var onClose: () -> Void
+    @Environment(InboxDrawerState.self) private var drawer
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if drawer.progress > 0.02 {
+                    Color.white.opacity(0.001)
+                        .onTapGesture(perform: onClose)
+                        .accessibilityLabel("Close menu")
+                        .accessibilityAddTraits(.isButton)
+                }
+            }
+            .offset(x: InboxDrawerState.menuWidth * drawer.progress)
+    }
+}
+
+/// Fades the tab bar with the menu (easing over a settle, following the finger
+/// during a drag) and reports when the menu settles fully open or closed.
+struct DrawerTabBarSync: View {
+    var settleDuration: Double
+    @Binding var settledOpen: Bool
+    @Binding var tabBarFades: Bool
+    @Environment(InboxDrawerState.self) private var drawer
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .onChange(of: drawer.progress) { old, p in
+                // A jump (a settle animation, not a drag frame) eases over.
+                let alpha = max(0, 1 - p * 1.4)
+                tabBarFades = TabBarFader.set(alpha: alpha, animated: abs(p - old) > 0.08, duration: settleDuration)
+                if p >= 0.999 && !settledOpen { settledOpen = true }
+                if p <= 0.001 && settledOpen { settledOpen = false }
+            }
+    }
+}
+
+/// The live finger offset while swiping between Schedule and Tasks — in its
+/// own observable so drag frames only move the pages, not re-render the Inbox.
+@Observable
+final class InboxPageDrag {
+    var x: CGFloat = 0
+}
+
+struct PageDragOffset: ViewModifier {
+    let base: CGFloat
+    let drag: InboxPageDrag
+
+    func body(content: Content) -> some View {
+        content.offset(x: base + drag.x)
+    }
 }
 
 /// Moves a main-screen element with the Inbox card as it slides aside.
@@ -83,7 +158,17 @@ enum TabBarFader {
         return true
     }
 
+    /// The bar found last time — looked up once instead of walking every
+    /// window's view-controller tree on each drag frame.
+    private static weak var cachedBar: UITabBar?
+
     private static func findTabBar() -> UITabBar? {
+        if let bar = cachedBar, bar.window != nil { return bar }
+        cachedBar = searchTabBar()
+        return cachedBar
+    }
+
+    private static func searchTabBar() -> UITabBar? {
         let windows = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)

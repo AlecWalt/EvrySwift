@@ -49,7 +49,7 @@ struct InboxView: View {
     /// out with these, so the tab bar hiding/returning never reflows them.
     @State private var restInsets = EdgeInsets()
     /// Live finger offset while swiping between Schedule and Tasks.
-    @State private var pageDrag: CGFloat = 0
+    @State private var pageDrag = InboxPageDrag()
     @State private var navDrag: NavDrag = .none
     /// Bottom of the header, in global space — swipes that start up there
     /// belong to the header (e.g. swiping the day's name).
@@ -106,7 +106,7 @@ struct InboxView: View {
                         tasksPage
                             .frame(width: w)
                     }
-                    .offset(x: (mode == .tasks ? -w : 0) + pageDrag)
+                    .modifier(PageDragOffset(base: mode == .tasks ? -w : 0, drag: pageDrag))
                     // While a view swipe is underway the page rides along
                     // under the finger — so a swipe that began on a checkbox
                     // would end on it and count as a tap. No taps mid-swipe.
@@ -206,12 +206,8 @@ struct InboxView: View {
                 InboxDateWheel(dayOffset: $timelineDayOffset, palette: palette)
                 .padding(.top, insets.top)
                 .padding(.bottom, insets.bottom)
-                // Still, like Claude's: the card simply slides over it. Fully gone
-                // while closed (it's behind the card anyway), so VoiceOver never
-                // finds it there.
-                .opacity(menuProgress <= 0.001 ? 0 : 1)
-                .allowsHitTesting(menuProgress > 0.98)
-                .accessibilityHidden(menuProgress < 0.98)
+                // Still, like Claude's: the card simply slides over it.
+                .modifier(DrawerMenuVisibility())
 
                 // The card spans the whole screen — its white runs under the status
                 // bar and home indicator, with the insets applied inside — so as it
@@ -220,17 +216,8 @@ struct InboxView: View {
                     .padding(.top, insets.top)
                     .padding(.bottom, insets.bottom)
                     .frame(width: w, height: fullHeight)
-                    .modifier(GlassCardModifier(progress: menuProgress, palette: palette))
-                    .overlay {
-                        // While open, a tap on the card closes the menu.
-                        if menuProgress > 0.02 {
-                            Color.white.opacity(0.001)
-                                .onTapGesture { closeMenu() }
-                                .accessibilityLabel("Close menu")
-                                .accessibilityAddTraits(.isButton)
-                        }
-                    }
-                    .offset(x: InboxDrawerState.menuWidth * menuProgress)
+                    .modifier(GlassCardModifier(palette: palette))
+                    .modifier(DrawerCardSlide(onClose: { closeMenu() }))
             }
             .ignoresSafeArea()
             .simultaneousGesture(navGesture(width: w))
@@ -244,13 +231,8 @@ struct InboxView: View {
         // over the settle when released). If it can't be faded, it's hidden
         // once the menu is fully open instead.
         .toolbar(menuSettledOpen && !tabBarFades ? .hidden : .automatic, for: .tabBar)
-        .onChange(of: menuProgress) { old, p in
-            // A jump (a settle animation, not a drag frame) eases over.
-            let alpha = max(0, 1 - p * 1.4)
-            tabBarFades = TabBarFader.set(alpha: alpha, animated: abs(p - old) > 0.08, duration: settleDuration)
-            if p >= 0.999 && !menuSettledOpen { menuSettledOpen = true }
-            if p <= 0.001 && menuSettledOpen { menuSettledOpen = false }
-        }
+        .background(DrawerTabBarSync(settleDuration: settleDuration,
+                                     settledOpen: $menuSettledOpen, tabBarFades: $tabBarFades))
         .onAppear { RowSwipeZone.middleThirdOnly = mode == .tasks }
         .onDisappear {
             RowSwipeZone.middleThirdOnly = false
@@ -270,7 +252,7 @@ struct InboxView: View {
     private func setMode(_ m: InboxMode) {
         withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
             mode = m
-            pageDrag = 0
+            pageDrag.x = 0
         }
     }
 
@@ -362,7 +344,7 @@ struct InboxView: View {
                     // towards Schedule (right). The other way rubber-bands.
                     let toward = mode == .schedule ? min(travel, 0) : max(travel, 0)
                     let away = mode == .schedule ? max(travel, 0) : min(travel, 0)
-                    pageDrag = toward + away * 0.2
+                    pageDrag.x = toward + away * 0.2
                 default:
                     break
                 }
