@@ -25,6 +25,9 @@ struct NoteEditorView: View {
     @State private var newFolderName = ""
     @FocusState private var titleFocused: Bool
     @State private var showBgColorPicker = false
+    /// Debounces body saves (see `NoteBodySaver`).
+    @State private var saver = NoteBodySaver()
+    @Environment(\.scenePhase) private var scenePhase
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
@@ -46,8 +49,7 @@ struct NoteEditorView: View {
                     .padding(.bottom, 8)
 
                 NoteBodyEditor(text: $bodyText, palette: palette, onEdit: { newBody in
-                    note.body = newBody           // writes bodyData + plainText
-                    note.modifiedAt = Date()
+                    saver.edited(newBody, note: note)
                 })
                 .padding(.horizontal, 12)
                 .padding(.top, 4)
@@ -98,7 +100,13 @@ struct NoteEditorView: View {
         .onChange(of: note.title) { _, _ in
             note.modifiedAt = Date()
         }
+        // Leaving the app mid-pause still writes the last edit.
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { saver.flush(note) }
+        }
         .onDisappear {
+            // Write any edit still waiting on the debounce first.
+            saver.flush(note)
             // Discard a note left blank, otherwise flush edits so the list row
             // (preview / modified order) reflects them right away.
             if note.isEmpty { context.delete(note) }
@@ -265,5 +273,37 @@ private struct NoteBackgroundPicker: View {
         .presentationCornerRadius(EvryRadius.panel)
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
+    }
+}
+
+// MARK: - Body saving
+
+/// Writes the note body a moment after typing pauses, instead of on every
+/// keystroke — each write re-archives the whole document (RTFD) and wakes the
+/// notes list behind the editor. A plain class (not observed), so recording
+/// an edit doesn't re-render the editor either.
+@MainActor
+final class NoteBodySaver {
+    private var pending: NSAttributedString?
+    private var task: Task<Void, Never>?
+
+    func edited(_ body: NSAttributedString, note: Note) {
+        pending = body
+        task?.cancel()
+        task = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            self?.flush(note)
+        }
+    }
+
+    /// Writes the waiting edit now (on pause, or when the editor closes).
+    func flush(_ note: Note) {
+        task?.cancel()
+        task = nil
+        guard let body = pending else { return }
+        pending = nil
+        note.body = body            // writes bodyData + plainText
+        note.modifiedAt = Date()
     }
 }

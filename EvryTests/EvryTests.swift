@@ -270,3 +270,30 @@ struct RecurrenceTests {
         }
     }
 }
+
+// MARK: - Note saving
+
+@MainActor
+struct NoteBodySaverTests {
+    @Test func flushWritesThePendingEdit() throws {
+        let ctx = try memoryContext()
+        let note = Note(title: "Trip")
+        ctx.insert(note)
+        let saver = NoteBodySaver()
+        saver.edited(NSAttributedString(string: "Pack boots"), note: note)
+        #expect(note.plainText.isEmpty)          // not written yet (debounced)
+        saver.flush(note)
+        #expect(note.plainText == "Pack boots")
+    }
+
+    @Test func debouncedEditLandsAfterThePause() async throws {
+        let ctx = try memoryContext()
+        let note = Note(title: "Trip")
+        ctx.insert(note)
+        let saver = NoteBodySaver()
+        saver.edited(NSAttributedString(string: "A"), note: note)
+        saver.edited(NSAttributedString(string: "AB"), note: note)
+        try await Task.sleep(for: .milliseconds(700))
+        #expect(note.plainText == "AB")
+    }
+}
