@@ -700,6 +700,7 @@ struct BrainDumpSheet: View {
         focused = false
         speech.stop()
         genStart = Date()
+        errorMessage = ""
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
         // Snapshot the container's current height (no animation) so the collapse
         // animates cleanly from full size, then transform in place.
@@ -754,7 +755,7 @@ struct BrainDumpSheet: View {
         .padding(.bottom, 40)
     }
 
-    private var inputEmpty: Bool { input.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var inputEmpty: Bool { input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     private var placeholderText: String {
         forNote ? "For example, “Ideas for the launch: landing page, email teaser, and a short demo video…”"
