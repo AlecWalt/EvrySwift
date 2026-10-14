@@ -32,9 +32,6 @@ struct ContentView: View {
     @Environment(PomodoroModel.self) private var pomodoro
     @Environment(MembershipRouter.self) private var membershipRouter
 
-    @Query private var allFolders: [Folder]
-    @Query private var allNotes: [Note]
-    @Query private var allTasks: [TaskItem]
     @AppStorage("membership_plan") private var membershipPlan = ""
     // Trial clock (first launch) + the hard-wall state derived from it.
     @AppStorage("app_first_used") private var firstUsed = ""
@@ -538,10 +535,13 @@ struct ContentView: View {
         let todayKey = AccomplishmentsStore.dateKey(Date())
         guard lastRecapDay != todayKey else { return }
         let yesterday = cal.date(byAdding: .day, value: -1, to: cal.startOfDay(for: Date())) ?? Date()
-        let tasks = allTasks.filter { t in
-            guard t.completed, let done = t.completedAt else { return false }
-            return cal.isDate(done, inSameDayAs: yesterday)
-        }.count
+        let today = cal.startOfDay(for: Date())
+        // A one-off fetch, not a root @Query — a query here re-rendered the
+        // whole app on every task change just for this once-a-day check.
+        let doneYesterday = FetchDescriptor<TaskItem>(predicate: #Predicate { t in
+            if let done = t.completedAt { t.completed && done >= yesterday && done < today } else { false }
+        })
+        let tasks = (try? modelContext.fetchCount(doneYesterday)) ?? 0
         let focus = FocusLog.minutes(on: yesterday)
         // Evaluate only once per day, whether or not we end up showing it.
         lastRecapDay = todayKey
@@ -549,9 +549,10 @@ struct ContentView: View {
         recapDate = yesterday
         recapTasks = tasks
         // The task goal follows the day: however many tasks were due then.
-        recapTaskGoal = allTasks.filter { t in
-            !t.isTrashed && !t.isNote && (t.dueDate.map { cal.isDate($0, inSameDayAs: yesterday) } ?? false)
-        }.count
+        let dueYesterday = FetchDescriptor<TaskItem>(predicate: #Predicate { t in
+            if let due = t.dueDate { t.deletedAt == nil && !t.isNote && due >= yesterday && due < today } else { false }
+        })
+        recapTaskGoal = (try? modelContext.fetchCount(dueYesterday)) ?? 0
         recapFocus = focus
         showDailyRecap = true
     }
