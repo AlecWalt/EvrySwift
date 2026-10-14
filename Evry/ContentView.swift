@@ -509,7 +509,10 @@ struct ContentView: View {
             item.dueDate = task.dueDate ?? Calendar.current.startOfDay(for: Date())
             item.priority = task.priority
             modelContext.insert(item)
+            // Same as every other way of adding tasks: a reminder, then save.
+            NotificationService.schedule(item)
         }
+        try? modelContext.save()
     }
 
     private func createNoteFromHandle(folder: Folder?) {

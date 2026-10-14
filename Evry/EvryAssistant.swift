@@ -90,7 +90,7 @@ extension EvryAssistant {
         )
         let tasks: [BrainPreviewTask] = response.content.tasks.compactMap { dumped in
             guard !isSchemaArtifact(dumped.title) else { return nil }
-            let parsed = parseTaskInput(dumped.title)
+            let parsed = parseSpokenTask(dumped.title)
             let priority: TaskPriority = switch dumped.priority.lowercased() {
             case "high":   .high
             case "medium": .medium
@@ -107,6 +107,29 @@ extension EvryAssistant {
         return tasks.isEmpty ? fallbackTasks(input) : tasks
     }
 
+    /// `parseTaskInput`, plus the relative day words people say ("today",
+    /// "tomorrow", "tonight") — which quick add leaves to its swipe gestures,
+    /// but which Distill must honour: "call mom tomorrow" is due tomorrow, and
+    /// the word comes out of the title.
+    static func parseSpokenTask(_ text: String) -> ParsedTask {
+        let parsed = parseTaskInput(text)
+        let pattern = #"(?i)\b(?:(?:on|for)\s+)?(tomorrow|today|tonight|this evening)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let m = regex.firstMatch(in: parsed.title, range: NSRange(parsed.title.startIndex..., in: parsed.title)),
+              let whole = Range(m.range, in: parsed.title), let word = Range(m.range(at: 1), in: parsed.title),
+              var day = EvryWhen.parse(String(parsed.title[word])) else { return parsed }
+        // Keep a time that was given ("tomorrow 3pm" → tomorrow at 3 PM).
+        if let d = parsed.date, EvryWhen.hasTime(d) {
+            let t = Calendar.current.dateComponents([.hour, .minute], from: d)
+            day = Calendar.current.date(bySettingHour: t.hour ?? 0, minute: t.minute ?? 0, second: 0, of: day) ?? day
+        }
+        var title = parsed.title
+        title.removeSubrange(whole)
+        title = title.split(separator: " ").joined(separator: " ")
+        return ParsedTask(title: title.isEmpty ? parsed.title : title, date: day,
+                          tags: parsed.tags, priority: parsed.priority)
+    }
+
     /// Splits the raw dump into tasks without the model — for very short input
     /// and as a safety net when the model returns nothing usable.
     static func fallbackTasks(_ input: String) -> [BrainPreviewTask] {
@@ -118,7 +141,7 @@ extension EvryAssistant {
             ? [input.trimmingCharacters(in: .whitespacesAndNewlines)]
             : pieces
         return sources.filter { !$0.isEmpty }.map { line in
-            let parsed = parseTaskInput(line)
+            let parsed = parseSpokenTask(line)
             return BrainPreviewTask(
                 title: parsed.title.isEmpty ? line : parsed.title,
                 dueDate: parsed.date ?? Calendar.current.startOfDay(for: Date()),
@@ -370,6 +393,10 @@ final class EvryConversation {
         let result: Reply
         if EvryAssistant.isAvailable, let modelReply = await modelReply(to: message, data: data, desk: desk) {
             result = modelReply
+        } else if !desk.log.isEmpty || !desk.pendingDeletes.isEmpty {
+            // The model ran tools and then failed to reply — the work is done,
+            // so don't run the keyword fallback too (it would add the task twice).
+            result = .answer("All set!")
         } else if let done = Self.fallbackAction(message, desk: desk) {
             result = .answer(done)
         } else {
@@ -412,9 +439,12 @@ final class EvryConversation {
         do {
             let response = try await session.respond(to: prompt, generating: ChatAnswer.self)
             let answer = response.content
-            guard answer.aboutApp else { return .offTopic }
+            let acted = !desk.log.isEmpty || !desk.pendingDeletes.isEmpty
+            // If tools ran, it was about the app whatever the flag says.
+            guard answer.aboutApp || acted else { return .offTopic }
             let text = Self.formatBullets(answer.reply.trimmingCharacters(in: .whitespacesAndNewlines))
-            return text.isEmpty ? nil : .answer(text)
+            if text.isEmpty { return acted ? .answer("All set!") : nil }
+            return .answer(text)
         } catch {
             return nil
         }
@@ -441,7 +471,9 @@ final class EvryConversation {
         let lower = message.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let leads = ["remind me to ", "remind me ", "add a task to ", "add a task ", "add task ",
                      "new task ", "create a task to ", "create a task ", "add ", "i need to ", "todo ", "to do "]
-        guard let lead = leads.first(where: { lower.hasPrefix($0) }) else { return nil }
+        guard let lead = leads.first(where: { lower.hasPrefix($0) }),
+              // "Add up…" is arithmetic, not "add a task".
+              !lower.hasPrefix("add up ") else { return nil }
         let rest = String(message.dropFirst(lead.count))
         // The date words go to the time; the rest is the title.
         var title = rest

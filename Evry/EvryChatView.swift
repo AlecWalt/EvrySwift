@@ -585,9 +585,13 @@ struct EvryChatOverlay: View {
 
     private func confirmDelete(_ pending: EvryPendingDelete, from message: ChatMessage) {
         resolved.insert(message.id)
-        actionDesk().confirm(pending)
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
-        reply("Deleted “\(pending.title)”.")
+        if actionDesk().confirm(pending) {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            reply("Deleted “\(pending.title)”.")
+        } else {
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            reply("I couldn’t delete “\(pending.title)” — please try again in the app.")
+        }
     }
 
     private func actionChip(_ title: String, message: ChatMessage, disabled: Bool) -> some View {
@@ -988,6 +992,7 @@ struct EvryChatOverlay: View {
             item.dueDate = task.dueDate ?? Calendar.current.startOfDay(for: Date())
             item.priority = task.priority
             context.insert(item)
+            NotificationService.schedule(item)
         }
         try? context.save()
         UINotificationFeedbackGenerator().notificationOccurred(.success)

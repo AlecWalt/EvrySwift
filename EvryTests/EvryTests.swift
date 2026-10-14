@@ -91,15 +91,37 @@ struct EvryWhenTests {
     }
 
     @Test func relativeMinutesWithoutSpace() {
-        withKnownIssue("B14: 'in 20min' reads as 20 weeks") {
-            let d = EvryWhen.parse("in 20min")
-            let gap = d.map { $0.timeIntervalSinceNow } ?? 0
-            #expect(abs(gap - 1200) < 120)
-        }
+        let d = EvryWhen.parse("in 20min")
+        let gap = d.map { $0.timeIntervalSinceNow } ?? 0
+        #expect(abs(gap - 1200) < 120)
     }
 
     @Test func emptyIsNil() {
         #expect(EvryWhen.parse("") == nil)
+    }
+}
+
+// MARK: - Distill's spoken days
+
+@MainActor
+struct SpokenTaskTests {
+    @Test func tomorrowLeavesTheTitleAndSetsTheDay() {
+        let p = EvryAssistant.parseSpokenTask("Call mom tomorrow")
+        #expect(p.title == "Call mom")
+        #expect(p.date.map { cal.isDateInTomorrow($0) } == true)
+    }
+
+    @Test func tomorrowKeepsAGivenTime() {
+        let p = EvryAssistant.parseSpokenTask("Gym tomorrow 7am")
+        #expect(p.title == "Gym")
+        #expect(p.date.map { cal.isDateInTomorrow($0) } == true)
+        #expect(hour(p.date) == 7)
+    }
+
+    @Test func plainTitlesAreUnchanged() {
+        let p = EvryAssistant.parseSpokenTask("Water the plants")
+        #expect(p.title == "Water the plants")
+        #expect(p.date == nil)
     }
 }
 
