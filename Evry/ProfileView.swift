@@ -140,7 +140,7 @@ struct ProfileView: View {
         .overlay(alignment: .top) { PullToSearchHint(pull: pull, palette: palette) }
         .background(pageBackground.ignoresSafeArea())
         .onAppear {
-            profileImage = UserDefaults.standard.data(forKey: "profile_image_data").flatMap(UIImage.init(data:))
+            loadProfileImage()
             if firstUsed.isEmpty {
                 firstUsed = profileISO8601.string(from: Date())
             }
@@ -150,9 +150,14 @@ struct ProfileView: View {
         .onChange(of: selectedPhoto) { _, item in
             // Load the full image, then let the user crop/zoom before saving.
             Task {
-                if let data = try? await item?.loadTransferable(type: Data.self),
-                   let img = CropImage.downsampled(data) {
-                    await MainActor.run { cropItem = CropImage(image: img); selectedPhoto = nil }
+                guard item != nil else { return }
+                let data = try? await item?.loadTransferable(type: Data.self)
+                let img = data.flatMap { CropImage.downsampled($0) }
+                // Clear the selection even when loading fails, so picking the
+                // same photo again still fires.
+                await MainActor.run {
+                    if let img { cropItem = CropImage(image: img) }
+                    selectedPhoto = nil
                 }
             }
         }
@@ -162,7 +167,8 @@ struct ProfileView: View {
                 UserDefaults.standard.set(jpeg, forKey: "profile_image_data")
             }
         }
-        .sheet(isPresented: $showSettings) {
+        // The photo can be changed in Settings › Account — pick it up on return.
+        .sheet(isPresented: $showSettings, onDismiss: loadProfileImage) {
             SettingsSheet()
         }
         .fullScreenCover(isPresented: $showSetupFlow) { SetupFlowView() }
@@ -247,6 +253,10 @@ struct ProfileView: View {
         }
     }
 
+    private func loadProfileImage() {
+        profileImage = UserDefaults.standard.data(forKey: "profile_image_data").flatMap(UIImage.init(data:))
+    }
+
     // MARK: Header
 
     /// Search on the left, settings on the right, the name, level title and
@@ -257,13 +267,13 @@ struct ProfileView: View {
                 Text(userName.isEmpty ? "Your name" : userName)
                     .font(.nunito(size: 26, weight: .heavy))
                     .tracking(-0.3)
-                    .foregroundStyle(Color.evryNavy)
+                    .foregroundStyle(palette.text)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                 Button { showCrests = true } label: {
                     Text("\(tier.title) · Lv. \(shownLevel)")
                         .font(.nunito(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.evryNavy.opacity(0.8))
+                        .foregroundStyle(palette.dark ? Color.evryWhite85 : Color.evryNavy.opacity(0.8))
                         .monospacedDigit()
                         .contentTransition(.numericText())
                         .animation(EvryMotion.settle, value: shownLevel)
@@ -963,7 +973,7 @@ struct SettingsSheet: View {
 
                                 Button {
                                     UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
-                                    // Second, deliberate confirmation — this can't be undone.
+                                    // Second, deliberate confirmation.
                                     showClearCompletedFinalConfirm = true
                                 } label: {
                                     Label(count > 0 ? "Delete \(count)" : "Delete", systemImage: "trash")
@@ -1038,7 +1048,7 @@ struct SettingsSheet: View {
         .evryConfirm(
             isPresented: $showClearCompletedFinalConfirm,
             title: "Delete \(clearCompletedCount) completed task\(clearCompletedCount == 1 ? "" : "s")?",
-            message: "This permanently removes them and can’t be undone.",
+            message: "They’ll move to Trash, where you can restore them for 30 days.",
             confirmTitle: "Delete \(clearCompletedCount)"
         ) {
             for task in completedTasks {
@@ -1191,13 +1201,13 @@ private struct ReportIssueSheet: View {
     private var last30dCount: Int { timestamps.filter { now.timeIntervalSince($0) < 30 * 86400 }.count }
 
     private var canSend: Bool {
-        last24hCount < 3 && last30dCount < 10 && !messageText.trimmingCharacters(in: .whitespaces).isEmpty
+        last24hCount < 3 && last30dCount < 10 && !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var emailBody: String {
         let name = userName.isEmpty ? "Not set" : userName
         let email = userEmail.isEmpty ? "Not set" : userEmail
-        let trimmed = messageText.trimmingCharacters(in: .whitespaces)
+        let trimmed = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         let device = UIDevice.current
         return "\(trimmed)\n\n---\nName: \(name)\nEmail: \(email)\nApp: \(appVersion)\niOS: \(device.systemVersion)\nDevice: \(device.model)"
     }
@@ -1514,9 +1524,14 @@ struct ProfileAccountSheet: View {
         }
         .onChange(of: selectedPhoto) { _, item in
             Task {
-                if let data = try? await item?.loadTransferable(type: Data.self),
-                   let img = CropImage.downsampled(data) {
-                    await MainActor.run { cropItem = CropImage(image: img); selectedPhoto = nil }
+                guard item != nil else { return }
+                let data = try? await item?.loadTransferable(type: Data.self)
+                let img = data.flatMap { CropImage.downsampled($0) }
+                // Clear the selection even when loading fails, so picking the
+                // same photo again still fires.
+                await MainActor.run {
+                    if let img { cropItem = CropImage(image: img) }
+                    selectedPhoto = nil
                 }
             }
         }
