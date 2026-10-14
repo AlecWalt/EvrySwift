@@ -5,7 +5,6 @@
 
 import EventKit
 import SwiftUI
-import SwiftData
 import UIKit
 
 // MARK: - Value types
@@ -16,7 +15,6 @@ struct CalendarEvent: Identifiable {
     let startDate: Date
     let endDate: Date
     let isAllDay: Bool
-    let calendarTitle: String
     let calendarColor: Color
     /// The live EKEvent this was built from — carried through so a tap can edit
     /// the exact event directly, without fragile identifier re-resolution.
@@ -37,7 +35,6 @@ final class CalendarService {
     var authStatus: EKAuthorizationStatus = EKEventStore.authorizationStatus(for: .event)
     var allCalendars: [EKCalendar] = []
     var selectedCalendarIDs: Set<String> = []
-    var importedEventIDs: Set<String> = []
     var hiddenCalendarIDs: Set<String> = []
 
     private let store = EKEventStore()
@@ -76,9 +73,6 @@ final class CalendarService {
     init() {
         if let ids = UserDefaults.standard.array(forKey: "evry_selected_calendar_ids") as? [String] {
             selectedCalendarIDs = Set(ids)
-        }
-        if let ids = UserDefaults.standard.array(forKey: "evry_imported_event_ids") as? [String] {
-            importedEventIDs = Set(ids)
         }
         if let ids = UserDefaults.standard.array(forKey: "evry_hidden_calendar_ids") as? [String] {
             hiddenCalendarIDs = Set(ids)
@@ -139,7 +133,6 @@ final class CalendarService {
                 startDate: ek.startDate,
                 endDate: ek.endDate,
                 isAllDay: ek.isAllDay,
-                calendarTitle: ek.calendar?.title ?? "",
                 calendarColor: Color(UIColor(cgColor: cgColor)),
                 ekEvent: ek
             )
@@ -152,14 +145,6 @@ final class CalendarService {
     /// Fetches the editable `EKEvent` behind a `CalendarEvent`, if it still exists.
     func ekEvent(withIdentifier id: String) -> EKEvent? {
         store.event(withIdentifier: id)
-    }
-
-    func importEvent(_ event: CalendarEvent, context: ModelContext) {
-        guard !importedEventIDs.contains(event.id) else { return }
-        let task = TaskItem(title: event.title, dueDate: event.startDate)
-        context.insert(task)
-        importedEventIDs.insert(event.id)
-        UserDefaults.standard.set(Array(importedEventIDs), forKey: "evry_imported_event_ids")
     }
 
     /// Saves a timed event to the default calendar. Returns false if not
