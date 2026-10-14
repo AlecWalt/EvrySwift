@@ -148,7 +148,9 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { processPendingSiriTasks(); checkDailyRecap(); evaluateAccess() }
         }
-        .task { checkDailyRecap() }
+        // A cold launch starts already active (no scenePhase change), so pick up
+        // anything Siri queued while the app wasn't running here too.
+        .task { processPendingSiriTasks(); checkDailyRecap() }
         // Subscribing (or its removal) flips access — re-check the wall. The trial
         // clock changing (e.g. the dev reset/expire tools) does too.
         .onChange(of: membershipPlan) { _, _ in evaluateAccess() }
@@ -278,6 +280,15 @@ struct ContentView: View {
         }
     }
 
+    /// VoiceOver label for the add pill — matches what its tap creates.
+    private var addHandleLabel: String {
+        switch selectedTab {
+        case .notes: notesNavState.activeScope == nil ? "Add folder" : "Add note"
+        case .habits: "Add habit"
+        default: "Add task"
+        }
+    }
+
     // MARK: Normal shell (tabs + bottom chrome)
 
     private var normalShell: some View {
@@ -324,6 +335,7 @@ struct ContentView: View {
             if showsAddHandle && !showAddHabit && !showAddTask && !showNewFolder {
                 SwipeHandle(
                     palette: palette,
+                    actionLabel: addHandleLabel,
                     action: {
                         switch selectedTab {
                         case .notes:
@@ -381,7 +393,12 @@ struct ContentView: View {
         for entry in pending {
             guard let title = entry["title"] as? String, !title.isEmpty else { continue }
             let dueDate = (entry["dueDate"] as? TimeInterval).map { Date(timeIntervalSince1970: $0) }
-            let task = TaskItem(title: title, dueDate: dueDate)
+            let task = TaskItem(
+                title: title,
+                dueDate: dueDate,
+                tags: entry["tags"] as? [String] ?? [],
+                priority: (entry["priority"] as? String).flatMap(TaskPriority.init(rawValue:)) ?? .normal
+            )
             modelContext.insert(task)
             NotificationService.schedule(task)
         }
