@@ -327,8 +327,7 @@ extension Font {
         case .bold:       "Nunito-Bold"
         case .semibold:   "Nunito-SemiBold"
         case .medium:     "Nunito-Medium"
-        case .light:      "Nunito-Light"
-        case .ultraLight, .thin: "Nunito-ExtraLight"
+        // The light faces aren't bundled (the app never uses them).
         default:          "Nunito-Regular"
         }
     }

@@ -476,8 +476,6 @@ extension UIFont {
     static func nunito(size: CGFloat, weight: UIFont.Weight = .regular, italic: Bool = false) -> UIFont {
         let base: String
         switch weight {
-        case .ultraLight, .thin: base = "ExtraLight"
-        case .light: base = "Light"
         case .medium: base = "Medium"
         case .semibold: base = "SemiBold"
         case .bold: base = "Bold"
