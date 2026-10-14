@@ -1161,7 +1161,6 @@ private struct BreathingOrb: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var breathe = false
-    @State private var sonar = false
 
     var body: some View {
         ZStack {
@@ -1169,14 +1168,7 @@ private struct BreathingOrb: View {
             // reads as "hearing you" without becoming busy.
             if listening && !reduceMotion {
                 ForEach(0..<2, id: \.self) { i in
-                    Circle()
-                        .stroke(palette.sky.opacity(0.4), lineWidth: 2)
-                        .scaleEffect(sonar ? 1.9 : 1.0)
-                        .opacity(sonar ? 0 : 0.5)
-                        .animation(
-                            .easeOut(duration: 1.8).repeatForever(autoreverses: false).delay(Double(i) * 0.9),
-                            value: sonar
-                        )
+                    SonarRing(color: palette.sky.opacity(0.4), delay: Double(i) * 0.9)
                 }
             }
             // Voice-responsive halo (calm: swells a little, never snaps).
@@ -1207,8 +1199,29 @@ private struct BreathingOrb: View {
         .animation(breathe ? .easeInOut(duration: 1.7).repeatForever(autoreverses: true) : nil, value: breathe)
         .onAppear {
             guard !reduceMotion else { return }
-            breathe = true; sonar = true
+            breathe = true
         }
+    }
+}
+
+/// One expanding, fading ring. It starts its own pulse when it appears — the
+/// rings are only inserted once listening begins, so a flag flipped earlier
+/// (on the orb's appear) never changed while they were on screen.
+private struct SonarRing: View {
+    let color: Color
+    let delay: Double
+    @State private var expanded = false
+
+    var body: some View {
+        Circle()
+            .stroke(color, lineWidth: 2)
+            .scaleEffect(expanded ? 1.9 : 1.0)
+            .opacity(expanded ? 0 : 0.5)
+            .onAppear {
+                withAnimation(.easeOut(duration: 1.8).repeatForever(autoreverses: false).delay(delay)) {
+                    expanded = true
+                }
+            }
     }
 }
 
