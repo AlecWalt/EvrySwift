@@ -2682,10 +2682,10 @@ struct ProfilePhotoCropper: View {
                                 withAnimation(EvryMotion.settle) { offset = clamped(moved, scale: scale) }
                             }
                             .simultaneously(with:
-                                MagnificationGesture()
-                                    .updating($pinch) { v, state, _ in state = v }
+                                MagnifyGesture()
+                                    .updating($pinch) { v, state, _ in state = v.magnification }
                                     .onEnded { v in
-                                        scale = min(4, max(1, scale * v))
+                                        scale = min(4, max(1, scale * v.magnification))
                                         // Zooming out can leave the photo off the window.
                                         withAnimation(EvryMotion.settle) { offset = clamped(offset, scale: scale) }
                                     }

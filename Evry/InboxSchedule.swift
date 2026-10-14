@@ -815,14 +815,14 @@ private struct EditableScheduleEvent: Identifiable {
 }
 
 private struct DotYKey: PreferenceKey {
-    static var defaultValue: [Int: CGFloat] = [:]
+    static let defaultValue: [Int: CGFloat] = [:]
     static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
         value.merge(nextValue(), uniquingKeysWith: { $1 })
     }
 }
 
 private struct EntryFrameKey: PreferenceKey {
-    static var defaultValue: [Int: CGRect] = [:]
+    static let defaultValue: [Int: CGRect] = [:]
     static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { $1 })
     }

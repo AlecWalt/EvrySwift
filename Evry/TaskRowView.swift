@@ -754,7 +754,7 @@ struct ScheduleSwipeCard<Content: View>: View {
 /// Collects each visible row's frame (keyed by task id) in the list's
 /// "dragSelect" coordinate space, so a drag can map the finger's Y to a row.
 struct SelectRowFrameKey: PreferenceKey {
-    static var defaultValue: [UUID: CGRect] = [:]
+    static let defaultValue: [UUID: CGRect] = [:]
     static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
         value.merge(nextValue()) { _, new in new }
     }

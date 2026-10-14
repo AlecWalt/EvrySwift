@@ -765,7 +765,7 @@ private struct InboxTimelineView: View {
 /// Carries the current day page's intrinsic content height up to the timeline
 /// container so it can size to the visible day (collapsed or with subtasks open).
 private struct TimelinePageHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
