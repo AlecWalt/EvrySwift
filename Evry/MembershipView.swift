@@ -1045,7 +1045,9 @@ struct MembershipPlansView: View {
         .evryConfirm(
             isPresented: $showCancelConfirm,
             title: "Cancel your Evry membership?",
-            message: "You’ll keep full access until the end of your billing period.",
+            // There's no billing yet (membership_plan is a local mock), so access
+            // ends right away — say so. Restore the billing-period copy with StoreKit.
+            message: "Your full access will end right away.",
             confirmTitle: "Yes",
             cancelTitle: "No"
         ) {
@@ -1187,7 +1189,7 @@ struct MembershipPlansView: View {
             }
             .buttonStyle(EvrySecondaryButtonStyle(palette: palette, fullWidth: true))
 
-            Text("You’ll keep full access until the end of your billing period.")
+            Text("Cancelling ends your full access right away.")
                 .font(.nunito(size: 14))
                 .foregroundStyle(palette.textMuted)
                 .multilineTextAlignment(.center)
