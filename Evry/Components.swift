@@ -380,11 +380,6 @@ struct EmptyStateView: View {
     }
 }
 
-let emptyMessages = [
-    "Nothing else left!", "All done for now.", "You’re all caught up!",
-    "A clear list. Enjoy it.", "Nice work — that’s everything.",
-]
-
 // MARK: - Checkbox (22pt circle, becomes the sky check disc when done)
 
 struct TaskCheckbox: View {

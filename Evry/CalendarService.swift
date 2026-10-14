@@ -159,17 +159,4 @@ final class CalendarService {
         event.calendar = store.defaultCalendarForNewEvents
         do { try store.save(event, span: .thisEvent); return true } catch { return false }
     }
-
-    @discardableResult
-    func saveAccomplishment(date: Date, title: String, notes: String) -> Bool {
-        guard isAuthorized else { return false }
-        let event = EKEvent(eventStore: store)
-        event.title = title
-        event.notes = notes
-        event.isAllDay = true
-        event.startDate = Calendar.current.startOfDay(for: date)
-        event.endDate = Calendar.current.startOfDay(for: date)
-        event.calendar = store.defaultCalendarForNewEvents
-        do { try store.save(event, span: .thisEvent); return true } catch { return false }
-    }
 }

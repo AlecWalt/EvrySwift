@@ -13,111 +13,6 @@
 
 import SwiftUI
 
-struct InboxDrawerMenu: View {
-    let palette: Palette
-    let mode: InboxMode
-    var onSelectMode: (InboxMode) -> Void
-    var onSelectTab: (AppTab) -> Void
-    var onOpenChat: () -> Void
-
-    @AppStorage("user_name") private var userName = ""
-
-    static let width: CGFloat = 288
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Evry")
-                .font(.evryWordmark)
-                .tracking(EvryTracking.wordmark)
-                .foregroundStyle(palette.text)
-                .padding(.horizontal, 20)
-                .padding(.top, 24)
-                .padding(.bottom, 24)
-
-            section("Today")
-            row("Schedule", icon: "calendar", selected: mode == .schedule) { onSelectMode(.schedule) }
-            row("Tasks", icon: "checkmark.square", selected: mode == .tasks) { onSelectMode(.tasks) }
-
-            section("Spaces")
-            row("Habits", icon: "arrow.triangle.2.circlepath") { onSelectTab(.habits) }
-            row("Notes", icon: "note.text") { onSelectTab(.notes) }
-
-            section("Assistant")
-            row("Chat with Evry", icon: "bubble.left.and.text.bubble.right") { onOpenChat() }
-
-            Spacer(minLength: 0)
-
-            Button { onSelectTab(.profile) } label: {
-                HStack(spacing: 12) {
-                    Text(initials)
-                        .font(.nunito(size: 15, weight: .heavy))
-                        .foregroundStyle(Color.evryNavy)
-                        .frame(width: 38, height: 38)
-                        .background(Color.evrySky, in: Circle())
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(userName.isEmpty ? "Your profile" : userName)
-                            .font(.evryLabel)
-                            .foregroundStyle(palette.text)
-                            .lineLimit(1)
-                        Text("Profile and settings")
-                            .font(.nunito(size: 13))
-                            .foregroundStyle(palette.textMuted)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 20)
-                .frame(minHeight: EvrySpace.storeHeight)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(PressScaleStyle(scale: 0.98))
-            .padding(.bottom, 12)
-        }
-        .frame(width: Self.width, alignment: .leading)
-        .frame(maxHeight: .infinity, alignment: .top)
-    }
-
-    private var initials: String {
-        let words = userName.split(separator: " ")
-        guard !words.isEmpty else { return "?" }
-        return words.prefix(2).compactMap { $0.first.map(String.init)?.uppercased() }.joined()
-    }
-
-    private func section(_ title: String) -> some View {
-        Text(title)
-            .font(.evrySmall)
-            .foregroundStyle(palette.textMuted)
-            .padding(.horizontal, 20)
-            .padding(.top, 14)
-            .padding(.bottom, 4)
-    }
-
-    private func row(_ title: String, icon: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.nunito(size: 16, weight: .semibold))
-                    .foregroundStyle(palette.text)
-                    .frame(width: 24)
-                    .accessibilityHidden(true)
-                Text(title)
-                    .font(.nunito(size: 16, weight: selected ? .bold : .semibold))
-                    .foregroundStyle(palette.text)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 14)
-            .frame(minHeight: EvrySpace.tap + 4)
-            .background(selected ? palette.hover : .clear,
-                        in: RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
-            .padding(.horizontal, 8)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressScaleStyle(scale: 0.98))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-    }
-}
-
 /// The main screen as a solid card that slides aside for the menu — sideways
 /// only, never shrinking or reshaping. Its corners are fixed to (about) the
 /// display's own radius, with a Liquid Glass rim and a soft navy shadow; at
@@ -153,6 +48,8 @@ struct GlassCardModifier: ViewModifier {
 @Observable
 final class InboxDrawerState {
     var progress: CGFloat = 0
+    /// How far the card slides aside — the width of the menu behind it.
+    static let menuWidth: CGFloat = 288
 }
 
 /// Moves a main-screen element with the Inbox card as it slides aside.
@@ -161,7 +58,7 @@ struct DrawerFollower: ViewModifier {
     @Environment(InboxDrawerState.self) private var drawer
 
     func body(content: Content) -> some View {
-        content.offset(x: active ? InboxDrawerMenu.width * drawer.progress : 0)
+        content.offset(x: active ? InboxDrawerState.menuWidth * drawer.progress : 0)
     }
 }
 
@@ -210,8 +107,7 @@ enum TabBarFader {
 
 /// The menu behind the Inbox card: a wheel of days to jump to, like setting an
 /// alarm in the Clock app — the system wheel, with its clicks and momentum.
-/// The card's day follows the wheel as it turns. (The earlier list-style menu,
-/// `InboxDrawerMenu`, is kept above in case it's wanted back.)
+/// The card's day follows the wheel as it turns.
 struct InboxDateWheel: View {
     @Binding var dayOffset: Int
     let palette: Palette
@@ -264,7 +160,7 @@ struct InboxDateWheel: View {
 
             Spacer(minLength: 0)
         }
-        .frame(width: InboxDrawerMenu.width, alignment: .leading)
+        .frame(width: InboxDrawerState.menuWidth, alignment: .leading)
         .frame(maxHeight: .infinity)
     }
 

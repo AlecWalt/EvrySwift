@@ -286,9 +286,8 @@ struct ContentView: View {
     private var normalShell: some View {
         TabView(selection: $selectedTab) {
             if tabInboxVisible {
-                InboxView(palette: palette, onEdit: { editingTask = $0 }, onDelete: deleteTask, onEnterFocusMode: enterFocusMode,
-                          onOpenChat: { showChat = true },
-                          onSelectTab: { tab in withAnimation(.easeInOut(duration: 0.25)) { selectedTab = tab } })
+                InboxView(palette: palette, onEdit: { editingTask = $0 }, onDelete: deleteTask,
+                          onOpenChat: { showChat = true })
                     .tabPageBackground(palette)
                     .tabItem { EvryTabLabel(tab: .inbox) }
                     .tag(AppTab.inbox)
