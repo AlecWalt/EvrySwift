@@ -12,10 +12,26 @@ import SwiftUI
 // MARK: - UserDefaults storage
 
 enum AccomplishmentsStore {
-    /// The per-day key used by FocusLog and the once-a-day recap guard.
+    /// The per-day key used by FocusLog and the once-a-day recap guard:
+    /// "2026-10-14", the same whatever the device's language or region (the old
+    /// locale-formatted key changed when they did, losing focus history).
     static func dateKey(_ date: Date) -> String {
+        dayFormatter.string(from: date)
+    }
+
+    /// The pre-fix, locale-formatted key — still read so earlier days count.
+    static func legacyDateKey(_ date: Date) -> String {
         date.formatted(.dateTime.year().month().day())
     }
+
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
 }
 
 // MARK: - Chart steps

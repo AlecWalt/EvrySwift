@@ -349,6 +349,26 @@ extension RecurrenceTests {
     }
 }
 
+// MARK: - Day keys
+
+@MainActor
+struct DayKeyTests {
+    @Test func dayKeyIsStableAndSortable() {
+        let d = cal.date(from: DateComponents(year: 2026, month: 4, day: 1, hour: 15))!
+        #expect(AccomplishmentsStore.dateKey(d) == "2026-04-01")
+    }
+
+    @Test func focusMinutesIncludeTheOldKey() {
+        let day = cal.date(from: DateComponents(year: 2001, month: 2, day: 3))!
+        let legacy = "focus_min_" + AccomplishmentsStore.legacyDateKey(day)
+        UserDefaults.standard.set(10, forKey: legacy)
+        defer { UserDefaults.standard.removeObject(forKey: legacy)
+                UserDefaults.standard.removeObject(forKey: "focus_min_" + AccomplishmentsStore.dateKey(day)) }
+        FocusLog.add(minutes: 5, on: day)
+        #expect(FocusLog.minutes(on: day) == 15)
+    }
+}
+
 // MARK: - Store queries
 
 @MainActor

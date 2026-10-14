@@ -23,7 +23,9 @@ enum FocusLog {
         UserDefaults.standard.set(UserDefaults.standard.integer(forKey: k) + minutes, forKey: k)
     }
     static func minutes(on date: Date) -> Int {
-        UserDefaults.standard.integer(forKey: key(date))
+        // Plus anything logged under the old locale-formatted key that day.
+        let legacy = "focus_min_" + AccomplishmentsStore.legacyDateKey(date)
+        return UserDefaults.standard.integer(forKey: key(date)) + UserDefaults.standard.integer(forKey: legacy)
     }
 }
 

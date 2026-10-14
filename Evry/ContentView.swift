@@ -536,7 +536,8 @@ struct ContentView: View {
     private func checkDailyRecap() {
         let cal = Calendar.current
         let todayKey = AccomplishmentsStore.dateKey(Date())
-        guard lastRecapDay != todayKey else { return }
+        // Already seen today (also under the old key format, on the update day).
+        guard lastRecapDay != todayKey, lastRecapDay != AccomplishmentsStore.legacyDateKey(Date()) else { return }
         let yesterday = cal.date(byAdding: .day, value: -1, to: cal.startOfDay(for: Date())) ?? Date()
         let today = cal.startOfDay(for: Date())
         // A one-off fetch, not a root @Query — a query here re-rendered the
