@@ -18,9 +18,16 @@ final class LiveSpeechInput {
     @ObservationIgnored private var engine: AVAudioEngine?
     @ObservationIgnored private var task: SFSpeechRecognitionTask?
     @ObservationIgnored private var request: SFSpeechAudioBufferRecognitionRequest?
+    /// A start is in flight on the background queue (isListening isn't set yet).
+    @ObservationIgnored private var starting = false
+    /// Bumped by every stop, so a start or a recognition callback from an older
+    /// session can tell it's stale and must not touch the current one.
+    @ObservationIgnored private var generation = 0
+    /// Serial, so one start's tap/engine setup finishes before the next begins.
+    @ObservationIgnored private let audioQueue = DispatchQueue(label: "evry.speech", qos: .userInitiated)
 
     func toggle() {
-        if isListening { stop(); return }
+        if isListening || starting { stop(); return }
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized:    startRecording()
         case .notDetermined: requestAndStart()
@@ -29,8 +36,12 @@ final class LiveSpeechInput {
     }
 
     func stop() {
-        if let engine, engine.isRunning {
-            engine.stop()
+        generation += 1
+        starting = false
+        if let engine {
+            if engine.isRunning { engine.stop() }
+            // Always remove the tap — one left behind (e.g. after the engine
+            // failed to start) makes the next installTap crash.
             engine.inputNode.removeTap(onBus: 0)
         }
         request?.endAudio()
@@ -52,40 +63,69 @@ final class LiveSpeechInput {
     private func startRecording() {
         if recognizer == nil { recognizer = SFSpeechRecognizer() }
         guard let recognizer, recognizer.isAvailable else { return }
+        guard !starting, !isListening else { return }
         let engine = self.engine ?? AVAudioEngine()
         self.engine = engine
+        starting = true
+        let gen = generation
         // Activating the audio session + starting the engine blocks for tens of
         // milliseconds; doing it on the main thread hitches the start-listening
         // animation. Run it off-main and flip `isListening` back on the main queue.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        audioQueue.async { [weak self] in
             guard let self else { return }
+            let node = engine.inputNode
+            // Clean slate: an earlier, cancelled start may have left its tap.
+            if engine.isRunning { engine.stop() }
+            node.removeTap(onBus: 0)
             do {
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.record, mode: .measurement, options: .duckOthers)
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
-            } catch { return }
+            } catch {
+                DispatchQueue.main.async { if self.generation == gen { self.starting = false } }
+                return
+            }
 
             let req = SFSpeechAudioBufferRecognitionRequest()
             req.shouldReportPartialResults = true
 
-            let node = engine.inputNode
             node.installTap(onBus: 0, bufferSize: 1024, format: node.outputFormat(forBus: 0)) { [weak self] buf, _ in
                 req.append(buf)
                 self?.updateLevel(buf)
             }
-            do { try engine.start() } catch { self.stop(); return }
+            do { try engine.start() } catch {
+                node.removeTap(onBus: 0)
+                // stop() touches observed state, so it runs on the main queue.
+                DispatchQueue.main.async { if self.generation == gen { self.stop() } }
+                return
+            }
 
             let task = recognizer.recognitionTask(with: req) { [weak self] result, err in
                 guard let self else { return }
                 if let r = result {
-                    DispatchQueue.main.async { self.transcript = r.bestTranscription.formattedString }
+                    DispatchQueue.main.async {
+                        if self.generation == gen { self.transcript = r.bestTranscription.formattedString }
+                    }
                 }
                 if err != nil || result?.isFinal == true {
-                    DispatchQueue.main.async { self.stop() }
+                    DispatchQueue.main.async { if self.generation == gen { self.stop() } }
                 }
             }
 
             DispatchQueue.main.async {
+                // Stopped while starting: undo this start instead of going live.
+                guard self.generation == gen else {
+                    // Leave the engine to a newer start if one is on its way
+                    // (it resets the engine itself); otherwise shut it down.
+                    if !self.starting && !self.isListening {
+                        engine.stop()
+                        node.removeTap(onBus: 0)
+                    }
+                    req.endAudio()
+                    task.cancel()
+                    return
+                }
+                self.starting = false
                 self.request = req
                 self.task = task
                 self.isListening = true
