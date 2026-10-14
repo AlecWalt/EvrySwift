@@ -2,7 +2,7 @@
 //  TaskLogic.swift
 //  Evry
 //
-//  Pure task logic ported from the webapp: stats/streaks (js/store.js)
+//  Pure task logic ported from the webapp: completion stats (js/store.js)
 //  and the next-action picker (js/utils/nextAction.js).
 //
 
@@ -18,30 +18,16 @@ struct DayCount: Identifiable {
     var id: Date { date }
 }
 
+/// Completion counts for the Profile's stats tiles and week chart.
 struct TaskStats {
-    let todayTotal: Int
-    let todayDone: Int
     let totalDone: Int
-    let total: Int
-    let streak: Int
-    let longestStreak: Int
     let weekData: [DayCount]
     let weekDone: Int
     let monthDone: Int
 }
 
-/// Today view membership: notes always; incomplete tasks due today or
-/// overdue; tasks completed today.
-func isTodayTask(_ t: TaskItem) -> Bool {
-    if t.isNote { return true }
-    if !t.completed && (isTodayDate(t.dueDate) || isOverdueDate(t.dueDate)) { return true }
-    if t.completed && isTodayDate(t.completedAt) { return true }
-    return false
-}
-
 func computeStats(_ tasks: [TaskItem]) -> TaskStats {
     let completable = tasks.filter { !$0.isNote }
-    let todayCompletable = tasks.filter { isTodayTask($0) && !$0.isNote }
 
     let cal = Calendar.current
     let now = Date()
@@ -57,50 +43,11 @@ func computeStats(_ tasks: [TaskItem]) -> TaskStats {
     }.count
 
     return TaskStats(
-        todayTotal: todayCompletable.count,
-        todayDone: todayCompletable.filter(\.completed).count,
         totalDone: completable.filter(\.completed).count,
-        total: completable.count,
-        streak: computeStreak(completable),
-        longestStreak: computeLongestStreak(completable),
         weekData: weekData(completable),
         weekDone: weekDone,
         monthDone: monthDone
     )
-}
-
-private func completionDays(_ tasks: [TaskItem]) -> Set<Date> {
-    Set(tasks.compactMap { $0.completedAt.map(startOfDay) })
-}
-
-private func computeStreak(_ tasks: [TaskItem]) -> Int {
-    let days = completionDays(tasks)
-    var cursor = startOfDay(Date())
-    if !days.contains(cursor) {
-        cursor = addDays(cursor, -1)
-    }
-    var streak = 0
-    while days.contains(cursor) {
-        streak += 1
-        cursor = addDays(cursor, -1)
-    }
-    return streak
-}
-
-private func computeLongestStreak(_ tasks: [TaskItem]) -> Int {
-    let days = completionDays(tasks).sorted()
-    var longest = 0, run = 0
-    var prev: Date?
-    for day in days {
-        if let prev, addDays(prev, 1) == day {
-            run += 1
-        } else {
-            run = 1
-        }
-        longest = max(longest, run)
-        prev = day
-    }
-    return longest
 }
 
 private func weekData(_ tasks: [TaskItem]) -> [DayCount] {

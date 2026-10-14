@@ -10,7 +10,6 @@
 
 import SwiftUI
 import SwiftData
-import UserNotifications
 import AppIntents
 import UIKit
 

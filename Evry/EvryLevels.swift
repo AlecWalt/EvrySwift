@@ -62,7 +62,6 @@ enum EvryXP {
         /// XP the current level needs in total.
         let needed: Int
         var fraction: Double { needed > 0 ? Double(into) / Double(needed) : 0 }
-        var toNext: Int { needed - into }
     }
 
     static func progress(for xp: Int) -> Progress {
@@ -98,8 +97,6 @@ enum CrestTier: Int, CaseIterable, Comparable {
     static func forLevel(_ level: Int) -> CrestTier {
         allCases.last { level >= $0.startLevel } ?? .plain
     }
-
-    var next: CrestTier? { CrestTier(rawValue: rawValue + 1) }
 
     /// The title shown under the person's name.
     var title: String {

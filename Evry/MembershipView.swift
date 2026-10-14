@@ -1064,8 +1064,8 @@ struct MembershipPlansView: View {
 
     private var billingToggle: some View {
         HStack(spacing: 0) {
-            BillingToggleTab(label: "Weekly",  badge: nil,        active: !isMonthly, palette: palette) { withAnimation(EvryMotion.settle) { isMonthly = false } }
-            BillingToggleTab(label: "Monthly", badge: nil,        active:  isMonthly, palette: palette) { withAnimation(EvryMotion.settle) { isMonthly = true  } }
+            BillingToggleTab(label: "Weekly",  active: !isMonthly, palette: palette) { withAnimation(EvryMotion.settle) { isMonthly = false } }
+            BillingToggleTab(label: "Monthly", active:  isMonthly, palette: palette) { withAnimation(EvryMotion.settle) { isMonthly = true  } }
         }
         .padding(4)
         .background(palette.hover, in: Capsule())
@@ -1202,25 +1202,14 @@ struct MembershipPlansView: View {
 
 private struct BillingToggleTab: View {
     let label: String
-    let badge: String?
     let active: Bool
     let palette: Palette
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Text(label)
-                    .font(.evryLabel)
-                if let badge {
-                    Text(badge)
-                        .font(.evryCaption)
-                        .foregroundStyle(Color.evryNavy)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .background(Color.evrySky, in: Capsule())
-                }
-            }
+            Text(label)
+                .font(.evryLabel)
             // Active segment: a white face with full ink (no fill colour).
             .foregroundStyle(active ? palette.text : palette.textSec)
             .frame(maxWidth: .infinity, minHeight: EvrySpace.tap)

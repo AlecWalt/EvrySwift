@@ -34,9 +34,6 @@ struct AddTaskSheet: View {
     /// Presented as a bottom overlay (not a system sheet) so there's no dimming
     /// layer; this drives its visibility.
     @Binding var isPresented: Bool
-    /// Seeds the due date when the typed text doesn't specify one — used by the
-    /// Calendar tab to drop a new task onto the selected day.
-    var defaultDate: Date? = nil
 
     @State private var text = ""
     @State private var notes = ""
@@ -649,7 +646,7 @@ struct AddTaskSheet: View {
         let task = TaskItem(
             title: parsed.title,
             // Return with no typed date lands on today.
-            dueDate: overrideDate ?? parsed.date ?? defaultDate ?? startOfDay(Date()),
+            dueDate: overrideDate ?? parsed.date ?? startOfDay(Date()),
             tags: parsed.tags,
             // A long-press high-priority flag wins over the parsed priority.
             priority: isHighPriority ? .high : parsed.priority,

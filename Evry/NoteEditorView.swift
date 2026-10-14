@@ -10,7 +10,6 @@
 
 import SwiftUI
 import SwiftData
-import UIKit
 
 struct NoteEditorView: View {
     @Bindable var note: Note

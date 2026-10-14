@@ -919,7 +919,7 @@ struct EvryChatOverlay: View {
         let now = Date()
         let tasks = ((try? context.fetch(FetchDescriptor<TaskItem>())) ?? []).filter { !$0.isTrashed && !$0.isNote }
         func record(_ t: TaskItem) -> EvryAppData.Task {
-            EvryAppData.Task(title: t.title, due: t.dueDate, done: t.completed, priority: t.priority.rawValue,
+            EvryAppData.Task(title: t.title, due: t.dueDate, priority: t.priority.rawValue,
                              folder: t.group?.name, notes: t.notes)
         }
         let open = tasks.filter { !$0.completed }
@@ -934,8 +934,7 @@ struct EvryChatOverlay: View {
                 EvryAppData.Note(title: n.title, folder: n.folder?.name,
                                  text: NoteBodyCodec.plainText(n.body)
                                     .replacingOccurrences(of: "•\t", with: "")
-                                    .replacingOccurrences(of: "\n", with: " "),
-                                 modified: n.modifiedAt)
+                                    .replacingOccurrences(of: "\n", with: " "))
             }
 
         let start = cal.startOfDay(for: now)

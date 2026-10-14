@@ -278,8 +278,8 @@ extension EvryAssistant {
 /// questions about. Built on the main actor from SwiftData / EventKit, then
 /// handed to the model as plain text.
 struct EvryAppData: Sendable {
-    struct Task: Sendable { let title: String; let due: Date?; let done: Bool; let priority: String; let folder: String?; let notes: String }
-    struct Note: Sendable { let title: String; let folder: String?; let text: String; let modified: Date }
+    struct Task: Sendable { let title: String; let due: Date?; let priority: String; let folder: String?; let notes: String }
+    struct Note: Sendable { let title: String; let folder: String?; let text: String }
     struct Event: Sendable { let title: String; let start: Date; let end: Date; let allDay: Bool }
     struct Habit: Sendable { let name: String; let doneToday: Bool }
 

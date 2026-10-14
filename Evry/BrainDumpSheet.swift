@@ -1229,7 +1229,6 @@ private struct BreathingOrb: View {
 /// app's completion-burst language to mark a task being pulled from the dump.
 private struct ExtractionRing: View {
     let color: Color
-    var delay: Double = 0
 
     @State private var scale: CGFloat = 0.7
     @State private var opacity: Double = 0
@@ -1242,7 +1241,7 @@ private struct ExtractionRing: View {
             .onAppear {
                 opacity = 0.6
                 scale = 0.9
-                withAnimation(.easeOut(duration: 0.55).delay(delay)) {
+                withAnimation(.easeOut(duration: 0.55)) {
                     scale = 2.4
                     opacity = 0
                 }

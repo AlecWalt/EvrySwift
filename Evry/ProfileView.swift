@@ -791,7 +791,6 @@ struct SettingsSheet: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(Appearance.self) private var appearance
     @Environment(CalendarService.self) private var calendarService
-    @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
     @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
@@ -2235,7 +2234,6 @@ private struct CalendarsSettingsView: View {
 // MARK: - Global Search Sheet
 
 struct GlobalSearchSheet: View {
-    @Environment(\.modelContext) private var context
     @Environment(\.colorScheme) private var scheme
     @Environment(Appearance.self) private var appearance
     @Environment(\.dismiss) private var dismiss

@@ -8,7 +8,6 @@
 
 import Foundation
 import SwiftData
-import UserNotifications
 
 enum TaskActions {
     /// Toggle completion. Completing a recurring task spins off its next

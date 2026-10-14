@@ -848,12 +848,6 @@ struct HabitMedal: View {
     let icon: String
     var size: CGFloat = 92
 
-    /// The medal's ink — kept under its old name for existing call sites; it's
-    /// text-safe (navy on light surfaces, sky on navy).
-    static let gold = Color(light: .evryNavy, dark: .evrySky)
-    /// The medal's fill / glow tone (sky).
-    static let goldLight = Color.evrySky
-
     var body: some View {
         ZStack {
             Circle()
