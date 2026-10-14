@@ -22,7 +22,9 @@ struct InboxView: View {
     @Environment(ProjectNavigationState.self) private var projectNavState
     /// Set by ContentView while the chat (with Evry) is open above this page.
     @Environment(\.evryAway) private var evryAwayAbove
-    @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    /// Trash is filtered in the store, not re-filtered in Swift on every access.
+    @Query(filter: #Predicate<TaskItem> { $0.deletedAt == nil },
+           sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
     // Current timeline day (0 = today). Owned here so the shared header can show
     // the day title; the paging drag itself lives in InboxTimelineView.
     @State private var timelineDayOffset = 0
@@ -75,7 +77,7 @@ struct InboxView: View {
     // A task being dragged from Tasks onto the Schedule.
     @State private var scheduleDrag = ScheduleDragState()
 
-    private var tasks: [TaskItem] { allTasks.filter { !$0.isTrashed && (!hideNotes || !$0.isNote) } }
+    private var tasks: [TaskItem] { hideNotes ? allTasks.filter { !$0.isNote } : allTasks }
 
     var body: some View {
         swipeLayoutBody
@@ -169,10 +171,10 @@ struct InboxView: View {
 
     private var tasksPage: some View {
         VStack(spacing: 0) {
-            let overdueCount = globalOverdueTasks.count
-            if overdueCount > 0 {
-                overdueBanner(count: overdueCount)
-                    .animation(.spring(response: 0.4, dampingFraction: 0.85), value: overdueCount)
+            let overdue = globalOverdueTasks
+            if !overdue.isEmpty {
+                overdueBanner(overdue)
+                    .animation(.spring(response: 0.4, dampingFraction: 0.85), value: overdue.count)
             }
 
             InboxTimelineView(
@@ -546,11 +548,15 @@ struct InboxView: View {
 
     private var globalOverdueTasks: [TaskItem] {
         let today = Calendar.current.startOfDay(for: Date())
-        return tasks.filter { !$0.completed && !$0.isNote && $0.deletedAt == nil }
-            .filter { d in guard let due = d.dueDate else { return false }; return due < today }
+        return tasks.filter { t in
+            guard !t.completed, !t.isNote, let due = t.dueDate else { return false }
+            return due < today
+        }
     }
 
-    private func overdueBanner(count: Int) -> some View {
+    private func overdueBanner(_ overdue: [TaskItem]) -> some View {
+        let count = overdue.count
+        return
         // No red: urgency is carried by the alert glyph and the words, on a calm
         // sky-soft panel with a sky ring.
         HStack(spacing: 10) {
@@ -569,7 +575,7 @@ struct InboxView: View {
                 BurstPillButton(title: "Move all to today", color: Palette.danger) {
                     let today = Calendar.current.startOfDay(for: Date())
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
-                        for task in globalOverdueTasks { task.dueDate = today }
+                        for task in overdue { task.dueDate = today }
                     }
                 }
             }
@@ -737,7 +743,7 @@ private struct InboxTimelineView: View {
     private func dayPage(for date: Date, off: Int) -> some View {
         let dayTasks = tasks.filter { t in
             guard let due = t.dueDate else { return false }
-            return cal.isDate(due, inSameDayAs: date) && !t.isTrashed
+            return cal.isDate(due, inSameDayAs: date)
         }
         TimelineDayPage(
             date: date,
@@ -877,8 +883,9 @@ private struct TimelineDayPage: View {
                     if !activeTasks.isEmpty {
                         VStack(spacing: 8) {
                             // Loose tasks reorder among themselves.
+                            let preview = reorderPreview(for: ungrouped)
                             ForEach(ungrouped) { task in
-                                timelineRow(task, in: ungrouped)
+                                timelineRow(task, in: ungrouped, preview: preview)
                             }
                             // Grouped tasks live inside collapsible folders.
                             ForEach(groupSections, id: \.group.uid) { section in
@@ -922,8 +929,9 @@ private struct TimelineDayPage: View {
                         .timelineScrollFade()
                         if showCompleted {
                             VStack(spacing: 8) {
+                                let preview = reorderPreview(for: completedDayTasks)
                                 ForEach(completedDayTasks) { task in
-                                    timelineRow(task, in: completedDayTasks)
+                                    timelineRow(task, in: completedDayTasks, preview: preview)
                                 }
                             }
                             .padding(.horizontal, 20)
@@ -970,14 +978,18 @@ private struct TimelineDayPage: View {
 
     /// The day's grouped tasks, bucketed by folder in folder sort order.
     private func groupedSections(_ active: [TaskItem]) -> [(group: TaskGroup, members: [TaskItem])] {
-        let withGroup = active.filter { $0.group != nil }
-        var order: [UUID] = []
-        for t in withGroup where !order.contains(t.group!.uid) { order.append(t.group!.uid) }
-        return order.compactMap { id -> (group: TaskGroup, members: [TaskItem])? in
-            guard let group = withGroup.first(where: { $0.group?.uid == id })?.group else { return nil }
-            return (group, withGroup.filter { $0.group?.uid == id })
+        // One pass; members keep their order within each folder.
+        var groups: [UUID: TaskGroup] = [:]
+        var members: [UUID: [TaskItem]] = [:]
+        for t in active {
+            guard let g = t.group else { continue }
+            groups[g.uid] = g
+            members[g.uid, default: []].append(t)
         }
-        .sorted { $0.group.sortOrder < $1.group.sortOrder }
+        return groups.values
+            // Stable order even when two folders share a sortOrder.
+            .sorted { ($0.sortOrder, $0.createdAt) < ($1.sortOrder, $1.createdAt) }
+            .map { ($0, members[$0.uid] ?? []) }
     }
 
     /// A collapsible folder holding grouped tasks, marked with its sky/navy shade.
@@ -1031,8 +1043,9 @@ private struct TimelineDayPage: View {
 
             if expanded {
                 VStack(spacing: 8) {
+                    let preview = reorderPreview(for: members)
                     ForEach(members) { task in
-                        timelineRow(task, in: members)
+                        timelineRow(task, in: members, preview: preview)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1065,30 +1078,12 @@ private struct TimelineDayPage: View {
     /// A horizontal swipe sets `taskSwiping` so the day filmstrip stands down and
     /// the swipe doesn't page the day.
     @ViewBuilder
-    private func timelineRow(_ task: TaskItem, in items: [TaskItem]) -> some View {
+    private func timelineRow(_ task: TaskItem, in items: [TaskItem], preview: ReorderPreview) -> some View {
         let isSelf = draggingID == task.uid
-        // Live reorder preview: work out where every row sits in the previewed new
-        // order, so non-dragged rows shift to open a gap under the hovered spot.
-        let plan = draggingID.map { reorderPlan(draggedID: $0, in: items, offset: dragOffset) }
-        let inGroup = plan?.group.contains { $0.uid == task.uid } ?? false
-        let stride = dragStride
-        let neighborShift: CGFloat = {
-            guard let plan, !inGroup,
-                  let newIdx = plan.newItems.firstIndex(where: { $0.uid == task.uid }),
-                  let origIdx = items.firstIndex(where: { $0.uid == task.uid }) else { return 0 }
-            return CGFloat(newIdx - origIdx) * stride
-        }()
-        // Selected rows gather into a contiguous stack under the finger; everyone
-        // else steps to its previewed slot.
-        let yOff: CGFloat = {
-            guard inGroup, let plan, let draggedID = draggingID,
-                  let gi = plan.group.firstIndex(where: { $0.uid == task.uid }),
-                  let gd = plan.group.firstIndex(where: { $0.uid == draggedID }),
-                  let oi = items.firstIndex(where: { $0.uid == task.uid }),
-                  let od = items.firstIndex(where: { $0.uid == draggedID })
-            else { return neighborShift }
-            return dragOffset + CGFloat((od - oi) + (gi - gd)) * stride
-        }()
+        let inGroup = preview.lifted.contains(task.uid)
+        let yOff = preview.yOffset[task.uid] ?? 0
+        // Only rows stepping aside animate; the lifted stack follows the finger.
+        let neighborShift: CGFloat = inGroup ? 0 : yOff
         let elevated = inGroup
         let isLifted = scheduleDrag.liftedID == task.uid
         let isCarried = isLifted && scheduleDrag.task?.uid == task.uid
@@ -1301,6 +1296,34 @@ private struct TimelineDayPage: View {
         guard ys.count >= 2 else { return 78 }
         let gaps = zip(ys.dropFirst(), ys).map { $0 - $1 }.filter { $0 > 8 }
         return gaps.min() ?? 78
+    }
+
+    /// Every row's live offset for the current reorder drag, worked out once per
+    /// list (not once per row): the lifted rows gather into a stack under the
+    /// finger, everyone else steps to their previewed slot.
+    private struct ReorderPreview {
+        var yOffset: [UUID: CGFloat] = [:]
+        var lifted: Set<UUID> = []
+    }
+
+    private func reorderPreview(for items: [TaskItem]) -> ReorderPreview {
+        guard let draggedID = draggingID else { return ReorderPreview() }
+        let plan = reorderPlan(draggedID: draggedID, in: items, offset: dragOffset)
+        func indexMap(_ list: [TaskItem]) -> [UUID: Int] {
+            Dictionary(list.enumerated().map { ($1.uid, $0) }, uniquingKeysWith: { a, _ in a })
+        }
+        let orig = indexMap(items), moved = indexMap(plan.newItems), stack = indexMap(plan.group)
+        var out = ReorderPreview(lifted: Set(stack.keys))
+        guard let od = orig[draggedID], let gd = stack[draggedID] else { return out }
+        for task in items {
+            guard let oi = orig[task.uid] else { continue }
+            if let gi = stack[task.uid] {
+                out.yOffset[task.uid] = dragOffset + CGFloat((od - oi) + (gi - gd)) * dragStride
+            } else if let ni = moved[task.uid] {
+                out.yOffset[task.uid] = CGFloat(ni - oi) * dragStride
+            }
+        }
+        return out
     }
 
     /// The previewed ordering for the current drag: the dragged task — plus the
