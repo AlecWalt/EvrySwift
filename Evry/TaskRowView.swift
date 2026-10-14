@@ -269,19 +269,24 @@ struct TaskRowView: View {
 
     private func openDirections(_ provider: MapsProvider) {
         let query = task.location.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let url: URL?
         switch provider {
         case .apple:
-            url = URL(string: "http://maps.apple.com/?daddr=\(query)&dirflg=d")
+            if let url = URL(string: "https://maps.apple.com/?daddr=\(query)&dirflg=d") {
+                UIApplication.shared.open(url)
+            }
         case .google:
-            if let app = URL(string: "comgooglemaps://?daddr=\(query)&directionsmode=driving"),
-               UIApplication.shared.canOpenURL(app) {
-                url = app
-            } else {
-                url = URL(string: "https://www.google.com/maps/dir/?api=1&destination=\(query)")
+            // Try the Google Maps app; if it isn't installed the open fails and
+            // the web version opens instead. (canOpenURL would need the scheme
+            // listed in LSApplicationQueriesSchemes, so it always said no.)
+            let web = URL(string: "https://www.google.com/maps/dir/?api=1&destination=\(query)")
+            guard let app = URL(string: "comgooglemaps://?daddr=\(query)&directionsmode=driving") else {
+                if let web { UIApplication.shared.open(web) }
+                return
+            }
+            UIApplication.shared.open(app) { opened in
+                if !opened, let web { UIApplication.shared.open(web) }
             }
         }
-        if let url { UIApplication.shared.open(url) }
     }
 
     /// "at 3:00 PM" when the task's due date carries an explicit (non-midnight)
