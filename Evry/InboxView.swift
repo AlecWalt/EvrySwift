@@ -556,10 +556,9 @@ struct InboxView: View {
 
     private func overdueBanner(_ overdue: [TaskItem]) -> some View {
         let count = overdue.count
-        return
         // No red: urgency is carried by the alert glyph and the words, on a calm
         // sky-soft panel with a sky ring.
-        HStack(spacing: 10) {
+        return HStack(spacing: 10) {
             Image(systemName: "exclamationmark.circle.fill")
                 .font(.nunito(size: 15, weight: .bold))
                 .foregroundStyle(Palette.danger)
