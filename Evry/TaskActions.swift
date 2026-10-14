@@ -14,6 +14,7 @@ enum TaskActions {
     /// occurrence immediately, same as the webapp.
     static func toggle(_ task: TaskItem, context: ModelContext) {
         let completing = !task.completed
+        let completedBefore = task.completedAt
         task.completed = completing
         task.completedAt = completing ? Date() : nil
 
@@ -25,19 +26,54 @@ enum TaskActions {
             NotificationService.schedule(task)
         }
 
-        if completing, let recurrence = task.recurrence, let due = task.dueDate {
-            let next = TaskItem(
-                title: task.title,
-                dueDate: recurrence.nextOccurrence(after: due),
-                tags: task.tags,
-                priority: task.priority,
-                notes: task.notes,
-                isNote: task.isNote
-            )
-            next.recurrence = recurrence
-            next.subtasks = task.subtasks.map { SubtaskData(title: $0.title) }
+        guard let recurrence = task.recurrence, let due = task.dueDate else { return }
+        let nextDue = recurrence.nextOccurrence(after: due)
+        if completing {
+            let next = clone(task, title: task.title, dueDate: nextDue)
             context.insert(next)
+            NotificationService.schedule(next)
+        } else if let completedBefore {
+            // Un-completing takes back the occurrence that completing spun off
+            // (if it hasn't been touched since) — otherwise toggling on and off
+            // piles up copies.
+            removeSpawnedOccurrence(of: task, due: nextDue, spawnedAfter: completedBefore, context: context)
         }
+    }
+
+    /// A fresh, open copy of `task` — everything the person set on it, minus
+    /// completion and subtask ticks.
+    private static func clone(_ task: TaskItem, title: String, dueDate: Date?) -> TaskItem {
+        let copy = TaskItem(
+            title: title,
+            dueDate: dueDate,
+            tags: task.tags,
+            priority: task.priority,
+            notes: task.notes,
+            location: task.location,
+            isNote: task.isNote,
+            // Carry the task's own location over as-is (empty stays empty).
+            autoLocation: false
+        )
+        copy.recurrence = task.recurrence
+        copy.pinned = task.pinned
+        copy.group = task.group
+        copy.subtasks = task.subtasks.map { SubtaskData(title: $0.title) }
+        return copy
+    }
+
+    private static func removeSpawnedOccurrence(of task: TaskItem, due: Date, spawnedAfter: Date,
+                                                context: ModelContext) {
+        let title = task.title
+        let candidates = FetchDescriptor<TaskItem>(predicate: #Predicate {
+            $0.title == title && !$0.completed && $0.deletedAt == nil
+        })
+        let spawned = ((try? context.fetch(candidates)) ?? []).first { t in
+            t.uid != task.uid && t.recurrenceRaw == task.recurrenceRaw && t.dueDate == due
+                && t.createdAt >= spawnedAfter.addingTimeInterval(-2)
+        }
+        guard let spawned else { return }
+        NotificationService.cancel(spawned.uid)
+        context.delete(spawned)
     }
 
     /// Soft delete — the task goes to trash (30-day retention) so the
@@ -75,8 +111,10 @@ enum TaskActions {
     }
 
     static func snooze(_ task: TaskItem) {
-        guard let due = task.dueDate else { return }
-        task.dueDate = Calendar.current.date(byAdding: .day, value: 1, to: due)
+        guard let due = task.dueDate,
+              let next = Calendar.current.date(byAdding: .day, value: 1, to: due) else { return }
+        // Through reschedule, so the reminder moves with it.
+        reschedule(task, to: next)
     }
 
     /// Move a task's due date to `date` and reschedule its notification.
@@ -94,17 +132,22 @@ enum TaskActions {
     }
 
     static func duplicate(_ task: TaskItem, context: ModelContext) {
-        let copy = TaskItem(
-            title: "\(task.title) (copy)",
-            dueDate: task.dueDate,
-            tags: task.tags,
-            priority: task.priority,
-            notes: task.notes,
-            isNote: task.isNote
-        )
-        copy.recurrence = task.recurrence
-        copy.subtasks = task.subtasks.map { SubtaskData(title: $0.title) }
+        let copy = clone(task, title: "\(task.title) (copy)", dueDate: task.dueDate)
         context.insert(copy)
+        NotificationService.schedule(copy)
+    }
+
+    /// Moves overdue tasks onto today, keeping any time they had (and their
+    /// reminders), then saves.
+    static func moveToToday(_ tasks: [TaskItem], context: ModelContext) {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        for task in tasks {
+            let time = task.dueDate.map { cal.dateComponents([.hour, .minute], from: $0) }
+            let date = cal.date(bySettingHour: time?.hour ?? 0, minute: time?.minute ?? 0, second: 0, of: today) ?? today
+            reschedule(task, to: date)
+        }
+        try? context.save()
     }
 
     /// Tasks always have a due date. Any saved before that rule (e.g. added

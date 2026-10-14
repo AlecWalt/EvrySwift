@@ -573,9 +573,8 @@ struct InboxView: View {
 
             if !hideReschedule {
                 BurstPillButton(title: "Move all to today", color: Palette.danger) {
-                    let today = Calendar.current.startOfDay(for: Date())
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
-                        for task in overdue { task.dueDate = today }
+                        TaskActions.moveToToday(overdue, context: context)
                     }
                 }
             }

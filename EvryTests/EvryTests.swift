@@ -265,9 +265,7 @@ struct RecurrenceTests {
         TaskActions.toggle(task, context: ctx)
         TaskActions.toggle(task, context: ctx)
         let open = try ctx.fetch(FetchDescriptor<TaskItem>()).filter { !$0.isTrashed }
-        withKnownIssue("B7: un-completing leaves the spawned copy") {
-            #expect(open.count == 1)
-        }
+        #expect(open.count == 1)
     }
 }
 
@@ -295,6 +293,37 @@ struct NoteBodySaverTests {
         saver.edited(NSAttributedString(string: "AB"), note: note)
         try await Task.sleep(for: .milliseconds(700))
         #expect(note.plainText == "AB")
+    }
+}
+
+extension RecurrenceTests {
+    @Test func spawnedCopyKeepsLocationPinAndFolder() throws {
+        let ctx = try context()
+        let group = TaskGroup(name: "Home")
+        ctx.insert(group)
+        let task = TaskItem(title: "Water plants", dueDate: startOfDay(Date()),
+                            location: "Back garden", autoLocation: false)
+        task.recurrence = .daily
+        task.pinned = true
+        task.group = group
+        ctx.insert(task)
+        TaskActions.toggle(task, context: ctx)
+        let next = try #require(try ctx.fetch(FetchDescriptor<TaskItem>()).first { !$0.completed })
+        #expect(next.location == "Back garden")
+        #expect(next.pinned)
+        #expect(next.group?.uid == group.uid)
+    }
+
+    @Test func moveToTodayKeepsTheTime() throws {
+        let ctx = try context()
+        let twoDaysAgo3pm = cal.date(bySettingHour: 15, minute: 30, second: 0,
+                                     of: cal.date(byAdding: .day, value: -2, to: Date())!)!
+        let task = TaskItem(title: "Call", dueDate: twoDaysAgo3pm, autoLocation: false)
+        ctx.insert(task)
+        TaskActions.moveToToday([task], context: ctx)
+        #expect(task.dueDate.map { cal.isDateInToday($0) } == true)
+        #expect(hour(task.dueDate) == 15)
+        #expect(minute(task.dueDate) == 30)
     }
 }
 
