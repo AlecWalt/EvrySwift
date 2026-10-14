@@ -56,7 +56,6 @@ struct ProfileView: View {
 
     @Environment(\.requestReview) private var requestReview
     @Environment(CalendarService.self) private var calendarService
-    @Environment(TourCoordinator.self) private var tourCoordinator
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @AppStorage("user_name") private var userName = ""

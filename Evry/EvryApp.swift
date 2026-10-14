@@ -27,7 +27,6 @@ struct EvryApp: App {
     @State private var appearance = Appearance()
     @State private var pomodoro = PomodoroModel()
     @State private var calendarService = CalendarService()
-    @State private var tourCoordinator = TourCoordinator()
     @State private var membershipRouter = MembershipRouter()
 
     init() {
@@ -72,7 +71,6 @@ struct EvryApp: App {
                 .environment(appearance)
                 .environment(pomodoro)
                 .environment(calendarService)
-                .environment(tourCoordinator)
                 .environment(membershipRouter)
                 // The one ink colour: navy in light, sky in dark (== palette.primary).
                 // Nothing else in the app sets an accent.

@@ -31,7 +31,6 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(Appearance.self) private var appearance
     @Environment(PomodoroModel.self) private var pomodoro
-    @Environment(TourCoordinator.self) private var tourCoordinator
     @Environment(MembershipRouter.self) private var membershipRouter
 
     @Query private var allFolders: [Folder]
@@ -146,25 +145,6 @@ struct ContentView: View {
         .background(DailyGoalXPWatcher())
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
-        .overlay {
-            if tourCoordinator.isActive {
-                // The tour's Evry is the one on screen while it runs.
-                TourOverlayView()
-                    .environment(\.evryAway, false)
-            }
-        }
-        .onChange(of: tourCoordinator.currentStep) { _, _ in
-            guard tourCoordinator.isActive else { return }
-            withAnimation(.easeInOut(duration: 0.3)) { selectedTab = tourCoordinator.currentTab }
-        }
-        .onChange(of: tourCoordinator.isActive) { _, active in
-            if active {
-                insertTourSampleData()
-                withAnimation(.easeInOut(duration: 0.3)) { selectedTab = tourCoordinator.currentTab }
-            } else {
-                deleteTourSampleData()
-            }
-        }
         .onChange(of: projectNavState.requestedTab) { _, tab in
             guard let tab else { return }
             withAnimation(.easeInOut(duration: 0.25)) { selectedTab = tab }
@@ -248,7 +228,7 @@ struct ContentView: View {
         // Evry is never in two places at once: while Evry is in the chat, the
         // guided tour or the daily recap sheet, every Evry on the page
         // underneath steps away (each of those resets it for its own Evry).
-        .environment(\.evryAway, showChat || tourCoordinator.isActive || showDailyRecap)
+        .environment(\.evryAway, showChat || showDailyRecap)
         // The chat with Evry — a system sheet, so on iOS 26+ it floats as a
         // Liquid Glass bottom card with display-concentric corners.
         .sheet(isPresented: $showChat) {
@@ -389,49 +369,19 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Tour sample data
+    // MARK: Leftover tour data
 
-    private static let tourSampleKey = "tourSampleUIDs"
-
-    private func insertTourSampleData() {
-        let today = startOfDay(Date())
-
-        let tasks: [TaskItem] = [
-            TaskItem(title: "Design new homepage layout",
-                     dueDate: today,
-                     tags: ["design"], priority: .high),
-            TaskItem(title: "Team standup",
-                     dueDate: today),
-            TaskItem(title: "Write API documentation",
-                     dueDate: addDays(today, 3),
-                     tags: ["dev"], priority: .medium),
-            TaskItem(title: "Buy groceries"),
-            TaskItem(title: "Prepare Q3 report",
-                     dueDate: addDays(today, 5),
-                     tags: ["work"], priority: .high),
-        ]
-        for task in tasks { modelContext.insert(task) }
-        try? modelContext.save()
-
-        let ids = tasks.map(\.uid).map(\.uuidString)
-        UserDefaults.standard.set(ids, forKey: Self.tourSampleKey)
-    }
-
-    private func deleteTourSampleData() {
-        let stored = UserDefaults.standard.stringArray(forKey: Self.tourSampleKey) ?? []
+    /// The guided tour was removed. Installs that force-quit mid-tour may still
+    /// hold its sample tasks — delete them once. (Safe to remove after a release.)
+    private func cleanupLeftoverTourSampleData() {
+        let key = "tourSampleUIDs"
+        let stored = UserDefaults.standard.stringArray(forKey: key) ?? []
         guard !stored.isEmpty else { return }
         let ids = Set(stored.compactMap(UUID.init(uuidString:)))
         let allTasks = (try? modelContext.fetch(FetchDescriptor<TaskItem>())) ?? []
         for t in allTasks where ids.contains(t.uid) { modelContext.delete(t) }
         try? modelContext.save()
-        UserDefaults.standard.removeObject(forKey: Self.tourSampleKey)
-    }
-
-    // Cleans up sample data left behind by a previous force-quit during a tour.
-    private func cleanupLeftoverTourSampleData() {
-        let stored = UserDefaults.standard.stringArray(forKey: Self.tourSampleKey) ?? []
-        guard !stored.isEmpty else { return }
-        deleteTourSampleData()
+        UserDefaults.standard.removeObject(forKey: key)
     }
 
     // Processes any tasks queued by AddTaskIntent via UserDefaults.
@@ -701,7 +651,6 @@ private struct TrialCountdownBar: View {
         .environment(Appearance())
         .environment(PomodoroModel())
         .environment(CalendarService())
-        .environment(TourCoordinator())
         .environment(MembershipRouter())
         .modelContainer(for: [TaskItem.self, Note.self, Folder.self], inMemory: true)
 }
