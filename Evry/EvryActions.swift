@@ -110,6 +110,7 @@ final class EvryActionDesk {
                             priority: highPriority ? .high : parsed.priority,
                             notes: notes.trimmingCharacters(in: .whitespacesAndNewlines))
         context.insert(task)
+        CoreHooks.taskCreated(task)
         // A timed task gets its reminder at that time.
         NotificationService.schedule(task)
         try? context.save()
@@ -249,6 +250,8 @@ final class EvryActionDesk {
         let note = Note(title: title.isEmpty ? "New note" : title, body: body)
         context.insert(note)
         try? context.save()
+        CoreHooks.noteSaved(note)
+        EvryXP.rollBonus(.noteCreated)
         record(.note, note.title, "Note saved")
         return "Created the note \"\(note.title)\"."
     }
@@ -289,6 +292,7 @@ final class EvryActionDesk {
             do { try calendar.eventStore.remove(event, span: .thisEvent, commit: true) } catch { return false }
         case .note(let note):
             note.deletedAt = Date()
+            CoreHooks.noteDeleted(note)
         }
         do { try context.save() } catch { return false }
         return true

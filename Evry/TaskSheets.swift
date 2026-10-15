@@ -667,6 +667,7 @@ struct AddTaskSheet: View {
             context.insert(task)
         }
         NotificationService.schedule(task)
+        CoreHooks.taskCreated(task)
         // Move first responder straight to the title field FIRST so the keyboard
         // never drops — otherwise, in list mode, collapsing the checklist section
         // resigns its field and the keyboard closes while the card stays up.
@@ -714,6 +715,8 @@ struct EditTaskSheet: View {
     @State private var tagsText = ""
     /// What the reminder shows, as opened — it's rebuilt if any of it changes.
     @State private var opened: (title: String, priority: TaskPriority, tags: [String])?
+    /// The rest of what the Core counts as an edit, and the due date as opened.
+    @State private var openedDetail: (notes: String, location: String, subtasks: [SubtaskData], due: Date?)?
     @FocusState private var focus: Field?
     private enum Field: Hashable { case title, notes, location, tags, subtask }
 
@@ -748,6 +751,7 @@ struct EditTaskSheet: View {
         .onAppear {
             tagsText = task.tags.joined(separator: ", ")
             opened = (task.title, task.priority, task.tags)
+            openedDetail = (task.notes, task.location, task.subtasks, task.dueDate)
         }
         .onChange(of: task.dueDate) {
             NotificationService.schedule(task)
@@ -756,6 +760,16 @@ struct EditTaskSheet: View {
             // The reminder carries the title, priority and tags — refresh it.
             if let opened, opened.title != task.title || opened.priority != task.priority || opened.tags != task.tags {
                 NotificationService.schedule(task)
+            }
+            // The Core counts one edit per visit to the editor, and a date move.
+            if let opened, let detail = openedDetail, !task.isTrashed {
+                if opened.title != task.title || opened.priority != task.priority || opened.tags != task.tags
+                    || detail.notes != task.notes || detail.location != task.location || detail.subtasks != task.subtasks {
+                    CoreHooks.taskEdited(task)
+                }
+                if let due = task.dueDate, due != detail.due {
+                    CoreHooks.taskRescheduled(task, from: detail.due, to: due)
+                }
             }
         }
     }

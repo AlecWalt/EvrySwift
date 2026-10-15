@@ -152,6 +152,8 @@ struct EvryChatOverlay: View {
     /// The welcome greeting fades in a beat after the card arrives.
     @State private var greetingShown = false
     @State private var thinkingSpin = false
+    /// The transcript is taller than the card (Evry then rests above the composer).
+    @State private var transcriptOverflows = false
     /// Evry messages that have finished typing (their options show after).
     @State private var typed: Set<UUID> = []
     @Namespace private var mascotSpace
@@ -200,10 +202,8 @@ struct EvryChatOverlay: View {
         VStack(spacing: 0) {
             topBar
             if started {
-                ListeningMascot(size: composerFocused ? 52 : 72, listening: isListeningToUser)
-                    .matchedGeometryEffect(id: "evry", in: mascotSpace)
-                    .padding(.bottom, 4)
-                    .animation(EvryMotion.settle, value: composerFocused)
+                // Evry itself rides along the transcript as the speaker of its
+                // latest reply (see `speaker`), so it isn't drawn up here too.
                 transcript
             } else {
                 welcome
@@ -359,11 +359,28 @@ struct EvryChatOverlay: View {
                         .frame(height: 16)
                 }
             }
+            // Once the conversation is taller than the card, Evry stops moving
+            // down and stays put while older messages scroll away.
+            .onScrollGeometryChange(for: Bool.self) { geo in
+                geo.contentSize.height > geo.containerSize.height + 1
+            } action: { _, overflows in
+                transcriptOverflows = overflows
+            }
+            // Drawn over the mask, so Evry never fades with the messages.
+            .overlayPreferenceValue(EvrySpeakerAnchor.self) { anchor in speaker(anchor) }
             .onAppear { scrollToEnd(proxy) }
             .onChange(of: messages.count) { _, _ in scrollToEnd(proxy) }
             .onChange(of: thinking) { _, _ in scrollToEnd(proxy) }
-            // Options appear when a line finishes typing — keep them in view.
-            .onChange(of: typed.count) { _, _ in scrollToEnd(proxy) }
+            // Options appear when a line finishes typing — keep them in view,
+            // and follow again once cards have finished popping in (their
+            // height lands a moment later).
+            .onChange(of: typed.count) { _, _ in
+                scrollToEnd(proxy)
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(450))
+                    scrollToEnd(proxy)
+                }
+            }
             // The keyboard shrinks the list; follow the conversation once it's up.
             .onChange(of: composerFocused) { _, focused in
                 guard focused else { return }
@@ -377,6 +394,48 @@ struct EvryChatOverlay: View {
 
     private func scrollToEnd(_ proxy: ScrollViewProxy) {
         withAnimation(EvryMotion.settle) { proxy.scrollTo("bottom", anchor: .bottom) }
+    }
+
+    // MARK: Speaker
+
+    /// Evry's size beside its replies.
+    private static let speakerSize: CGFloat = 44
+
+    /// The row Evry is speaking from: the reply it's writing, else its latest.
+    private var speakerRowID: String? {
+        if thinking { return "typing" }
+        return messages.last(where: { $0.role == .evry })?.id.uuidString
+    }
+
+    /// Evry, once the conversation starts: beside its latest reply (slightly
+    /// under the person's message, as if answering it), moving down with each
+    /// reply — then, once the transcript fills the card, resting just above
+    /// the composer while the messages scroll off the top. The single mascot
+    /// on screen; it glides here from the welcome's centre.
+    private func speaker(_ anchor: Anchor<CGPoint>?) -> some View {
+        GeometryReader { geo in
+            let size = Self.speakerSize
+            let rest = CGPoint(x: EvrySpace.grid + size / 2, y: geo.size.height - size / 2 - 18)
+            let target = transcriptOverflows ? rest : (anchor.map { geo[$0] } ?? rest)
+            ListeningMascot(size: size, listening: isListeningToUser)
+                .frame(width: size, height: size)
+                .matchedGeometryEffect(id: "evry", in: mascotSpace)
+                .position(x: target.x, y: min(max(target.y, size / 2 + 8), rest.y))
+                .animation(reduceMotion ? .easeOut(duration: 0.2) : EvryMotion.settle, value: speakerRowID)
+                .animation(EvryMotion.settle, value: transcriptOverflows)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// The empty column Evry's replies are indented by; the speaking row
+    /// publishes its centre so Evry can sit in it.
+    private func speakerGutter(_ rowID: String) -> some View {
+        Color.clear
+            .frame(width: Self.speakerSize, height: Self.speakerSize)
+            .anchorPreference(key: EvrySpeakerAnchor.self, value: .center) { anchor in
+                rowID == speakerRowID ? anchor : nil
+            }
     }
 
     /// Evry's replies are plain text across the card; the person's messages sit
@@ -398,6 +457,8 @@ struct EvryChatOverlay: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("You: \(message.text)")
         case .evry:
+            HStack(alignment: .top, spacing: 10) {
+            speakerGutter(message.id.uuidString)
             VStack(alignment: .leading, spacing: 12) {
                 TypewriterText(text: message.text) {
                     withAnimation(EvryMotion.settle) { _ = typed.insert(message.id) }
@@ -435,27 +496,29 @@ struct EvryChatOverlay: View {
                     }
                 }
             }
+            }
         }
     }
 
-    /// Evry's star turning gently while it works on a reply.
+    /// Three dots beside Evry while it works on a reply. (Not the star mark:
+    /// Evry is already on screen right next to it.)
     private var typingIndicator: some View {
-        HStack(spacing: 8) {
-            Image("EvryIconStar")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 22, height: 22)
-                .foregroundStyle(palette.text)
-                .rotationEffect(.degrees(thinkingSpin && !reduceMotion ? 360 : 0))
-                .scaleEffect(thinkingSpin && !reduceMotion ? 0.85 : 1)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 1.1).repeatForever(autoreverses: false),
-                           value: thinkingSpin)
-                .onAppear { thinkingSpin = true }
-                .onDisappear { thinkingSpin = false }
+        HStack(alignment: .center, spacing: 10) {
+            speakerGutter("typing")
+            HStack(spacing: 6) {
+                ForEach(0..<3, id: \.self) { i in
+                    Circle()
+                        .fill(palette.text.opacity(0.55))
+                        .frame(width: 8, height: 8)
+                        .scaleEffect(thinkingSpin && !reduceMotion ? 1 : 0.55)
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.5)
+                            .repeatForever(autoreverses: true).delay(Double(i) * 0.16), value: thinkingSpin)
+                }
+            }
+            .onAppear { thinkingSpin = true }
+            .onDisappear { thinkingSpin = false }
             Spacer(minLength: 0)
         }
-        .frame(height: 28)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Evry is writing")
     }
@@ -753,6 +816,7 @@ struct EvryChatOverlay: View {
 
     private func open() {
         guard !greetingShown else { return }
+        CoreHooks.mascotOpened()
         // The card settles, then Evry's greeting rises in and the options pop in.
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(reduceMotion ? 0 : 420))
@@ -993,6 +1057,7 @@ struct EvryChatOverlay: View {
             item.priority = task.priority
             context.insert(item)
             NotificationService.schedule(item)
+            CoreHooks.taskCreated(item)
         }
         try? context.save()
         UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -1053,6 +1118,16 @@ struct EvryChatOverlay: View {
             try? await Task.sleep(for: .milliseconds(400))
             action()
         }
+    }
+}
+
+// MARK: - Speaker anchor
+
+/// The centre of the gutter beside the row Evry is speaking from.
+private struct EvrySpeakerAnchor: PreferenceKey {
+    static let defaultValue: Anchor<CGPoint>? = nil
+    static func reduce(value: inout Anchor<CGPoint>?, nextValue: () -> Anchor<CGPoint>?) {
+        value = nextValue() ?? value
     }
 }
 

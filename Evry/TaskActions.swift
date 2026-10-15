@@ -17,8 +17,11 @@ enum TaskActions {
         let completedBefore = task.completedAt
         task.completed = completing
         task.completedAt = completing ? Date() : nil
+        CoreHooks.taskToggled(task)
 
         if completing {
+            // Now and then a finished task earns a little XP (queued for the profile).
+            if !task.isNote { EvryXP.rollBonus(.taskCompleted) }
             NotificationService.cancel(task.uid)
             // Finishing a folder's last open task removes the folder.
             pruneGroupIfFinished(task.group, context: context)
@@ -80,6 +83,7 @@ enum TaskActions {
     /// delete toast's Undo can restore it.
     static func delete(_ task: TaskItem) {
         task.deletedAt = Date()
+        CoreHooks.taskDeleted(task)
         NotificationService.cancel(task.uid)
         // Deleting a folder's last open task removes the folder.
         if let context = task.modelContext {
@@ -107,18 +111,25 @@ enum TaskActions {
 
     static func restore(_ task: TaskItem) {
         task.deletedAt = nil
+        CoreHooks.taskRestored(task)
         NotificationService.schedule(task)
     }
 
     static func snooze(_ task: TaskItem) {
         guard let due = task.dueDate,
               let next = Calendar.current.date(byAdding: .day, value: 1, to: due) else { return }
-        // Through reschedule, so the reminder moves with it.
-        reschedule(task, to: next)
+        CoreHooks.taskSnoozed(task)
+        // The reminder moves with it (counted as a snooze, not also a reschedule).
+        move(task, to: next)
     }
 
     /// Move a task's due date to `date` and reschedule its notification.
     static func reschedule(_ task: TaskItem, to date: Date) {
+        CoreHooks.taskRescheduled(task, from: task.dueDate, to: date)
+        move(task, to: date)
+    }
+
+    private static func move(_ task: TaskItem, to date: Date) {
         task.dueDate = date
         NotificationService.schedule(task)
     }
@@ -134,6 +145,7 @@ enum TaskActions {
     static func duplicate(_ task: TaskItem, context: ModelContext) {
         let copy = clone(task, title: "\(task.title) (copy)", dueDate: task.dueDate)
         context.insert(copy)
+        CoreHooks.taskCreated(copy)
         NotificationService.schedule(copy)
     }
 

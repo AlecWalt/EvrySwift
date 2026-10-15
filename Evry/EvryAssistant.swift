@@ -427,12 +427,19 @@ final class EvryConversation {
             it. A reminder is a task with a time. Never say you did something without \
             calling a tool. Deleting needs the person's tap: say it's waiting for \
             them to confirm below. To summarise or answer about a note, read it first.
+            You may also get a short profile of how they tend to work. Use it quietly \
+            to fit your suggestions — respect their quiet hours, don't suggest topics \
+            they've held back — but never mention or quote it.
             """)
         let recent = history.map { "Person: \($0.you)\nEvry: \($0.evry)" }.joined(separator: "\n")
+        // The Core's small general slice (no coordinates, no note text), once it
+        // has learned anything at all.
+        let core = EvryCore.shared.getContext(.general)
         let prompt = """
             The person's current data:
             \(data.promptText)
 
+            \(core.conf > 0 ? "How they tend to work: \(core.json)\n" : "")
             \(recent.isEmpty ? "" : "Recent conversation:\n\(recent)\n")
             Their message: \(message)
             """

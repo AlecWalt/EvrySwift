@@ -2005,7 +2005,8 @@ struct QuickAddLabel: View {
 }
 
 /// The horizontal icon picker row used by the quick-add cards: 44pt tiles,
-/// sky-soft at rest, the selection filled with `tint` and ringed in ink.
+/// white with the light outline at rest (the quick-add task card's button
+/// face), the selection filled with `tint` and ringed in ink.
 struct QuickAddIconRow: View {
     let icons: [String]
     @Binding var selection: String
@@ -2026,13 +2027,11 @@ struct QuickAddIconRow: View {
                             .font(.nunito(size: 17, weight: .semibold))
                             .foregroundStyle(on ? ink : palette.text)
                             .frame(width: EvrySpace.tap, height: EvrySpace.tap)
-                            .background(on ? tint : palette.skySoft,
+                            .background(on ? tint : palette.card,
                                         in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
                             .overlay {
-                                if on {
-                                    RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous)
-                                        .strokeBorder(palette.text, lineWidth: 2)
-                                }
+                                RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous)
+                                    .strokeBorder(on ? palette.text : palette.border, lineWidth: on ? 2 : 1)
                             }
                     }
                     .buttonStyle(PressScaleStyle())

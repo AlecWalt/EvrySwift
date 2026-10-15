@@ -117,6 +117,10 @@ struct NoteEditorView: View {
                 if openedEmpty { context.delete(note) } else { NoteActions.softDelete(note) }
             }
             try? context.save()
+            // A brand-new note that was actually written can earn a little XP.
+            if openedEmpty && !note.isEmpty { EvryXP.rollBonus(.noteCreated) }
+            // Only with note-extraction consent; only structured facts are kept.
+            CoreHooks.noteSaved(note)
         }
     }
 

@@ -149,10 +149,14 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             // Calendar access may have been turned on in Settings meanwhile.
             if phase == .active { processPendingSiriTasks(); checkDailyRecap(); evaluateAccess(); calendarService.refreshStatus() }
+            // The Core: an app open (time, plus a coarse place with consent);
+            // leaving the app writes any pending Core changes.
+            if phase == .active { CoreHooks.appOpened(context: modelContext) }
+            if phase == .background { CoreHooks.appBackgrounded() }
         }
         // A cold launch starts already active (no scenePhase change), so pick up
         // anything Siri queued while the app wasn't running here too.
-        .task { processPendingSiriTasks(); checkDailyRecap() }
+        .task { processPendingSiriTasks(); checkDailyRecap(); CoreHooks.appOpened(context: modelContext) }
         // Subscribing (or its removal) flips access — re-check the wall. The trial
         // clock changing (e.g. the dev reset/expire tools) does too.
         .onChange(of: membershipPlan) { _, _ in evaluateAccess() }
@@ -227,7 +231,7 @@ struct ContentView: View {
         // Evry is never in two places at once: while Evry is in the chat, the
         // guided tour or the daily recap sheet, every Evry on the page
         // underneath steps away (each of those resets it for its own Evry).
-        .environment(\.evryAway, showChat || showDailyRecap)
+        .environment(\.evryAway, showChat || showDailyRecap || TourCenter.shared.isActive)
         // The chat with Evry — a system sheet, so on iOS 26+ it floats as a
         // Liquid Glass bottom card with display-concentric corners.
         .sheet(isPresented: $showChat) {
@@ -261,6 +265,14 @@ struct ContentView: View {
         .overlay {
             if confirmExitFocus { focusExitPrompt }
         }
+        // First-visit section tours, over everything on the page (Evry brings
+        // its own presence, so it isn't hidden by `evryAway`).
+        .overlay {
+            SectionTourOverlay(palette: palette)
+                .environment(\.evryAway, false)
+        }
+        // A tour only starts once nothing else covers the page.
+        .onChange(of: tourGate, initial: true) { _, gate in TourCenter.shared.update(gate) }
         .task { await NotificationService.requestPermission() }
         .onAppear {
             // Stamp the trial clock on first launch, then check the wall.
@@ -280,6 +292,17 @@ struct ContentView: View {
             }
             pomodoro.onTargetReached = { showToast("All your focus sessions are done. Nice work!") }
         }
+    }
+
+    /// Which section is showing for tours, and whether anything covers it.
+    private var tourGate: TourCenter.Gate {
+        let covered = showChat || showDailyRecap || showProWelcome || showWelcomeBrainDump
+            || showHandleBrainDump || showHandlePomodoro || showTrialWall || membershipRouter.showPlans
+            || focusMode || confirmExitFocus || editingTask != nil || addingNote != nil
+            || showAddTask || showAddHabit || showNewFolder
+        // (The Inbox's own menu is checked by the Inbox, not here: reading its
+        // drag progress would redraw the whole shell on every frame.)
+        return TourCenter.Gate(blocked: covered, section: selectedTab.rawValue)
     }
 
     /// VoiceOver label for the add pill — matches what its tap creates.
@@ -403,6 +426,7 @@ struct ContentView: View {
             )
             modelContext.insert(task)
             NotificationService.schedule(task)
+            CoreHooks.taskCreated(task)
         }
         try? modelContext.save()
     }
@@ -531,6 +555,7 @@ struct ContentView: View {
             modelContext.insert(item)
             // Same as every other way of adding tasks: a reminder, then save.
             NotificationService.schedule(item)
+            CoreHooks.taskCreated(item)
         }
         try? modelContext.save()
     }

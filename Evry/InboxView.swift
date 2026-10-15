@@ -121,6 +121,8 @@ struct InboxView: View {
                     .scrollDisabled(navDrag == .page || navDrag == .menu)
                 }
                 .clipped()
+                // Schedule and Tasks share this spot on screen.
+                .tourTarget(.inboxContent)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(inFocusMode ? Color.clear : palette.bg)
@@ -236,6 +238,11 @@ struct InboxView: View {
         .background(DrawerTabBarSync(settleDuration: settleDuration,
                                      settledOpen: $menuSettledOpen, tabBarFades: $tabBarFades))
         .onAppear { RowSwipeZone.middleThirdOnly = mode == .tasks }
+        // First visit: Evry's tour of the Inbox, once the page has settled.
+        .task {
+            try? await Task.sleep(for: .milliseconds(900))
+            requestTour()
+        }
         .onDisappear {
             RowSwipeZone.middleThirdOnly = false
             TabBarFader.set(alpha: 1, animated: false)
@@ -388,6 +395,7 @@ struct InboxView: View {
                 if weekOpen {
                     InboxWeekStrip(dayOffset: $timelineDayOffset, palette: palette)
                         .padding(.leading, EvrySpace.tap - 14)   // room for the chevron at the edge
+                        .tourTarget(.inboxWeek)
                         .transition(.asymmetric(
                             insertion: .move(edge: .trailing).combined(with: .opacity),
                             // Fades quickly on the way out, so it's gone before the
@@ -407,8 +415,10 @@ struct InboxView: View {
             // One chevron for both states: just after the day's name pointing
             // right, or at the screen's edge pointing left. It slides and turns.
             .overlay(alignment: .leading) {
+                // Placed with padding rather than an offset, so its measured
+                // frame (the tour's highlight) is where it's drawn.
                 weekChevron
-                    .offset(x: weekOpen ? -14 : titleWidth + 2)
+                    .padding(.leading, weekOpen ? -14 : titleWidth + 2)
                     .animation(.spring(response: 0.45, dampingFraction: 0.86), value: weekOpen)
                     .animation(EvryMotion.settle, value: titleWidth)
             }
@@ -427,6 +437,8 @@ struct InboxView: View {
             pageHint
         }
         .onChange(of: timelineDayOffset) { old, new in dayForward = new >= old }
+        // The Inbox tour waits for the person to open and close the week.
+        .onChange(of: weekOpen) { _, open in TourCenter.shared.notify(open ? .weekOpened : .weekClosed) }
         .onChange(of: mode) { _, m in
             // Multi-select belongs to the task list.
             if m == .schedule && isSelecting { cancelSelection() }
@@ -475,11 +487,13 @@ struct InboxView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(weekOpen ? "Back to the day" : "Show the week")
+        // Measured on the button itself, so the tour's circle centres on it.
+        .tourTarget(.inboxBack)
     }
 
     // Evry's mark: opens the chat with Evry (Distill, Pomo, Write).
     private var evryButton: some View {
-        Button(action: onOpenChat) {
+        Button(action: openChat) {
             Image("EvryPlainMark")
                 .resizable()
                 .scaledToFit()
@@ -491,6 +505,50 @@ struct InboxView: View {
         }
         .buttonStyle(PressScaleStyle(scale: 0.88))
         .accessibilityLabel("Chat with Evry")
+        .tourTarget(.inboxEvry)
+    }
+
+    private func openChat() {
+        TourCenter.shared.notify(.chatOpened)
+        onOpenChat()
+    }
+
+    // MARK: Tour
+
+    /// The Inbox's first-visit tour: Schedule, Tasks, the week (which the
+    /// person opens and closes themselves), then Evry's own button.
+    private func requestTour() {
+        guard !inFocusMode, menuProgress < 0.01, !isSelecting else { return }
+        TourCenter.shared.request("inbox", section: AppTab.inbox.rawValue, steps: [
+            TourStep(target: .inboxContent,
+                     text: "This is your schedule! It compiles your tasks, events, and calendar all in one compact view",
+                     spot: .rounded(24), padding: -8,
+                     onEnter: {
+                         if weekOpen { withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) { weekOpen = false } }
+                         setMode(.schedule)
+                     }),
+            // Evry swipes over to Tasks.
+            TourStep(target: .inboxContent,
+                     text: "These are your tasks, think of this like your own mini to-do list!",
+                     spot: .rounded(24), padding: -8,
+                     onEnter: { setMode(.tasks) }),
+            TourStep(target: .inboxDay,
+                     text: "Tap here to view the rest of the week",
+                     advance: .event(.weekOpened), padding: 4,
+                     assist: { toggleWeek() }),
+            TourStep(target: .inboxWeek,
+                     text: "Here you can select different days and assign tasks or events to them",
+                     padding: 6),
+            TourStep(target: .inboxBack,
+                     text: "Let's go back now",
+                     advance: .event(.weekClosed), spot: .circle, padding: 2,
+                     assist: { toggleWeek() }),
+            // Evry settles where its button lives (the button steps away meanwhile).
+            TourStep(target: .inboxEvry,
+                     text: "You can use the app manually, or ask me to do anything for you! Just tap up here",
+                     spot: .circle, padding: 8, evryOnTarget: true,
+                     onTargetTap: { onOpenChat() }),
+        ])
     }
 
     /// The day's name, then the chevron. Tap to show the week; swipe the name to
@@ -541,6 +599,8 @@ struct InboxView: View {
         }
         // Leaves room for the chevron, which sits just after the name.
         .padding(.trailing, EvrySpace.tap)
+        // The day and its chevron, for the tour.
+        .tourTarget(.inboxDay)
         .animation(EvryMotion.settle, value: timelineDayOffset)
     }
 
@@ -572,6 +632,7 @@ struct InboxView: View {
 
             if !hideReschedule {
                 BurstPillButton(title: "Move all to today", color: Palette.danger) {
+                    CoreHooks.nudgeAccepted("overdue_move")
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
                         TaskActions.moveToToday(overdue, context: context)
                     }
@@ -586,6 +647,8 @@ struct InboxView: View {
         .accessibilityElement(children: .contain)
         .padding(.horizontal, 20)
         .padding(.top, 8)
+        // Counted once a day by the Core, however often this redraws.
+        .onAppear { if !hideReschedule { CoreHooks.nudgeShown("overdue_move") } }
     }
 
     // MARK: Search focus

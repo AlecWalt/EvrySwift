@@ -58,6 +58,7 @@ struct ProfileView: View {
 
     @Environment(\.requestReview) private var requestReview
     @Environment(CalendarService.self) private var calendarService
+    @Environment(ProjectNavigationState.self) private var projectNavState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @AppStorage("user_name") private var userName = ""
@@ -72,6 +73,9 @@ struct ProfileView: View {
     @State private var showMembershipPromo = false
     @State private var showGlobalSearch = false
     @State private var showCrests = false
+    @State private var showPhotoPicker = false
+    /// The carousel peeks at the Core once, so people find it.
+    @AppStorage("core_carousel_hinted") private var carouselHinted = false
     @AppStorage(EvryXP.totalKey) private var xpTotal = 0
     /// The level the crest currently shows (animates on level-up).
     @State private var shownLevel = 1
@@ -94,6 +98,10 @@ struct ProfileView: View {
     /// Pull-to-search state, in its own observable so overscroll frames only
     /// redraw the hint — not the whole page.
     @State private var pull = PullToSearch()
+    /// Queued XP flying into the photo as crystals when the page opens.
+    @State private var xpStream = XPStream()
+    /// Bumped to bring the photo round to the front of the carousel.
+    @State private var photoRequest = 0
 
     private var initials: String {
         let words = userName.trimmingCharacters(in: .whitespaces).split(separator: " ")
@@ -115,6 +123,7 @@ struct ProfileView: View {
     private var tier: CrestTier { .forLevel(level.level) }
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: 0) {
                 header
@@ -126,6 +135,15 @@ struct ProfileView: View {
                     .padding(.horizontal, 8)
             }
             .padding(.top, 8)
+            .id(Self.topID)
+        }
+        .coordinateSpace(.named(Self.pageSpace))
+        // Queued XP flies in over everything, from the bottom of the screen.
+        .overlay { XPCrystalLayer(stream: xpStream, palette: palette) }
+        // The crystals fly into the photo, so it has to be in view.
+        .onChange(of: photoRequest) {
+            withAnimation(EvryMotion.settle) { proxy.scrollTo(Self.topID, anchor: .top) }
+        }
         }
         // Pull down from the top to open search.
         .onScrollGeometryChange(for: CGFloat.self) { geo in
@@ -145,7 +163,10 @@ struct ProfileView: View {
                 firstUsed = profileISO8601.string(from: Date())
             }
             syncRingOnAppear()
+            playQueuedXP()
         }
+        // Leaving mid-stream puts whatever hasn't landed back on the queue.
+        .onDisappear { xpStream.stop() }
         .onChange(of: xpTotal) { old, new in playProgress(from: old, to: new) }
         .onChange(of: selectedPhoto) { _, item in
             // Load the full image, then let the user crop/zoom before saving.
@@ -173,6 +194,8 @@ struct ProfileView: View {
         }
         .fullScreenCover(isPresented: $showSetupFlow) { SetupFlowView() }
         .sheet(isPresented: $showMembershipPromo) { MembershipPromoView() }
+        .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhoto, matching: .images,
+                      photoLibrary: .shared())
         .sheet(isPresented: $showGlobalSearch) { GlobalSearchSheet() }
         .sheet(isPresented: $showCrests) {
             CrestGallerySheet(level: level.level, palette: palette)
@@ -181,6 +204,18 @@ struct ProfileView: View {
     }
 
     // MARK: Level ring
+
+    static let pageSpace = "profilePage"
+    private static let topID = "profileTop"
+
+    /// XP earned since the last visit flies in as crystals; each one that lands
+    /// adds its XP, which moves the ring (`playProgress`).
+    private func playQueuedXP() {
+        guard EvryXP.pending > 0 else { return }
+        // Crystals fly into the photo: it comes to the front, and into view.
+        photoRequest += 1
+        xpStream.play(reduceMotion: reduceMotion)
+    }
 
     private func syncRingOnAppear() {
         // First visit, or XP was reset: just show where things stand.
@@ -307,10 +342,33 @@ struct ProfileView: View {
 
     // MARK: Avatar
 
+    /// The photo with the Core crystal behind it, on a carousel: swipe either
+    /// way and the two spin round and trade places.
+    private var avatar: some View {
+        let core = EvryCore.shared.progress
+        return ProfileCarousel(showHint: !carouselHinted, onHinted: { carouselHinted = true },
+                               canHint: { !xpStream.isRunning },
+                               photoRequest: photoRequest,
+                               onTapPhoto: { showPhotoPicker = true },
+                               photoValue: "Level \(level.level), \(Int((level.fraction * 100).rounded())) percent to the next level",
+                               coreValue: core.isComplete ? "Complete" : "\(Int((core.overall * 100).rounded())) percent built") {
+            photoFace
+        } back: {
+            CoreCrystalBadge(palette: palette)
+        }
+        // Where the XP crystals aim (the photo sits at the band's centre).
+        .onGeometryChange(for: CGPoint.self) { proxy in
+            let frame = proxy.frame(in: .named(Self.pageSpace))
+            return CGPoint(x: frame.midX, y: frame.midY)
+        } action: { center in
+            xpStream.photoCenter = center
+        }
+        .zIndex(1)
+    }
+
     /// The person's photo (or initials), large and centred, ringed by their
     /// progress to the next level. Tap to change the photo.
-    private var avatar: some View {
-        PhotosPicker(selection: $selectedPhoto, matching: .images, photoLibrary: .shared()) {
+    private var photoFace: some View {
             ZStack {
                 ZStack {
                     Circle()
@@ -356,6 +414,24 @@ struct ProfileView: View {
                 SpringKeyframe(0.97, duration: 0.18, spring: .snappy)
                 SpringKeyframe(1, duration: 0.45, spring: .bouncy)
             }
+            // Each XP crystal that lands bounces the photo: knocked up and a
+            // touch squashed by the hit, then springing back.
+            .keyframeAnimator(initialValue: XPBounce(), trigger: xpStream.hits) { view, b in
+                view.scaleEffect(x: b.scaleX, y: b.scaleY).offset(y: b.lift)
+            } keyframes: { _ in
+                KeyframeTrack(\.lift) {
+                    SpringKeyframe(-9, duration: 0.09, spring: .snappy)
+                    SpringKeyframe(0, duration: 0.4, spring: .bouncy)
+                }
+                KeyframeTrack(\.scaleX) {
+                    SpringKeyframe(1.06, duration: 0.09, spring: .snappy)
+                    SpringKeyframe(1, duration: 0.35, spring: .bouncy)
+                }
+                KeyframeTrack(\.scaleY) {
+                    SpringKeyframe(0.95, duration: 0.09, spring: .snappy)
+                    SpringKeyframe(1, duration: 0.35, spring: .bouncy)
+                }
+            }
             .overlay(alignment: .bottom) {
                 if let reached = levelUpBanner {
                     Text("Level \(reached) reached")
@@ -369,11 +445,7 @@ struct ProfileView: View {
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
             }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Change profile photo")
-        .accessibilityValue("Level \(level.level), \(Int((level.fraction * 100).rounded())) percent to the next level")
-        .zIndex(1)
+            // Taps and VoiceOver are handled by the carousel.
     }
 
     // MARK: Container
@@ -630,8 +702,20 @@ struct ProfileView: View {
             sectionTitle("Developer")
             inset {
                 VStack(spacing: 0) {
-                    devButton("Add \(EvryXP.perGoal) XP") {
-                        EvryXP.add(EvryXP.perGoal)
+                    // Queue and play straight away, to see the crystals fly.
+                    devButton("Fly in \(EvryXP.perGoal) XP") {
+                        EvryXP.queue(EvryXP.perGoal)
+                        playQueuedXP()
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Fly in 200 XP") {
+                        EvryXP.queue(200)
+                        playQueuedXP()
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Replay section tours") {
+                        TourCenter.resetAll()
+                        projectNavState.requestedTab = .inbox
                     }
                     paletteDivider(palette).padding(.leading, 16)
                     devButton("Reset XP and level") {
@@ -767,6 +851,187 @@ struct ProfileView: View {
 
 }
 
+/// The photo's bounce when an XP crystal hits it.
+private struct XPBounce {
+    var lift: CGFloat = 0
+    var scaleX: CGFloat = 1
+    var scaleY: CGFloat = 1
+}
+
+// MARK: - Photo / Core carousel
+
+/// Two seats on a spinning carousel: the photo in front, the Core behind it.
+/// A sideways swipe (either way) turns it half a revolution so they trade
+/// places.
+///
+/// The swipe is read from a transparent horizontal paging `ScrollView` laid
+/// over the seats — three pages, resting on the middle one. Nested inside the
+/// page's vertical scroll, the two axes compose natively (the Inbox timeline's
+/// pattern), so a vertical drag that starts on the photo still scrolls the
+/// page. A SwiftUI `DragGesture` here swallowed those drags.
+private struct ProfileCarousel<Front: View, Back: View>: View {
+    var showHint: Bool
+    var onHinted: () -> Void
+    /// Checked just before the peek — it waits while XP crystals are flying.
+    var canHint: () -> Bool
+    /// Bumped by the page to bring the photo round to the front.
+    var photoRequest: Int
+    var onTapPhoto: () -> Void
+    /// Spoken values for each side (the faces themselves aren't read).
+    var photoValue: String
+    var coreValue: String
+    @ViewBuilder var front: Front
+    @ViewBuilder var back: Back
+
+    /// Committed turn: 0 (or any even half-turn) = photo in front.
+    @State private var angle: Double = 0
+    /// The live swipe, from the pager's offset (±π at the neighbouring page).
+    @State private var drag: Double = 0
+    /// The one-time peek.
+    @State private var hint: Double = 0
+    /// The pager's page: 0 at rest, ±1 once a swipe lands on a neighbour.
+    @State private var page: Int? = 0
+    /// Set while the pager jumps back to the middle after a turn, so that
+    /// jump isn't read as a swipe.
+    @State private var recentering = false
+    @State private var pagerWidth: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// How far the seats swing out to the sides.
+    private let radius: CGFloat = 96
+    private let height: CGFloat = 174
+
+    private var photoInFront: Bool { cos(angle) > 0 }
+
+    var body: some View {
+        let live = angle + drag + hint
+        ZStack {
+            front.modifier(CarouselSeat(angle: live, radius: radius))
+            back.modifier(CarouselSeat(angle: live + .pi, radius: radius))
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+        .allowsHitTesting(false)
+        .overlay { pager }
+        // One element for VoiceOver, speaking for whichever side is in front,
+        // so the hidden side can't be reached.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(photoInFront ? "Profile photo" : "Your Core")
+        .accessibilityValue(photoInFront ? photoValue : coreValue)
+        .accessibilityHint(photoInFront ? "Double-tap to change your photo" : "")
+        .accessibilityAddTraits(photoInFront ? .isButton : [])
+        .accessibilityAction { if photoInFront { onTapPhoto() } }
+        .accessibilityAction(named: photoInFront ? "Show your Core" : "Show your photo") { turn(1) }
+        .onChange(of: photoRequest) {
+            if !photoInFront { turn(1) }
+        }
+        .task {
+            guard showHint, !reduceMotion else {
+                if showHint { onHinted() }
+                return
+            }
+            // A small nudge, so the Core behind the photo gets noticed — but
+            // not over flying XP; it waits for the next visit instead.
+            try? await Task.sleep(for: .milliseconds(900))
+            guard canHint() else { return }
+            onHinted()
+            withAnimation(.easeInOut(duration: 0.45)) { hint = 0.45 } completion: {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) { hint = 0 }
+            }
+        }
+    }
+
+    /// Three invisible pages; only the middle one is ever at rest.
+    private var pager: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 0) {
+                ForEach(-1...1, id: \.self) { index in
+                    Color.clear
+                        .containerRelativeFrame(.horizontal)
+                        .frame(height: height)
+                        .contentShape(Rectangle())
+                        .onTapGesture { location in tapped(at: location, page: index) }
+                        .id(index)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollIndicators(.hidden)
+        .scrollPosition(id: $page)
+        .defaultScrollAnchor(.center)
+        .onScrollGeometryChange(for: Double.self) { geo in
+            let width = geo.containerSize.width
+            return width > 0 ? Double((geo.contentOffset.x - width) / width) : 0
+        } action: { _, offset in
+            if recentering {
+                if abs(offset) < 0.01 { recentering = false }
+                return
+            }
+            // Finger left → the photo swings left.
+            drag = -offset * .pi
+        }
+        .onScrollPhaseChange { _, phase in
+            if phase == .idle { landed() }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pagerWidth = $0 }
+        .accessibilityHidden(true)
+    }
+
+    /// The pager came to rest: on a neighbour, commit the half turn and jump
+    /// back to the middle in the same frame, so nothing visibly moves.
+    private func landed() {
+        guard let page, page != 0 else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            angle -= Double(page) * .pi
+            drag = 0
+            recentering = true
+            self.page = 0
+        }
+    }
+
+    /// A tap on the photo itself (when it's in front) changes the photo.
+    private func tapped(at location: CGPoint, page index: Int) {
+        guard index == 0, page == 0, photoInFront, abs(drag) < 0.05 else { return }
+        // The page spans the full width; the photo (ring included) is centred in it.
+        let dx = location.x - pagerWidth / 2, dy = location.y - height / 2
+        guard dx * dx + dy * dy <= 81 * 81 else { return }
+        onTapPhoto()
+    }
+
+    /// Accessibility: a half turn without a swipe.
+    private func turn(_ halfTurns: Double) {
+        let animation: Animation = reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.6, dampingFraction: 0.82)
+        withAnimation(animation) { angle += halfTurns * .pi }
+    }
+}
+
+/// Places one seat at `angle` around the carousel: out to the side by its
+/// sine, nearer (bigger, brighter, on top) by its cosine. Animatable, so a
+/// turn travels round the arc rather than straight across.
+private struct CarouselSeat: ViewModifier, Animatable {
+    var angle: Double
+    let radius: CGFloat
+
+    var animatableData: Double {
+        get { angle }
+        set { angle = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let depth = (cos(angle) + 1) / 2   // 1 in front, 0 behind
+        content
+            .rotation3DEffect(.degrees(-sin(angle) * 28), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
+            .scaleEffect(0.6 + 0.4 * depth)
+            .opacity(0.35 + 0.65 * depth)
+            .offset(x: CGFloat(sin(angle)) * radius)
+            .zIndex(cos(angle))
+    }
+}
+
 // MARK: - Pull to search
 
 /// How far the Profile page is pulled down past its top, and whether it's far
@@ -847,6 +1112,7 @@ struct SettingsSheet: View {
     @State private var showNotifications = false
     @State private var showLogoutConfirm = false
     @State private var showTrash = false
+    @State private var showCore = false
     @State private var showClearCompletedConfirm = false
     @State private var showClearCompletedFinalConfirm = false
     @State private var showReportIssue = false
@@ -990,6 +1256,15 @@ struct SettingsSheet: View {
                         }
                     }
 
+                    sectionLabel("Developer")
+
+                    // The Core's full readout and controls (the crystal on the
+                    // Profile page is the everyday view).
+                    settingsNavRow(
+                        icon: "circle.hexagongrid",
+                        label: "Your Core", value: "\(Int((EvryCore.shared.progress.overall * 100).rounded()))%"
+                    ) { showCore = true }
+
                     // Log out
                     VStack(spacing: 8) {
                         Button { showLogoutConfirm = true } label: {
@@ -1078,6 +1353,7 @@ struct SettingsSheet: View {
         .sheet(isPresented: $showNotifications)   { NotificationsSettingsView() }
         .sheet(isPresented: $showLayout)          { LayoutSettingsView() }
         .sheet(isPresented: $showTrash)           { TrashView() }
+        .sheet(isPresented: $showCore)            { CoreSheet() }
         .sheet(isPresented: $showReportIssue) {
             ReportIssueSheet(userName: userName, userEmail: userEmail, appVersion: appVersion)
         }

@@ -283,6 +283,7 @@ enum HabitActions {
         context.insert(entry)
         try? context.save()
         refreshFormed(habit, context: context)
+        CoreHooks.habitCheckedIn(habit)
     }
 
     /// Stamps (or clears) `formedAt` as completed days cross the long-term goal.
@@ -311,6 +312,7 @@ enum HabitActions {
         context.delete(last)
         try? context.save()
         refreshFormed(habit, context: context)
+        CoreHooks.habitChanged(habit)
     }
 
     #if DEBUG
@@ -340,6 +342,7 @@ enum HabitActions {
 
     /// Deletes the habit and (via cascade) its whole history.
     static func delete(_ habit: Habit, context: ModelContext) {
+        CoreHooks.habitDeleted(id: habit.uid)
         context.delete(habit)
         try? context.save()
     }

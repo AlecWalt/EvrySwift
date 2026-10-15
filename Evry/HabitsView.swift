@@ -1229,8 +1229,8 @@ struct HabitGoalStepper: View {
                 .contentTransition(.numericText())
             step("plus") { value = min(range.upperBound, value + 1) }
         }
-        .background(palette.skyMist, in: Capsule())
-        .overlay(Capsule().strokeBorder(palette.border, lineWidth: 1))
+        // White with the light outline — the quick-add task card's button face.
+        .evryButtonFace(palette, in: Capsule())
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: value)
     }
 
@@ -1382,12 +1382,14 @@ private struct HabitFormFields: View {
                     // light up once the user narrows the schedule.
                     if on { draft.weekdays.remove(day) } else { draft.weekdays.insert(day) }
                 } label: {
+                    // Off: the task card's white, outlined button face. On: filled.
                     Text(symbols[day - 1])
                         .font(.evrySmall)
-                        .foregroundStyle(on ? palette.onPrimary : palette.textSec)
+                        .foregroundStyle(on ? palette.onPrimary : palette.text)
+                        .frame(width: 40, height: 40)
+                        .background(on ? palette.primary : palette.card, in: Circle())
+                        .overlay(Circle().strokeBorder(on ? Color.clear : palette.border, lineWidth: 1))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 40)
-                        .background(on ? palette.primary : palette.hover, in: Circle())
                         .frame(minHeight: EvrySpace.tap)
                         .contentShape(Rectangle())
                 }
