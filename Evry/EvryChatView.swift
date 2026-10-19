@@ -27,7 +27,7 @@ private struct ChatMessage: Identifiable, Equatable {
         /// The three feature chips (Distill, Pomo, Write).
         case suggestions
         /// Tasks extracted by Distill, waiting to be added.
-        case tasks([BrainPreviewTask])
+        case tasks([DistilledTask])
         /// Pomodoro session choices.
         case pomoPresets
         /// A note created by Write.
@@ -552,17 +552,25 @@ struct EvryChatOverlay: View {
         }
     }
 
-    private func taskList(_ tasks: [BrainPreviewTask], message: ChatMessage, done: Bool) -> some View {
+    private func taskList(_ tasks: [DistilledTask], message: ChatMessage, done: Bool) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
                     if index > 0 { Rectangle().fill(palette.hairline).frame(height: 1) }
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         if done { EvryCheck(size: 18) } else { EvryBullet(size: 10) }
-                        Text(task.title)
-                            .font(.evryBody)
-                            .foregroundStyle(palette.text)
-                            .fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(task.title)
+                                .font(.evryBody)
+                                .foregroundStyle(palette.text)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !task.location.isEmpty {
+                                Label(task.location, systemImage: "mappin.and.ellipse")
+                                    .font(.nunito(size: 13))
+                                    .foregroundStyle(palette.textSec)
+                                    .lineLimit(1)
+                            }
+                        }
                         Spacer(minLength: 0)
                         if task.priority != .normal, let symbol = task.priority.symbol {
                             Image(systemName: symbol)
@@ -1029,7 +1037,7 @@ struct EvryChatOverlay: View {
 
     private func distill(_ text: String) {
         withThinking {
-            let tasks: [BrainPreviewTask]
+            let tasks: [DistilledTask]
             do {
                 tasks = try await EvryAssistant.distill(text, usesPrioritiesOften: EvryAssistant.usesPrioritiesOften(context))
             } catch {
@@ -1047,11 +1055,11 @@ struct EvryChatOverlay: View {
         }
     }
 
-    /// True when the user labels a meaningful share of their own tasks with a
-    /// priority (matches Brain dump's behaviour).
-    private func addTasks(_ tasks: [BrainPreviewTask], from message: ChatMessage) {
+    /// Adds the reviewed Distill tasks to the inbox, with the location Distill
+    /// found (or none — no second guess from the title).
+    private func addTasks(_ tasks: [DistilledTask], from message: ChatMessage) {
         for task in tasks {
-            let item = TaskItem(title: task.title)
+            let item = TaskItem(title: task.title, location: task.location, autoLocation: false)
             // Every task needs a due date — default to today when none was said.
             item.dueDate = task.dueDate ?? Calendar.current.startOfDay(for: Date())
             item.priority = task.priority

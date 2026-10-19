@@ -163,7 +163,7 @@ struct HabitsView: View {
         // Top-aligned like the Inbox and Notes headers so the title sits at
         // the same height on every tab.
         HStack(alignment: .top, spacing: 12) {
-            PageTitle(title: "Habits", subtitle: "Small routines, steady streaks", palette: palette)
+            PageTitle(title: "Habits", palette: palette)
 
             Spacer()
 

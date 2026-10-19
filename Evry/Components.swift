@@ -14,7 +14,7 @@ import UIKit
 
 /// A fill that expands as a disc from an `origin` point, covering `progress`
 /// (0→1) of its own rect. When no origin is given it starts at the top-right
-/// corner. Used as Brain Dump / Pomodoro's fill-wipe intro — passing the tapped
+/// corner. Used as Pomodoro's fill-wipe intro — passing the tapped
 /// tool bubble's position makes the wipe grow out of that bubble.
 struct CornerFillShape: Shape {
     var progress: CGFloat

@@ -34,28 +34,80 @@ enum InboxMode: String, CaseIterable, Identifiable {
 // MARK: - Week strip
 
 /// The week around the chosen day, opened by tapping the day's name. Tap a day
-/// to jump to it; swipe sideways to move a week.
+/// to jump to it. Weeks sit side by side and page under the finger, like the
+/// Calendar app: swiping moves to the same weekday in the next or last week.
+/// Pulling down opens the month view (handled by the Inbox).
 struct InboxWeekStrip: View {
     @Binding var dayOffset: Int
     let palette: Palette
+    /// Shared with the month view, so the selected day's circle travels
+    /// between the two.
+    var selectionNS: Namespace.ID
+    /// False while the month view is open (the strip waits underneath).
+    var isFront: Bool = true
 
     private let cal = Calendar.current
+    /// About ten years either way.
+    private static let weekRange = -520...520
 
-    private var selected: Date { cal.date(byAdding: .day, value: dayOffset, to: cal.startOfDay(for: Date())) ?? Date() }
+    @State private var weekID: Int?
 
-    private var days: [Date] {
-        let start = cal.dateInterval(of: .weekOfYear, for: selected)?.start ?? selected
+    private var today: Date { cal.startOfDay(for: Date()) }
+    private var selected: Date { cal.date(byAdding: .day, value: dayOffset, to: today) ?? today }
+
+    private func weekStart(_ date: Date) -> Date {
+        cal.dateInterval(of: .weekOfYear, for: date)?.start ?? date
+    }
+
+    /// Weeks from this week to the selected day's week.
+    private var selectedWeek: Int {
+        cal.dateComponents([.weekOfYear], from: weekStart(today), to: weekStart(selected)).weekOfYear ?? 0
+    }
+
+    private func days(inWeek w: Int) -> [Date] {
+        let start = cal.date(byAdding: .weekOfYear, value: w, to: weekStart(today)) ?? today
         return (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: start) }
     }
 
     var body: some View {
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 0) {
+                ForEach(Self.weekRange, id: \.self) { w in
+                    weekRow(days(inWeek: w))
+                        .containerRelativeFrame(.horizontal)
+                        .id(w)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollPosition(id: $weekID)
+        .scrollIndicators(.hidden)
+        // A sideways scroll view would otherwise take all the height it's offered.
+        .frame(height: 54)
+        .onAppear { weekID = selectedWeek }
+        // Paged to another week: keep the same weekday selected there.
+        .onChange(of: weekID) { _, new in
+            guard let new, new != selectedWeek else { return }
+            UISelectionFeedbackGenerator().selectionChanged()
+            withAnimation(EvryMotion.settle) { dayOffset += 7 * (new - selectedWeek) }
+        }
+        // The day changed elsewhere (the title swipe, the month view): slide
+        // the strip to its week.
+        .onChange(of: dayOffset) { _, _ in
+            guard weekID != selectedWeek else { return }
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.9)) { weekID = selectedWeek }
+        }
+    }
+
+    private func weekRow(_ days: [Date]) -> some View {
         HStack(spacing: 0) {
             ForEach(days, id: \.self) { day in
                 let isSelected = cal.isDate(day, inSameDayAs: selected)
                 let isToday = cal.isDateInToday(day)
                 Button {
                     UISelectionFeedbackGenerator().selectionChanged()
-                    let offset = cal.dateComponents([.day], from: cal.startOfDay(for: Date()), to: day).day ?? 0
+                    let offset = cal.dateComponents([.day], from: today, to: day).day ?? 0
                     withAnimation(EvryMotion.settle) { dayOffset = offset }
                 } label: {
                     VStack(spacing: 3) {
@@ -69,6 +121,8 @@ struct InboxWeekStrip: View {
                             .background {
                                 if isSelected {
                                     Circle().fill(palette.primary)
+                                        .matchedGeometryEffect(id: isFront ? "selectedDay" : "selectedDayBehind",
+                                                               in: selectionNS)
                                 } else if isToday {
                                     Circle().strokeBorder(palette.primary, lineWidth: 2)
                                 }
@@ -82,14 +136,164 @@ struct InboxWeekStrip: View {
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         }
-        .gesture(
-            DragGesture(minimumDistance: 20)
-                .onEnded { v in
-                    guard abs(v.translation.width) > 50, abs(v.translation.width) > abs(v.translation.height) else { return }
-                    UISelectionFeedbackGenerator().selectionChanged()
-                    withAnimation(EvryMotion.settle) { dayOffset += v.translation.width < 0 ? 7 : -7 }
+    }
+}
+
+// MARK: - Month view
+
+/// The full month view, opened by pulling down on the week strip: months
+/// stacked in a vertical scroll, each with all its days, like the Calendar
+/// app's month view. Tapping a day picks it and folds back to the week.
+struct InboxMonthPicker: View {
+    @Binding var dayOffset: Int
+    let palette: Palette
+    var selectionNS: Namespace.ID
+    /// The month in view changed (for the header's title).
+    var onVisibleMonth: (Date) -> Void = { _ in }
+    /// A day was picked.
+    var onPick: () -> Void
+
+    private let cal = Calendar.current
+    /// Three years either way.
+    private static let monthRange = -36...36
+
+    @State private var monthID: Int?
+
+    private var today: Date { cal.startOfDay(for: Date()) }
+    private var selected: Date { cal.date(byAdding: .day, value: dayOffset, to: today) ?? today }
+
+    private func monthStart(_ date: Date) -> Date {
+        cal.dateInterval(of: .month, for: date)?.start ?? date
+    }
+
+    private func month(_ m: Int) -> Date {
+        cal.date(byAdding: .month, value: m, to: monthStart(today)) ?? today
+    }
+
+    private var selectedMonth: Int {
+        cal.dateComponents([.month], from: monthStart(today), to: monthStart(selected)).month ?? 0
+    }
+
+    /// The weekday letters, in the calendar's own order.
+    private var weekdaySymbols: [String] {
+        let symbols = cal.veryShortStandaloneWeekdaySymbols
+        let first = cal.firstWeekday - 1
+        return Array(symbols[first...] + symbols[..<first])
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, s in
+                    Text(s)
+                        .font(.nunito(size: 11, weight: .bold))
+                        .foregroundStyle(palette.textMuted)
+                        .frame(maxWidth: .infinity)
                 }
-        )
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 6)
+            .accessibilityHidden(true)
+            Rectangle().fill(palette.border).frame(height: 1)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(Self.monthRange, id: \.self) { m in
+                        monthSection(month(m))
+                            .id(m)
+                    }
+                }
+                .scrollTargetLayout()
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 140)
+            }
+            .scrollPosition(id: $monthID, anchor: .top)
+            .scrollIndicators(.hidden)
+            .onAppear { monthID = selectedMonth }
+            .onChange(of: monthID, initial: true) { _, m in
+                if let m { onVisibleMonth(month(m)) }
+            }
+        }
+    }
+
+    private func monthSection(_ start: Date) -> some View {
+        let count = cal.range(of: .day, in: .month, for: start)?.count ?? 30
+        // Blank cells before the 1st, so it lands under its weekday.
+        let lead = (cal.component(.weekday, from: start) - cal.firstWeekday + 7) % 7
+        let cells: [Date?] = Array(repeating: nil, count: lead)
+            + (0..<count).map { cal.date(byAdding: .day, value: $0, to: start) }
+        let rows = stride(from: 0, to: cells.count, by: 7).map { i in
+            Array(cells[i..<min(i + 7, cells.count)]) + Array(repeating: nil, count: max(0, i + 7 - cells.count))
+        }
+        let isThisMonth = cal.isDate(start, equalTo: today, toGranularity: .month)
+        let sameYear = cal.isDate(start, equalTo: today, toGranularity: .year)
+        return VStack(alignment: .leading, spacing: 0) {
+            // The month's name sits above the column of its 1st, as in Calendar.
+            HStack(spacing: 0) {
+                ForEach(0..<7, id: \.self) { col in
+                    Color.clear
+                        .frame(maxWidth: .infinity, maxHeight: 1)
+                        .overlay(alignment: .bottomLeading) {
+                            if col == lead {
+                                Text(sameYear ? start.formatted(.dateTime.month(.wide))
+                                              : start.formatted(.dateTime.month(.wide).year()))
+                                    .font(.nunito(size: 18, weight: .heavy))
+                                    .foregroundStyle(isThisMonth ? palette.primary : palette.text)
+                                    .fixedSize()
+                                    .padding(.leading, 6)
+                            }
+                        }
+                }
+            }
+            .frame(height: 30, alignment: .bottom)
+            .padding(.bottom, 6)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(start.formatted(.dateTime.month(.wide).year()))
+            .accessibilityAddTraits(.isHeader)
+
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                VStack(spacing: 0) {
+                    Rectangle().fill(palette.border).frame(height: 1)
+                    HStack(spacing: 0) {
+                        ForEach(Array(row.enumerated()), id: \.offset) { _, day in
+                            if let day { dayCell(day) } else { Color.clear.frame(maxWidth: .infinity, minHeight: 48) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func dayCell(_ day: Date) -> some View {
+        let isSelected = cal.isDate(day, inSameDayAs: selected)
+        let isToday = cal.isDateInToday(day)
+        return Button {
+            UISelectionFeedbackGenerator().selectionChanged()
+            let offset = cal.dateComponents([.day], from: today, to: day).day ?? 0
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+                dayOffset = offset
+                onPick()
+            }
+        } label: {
+            Text(day.formatted(.dateTime.day()))
+                .font(.nunito(size: 16, weight: isSelected || isToday ? .heavy : .semibold))
+                .foregroundStyle(isSelected ? palette.onPrimary : (isToday ? palette.primary : palette.text))
+                .frame(width: 34, height: 34)
+                .background {
+                    if isSelected {
+                        Circle().fill(palette.primary)
+                            .matchedGeometryEffect(id: "selectedDay", in: selectionNS)
+                    } else if isToday {
+                        Circle().strokeBorder(palette.primary, lineWidth: 2)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 48)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(day.formatted(.dateTime.weekday(.wide).day().month(.wide).year()))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -111,13 +315,18 @@ final class ScheduleDragState {
     var location: CGPoint = .zero
     /// The time the task would land at, while it's over the Schedule.
     var dropTime: Date?
-    /// Which page the drag started on — only drags from Tasks turn the page.
+    /// Which page the drag started on.
     var origin: InboxMode = .tasks
+    /// Which Inbox page is showing (kept in step by the Inbox).
+    var page: InboxMode = .schedule
     /// Where the hold landed, so a small wobble doesn't count as a drag.
     private var liftPoint: CGPoint = .zero
 
     var isActive: Bool { task != nil }
     var isEngaged: Bool { liftedID != nil || task != nil }
+    /// A Schedule card carried over to Tasks: letting go there takes its time
+    /// off, so it goes back to being a plain task for the day.
+    var landsOnTasks: Bool { task != nil && origin == .schedule && page == .tasks && dropTime == nil }
 
     /// The hold on `task` completed at `point` (the finger is still down).
     func lift(_ task: TaskItem, at point: CGPoint, from origin: InboxMode) {
@@ -138,13 +347,20 @@ final class ScheduleDragState {
         return true
     }
 
-    /// Lands the task at the hovered time (if any) and ends the drag. Returns
-    /// whether it was scheduled.
+    /// Lands the task at the hovered time (or back on Tasks, untimed) and ends
+    /// the drag. Returns whether the task moved.
     @discardableResult
     func finish() -> Bool {
         defer { reset() }
-        guard let task, let dropTime else { return false }
-        TaskActions.reschedule(task, to: dropTime)
+        guard let task else { return false }
+        if let dropTime {
+            TaskActions.reschedule(task, to: dropTime)
+        } else if landsOnTasks, let due = task.dueDate {
+            // Midnight reads as "no time", which takes it off the Schedule.
+            TaskActions.reschedule(task, to: Calendar.current.startOfDay(for: due))
+        } else {
+            return false
+        }
         try? task.modelContext?.save()
         return true
     }
@@ -173,14 +389,14 @@ struct ScheduleDragOverlay: View {
             let box = g.frame(in: .global)
             let target = edgeTarget(in: box)
             ZStack(alignment: .topLeading) {
-                if drag.origin == .tasks {
-                    if mode == .tasks {
-                        edgeHint("Schedule", icon: "calendar", hot: target == .schedule)
-                            .position(x: 22, y: box.height / 2)
-                    } else {
-                        edgeHint("Tasks", icon: "checkmark.square", hot: target == .tasks)
-                            .position(x: box.width - 22, y: box.height / 2)
-                    }
+                // Either page's edge turns to the other, so a task can go onto
+                // the Schedule and back off it again.
+                if mode == .tasks {
+                    edgeHint("Schedule", icon: "calendar", hot: target == .schedule)
+                        .position(x: 22, y: box.height / 2)
+                } else {
+                    edgeHint("Tasks", icon: "checkmark.square", hot: target == .tasks)
+                        .position(x: box.width - 22, y: box.height / 2)
                 }
                 if let task = drag.task {
                     card(task)
@@ -197,8 +413,6 @@ struct ScheduleDragOverlay: View {
     }
 
     private func edgeTarget(in box: CGRect) -> InboxMode? {
-        // A card picked up on the Schedule just moves within it.
-        guard drag.origin == .tasks else { return nil }
         let x = drag.location.x
         if mode == .tasks && x < box.minX + edgeZone { return .schedule }
         if mode == .schedule && x > box.maxX - edgeZone { return .tasks }
@@ -236,10 +450,11 @@ struct ScheduleDragOverlay: View {
     private func card(_ task: TaskItem) -> some View {
         let subtitle: String = {
             if let time = drag.dropTime { return "at \(time.formatted(date: .omitted, time: .shortened))" }
+            if drag.landsOnTasks { return "Drop to take it off the schedule" }
             return mode == .tasks ? "Hold at the left edge for Schedule" : "Drop on your schedule"
         }()
         return HStack(spacing: 10) {
-            Image(systemName: drag.dropTime == nil ? "calendar.badge.plus" : "clock")
+            Image(systemName: drag.dropTime != nil ? "clock" : (drag.landsOnTasks ? "checkmark.square" : "calendar.badge.plus"))
                 .font(.nunito(size: 16, weight: .semibold))
                 .foregroundStyle(palette.primary)
                 .frame(width: 22)
@@ -703,7 +918,7 @@ struct ScheduleView: View {
 
     private func dropCard(cancelled: Bool) {
         guard let drag else { return }
-        let placed = !cancelled && drag.isActive && drag.dropTime != nil
+        let placed = !cancelled && drag.isActive && (drag.dropTime != nil || drag.landsOnTasks)
         withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
             if placed { _ = drag.finish() } else { drag.reset() }
         }

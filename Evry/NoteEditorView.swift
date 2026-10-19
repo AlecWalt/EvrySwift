@@ -3,9 +3,10 @@
 //  Evry
 //
 //  Note editor — title + rich body with auto-save (no save button), matching the
-//  app's low-friction flow. Blank notes are discarded on dismiss. The rich body
-//  lives in the swappable `NoteBodyEditor`; this screen owns the title,
-//  auto-save, and discard-empty behavior.
+//  app's low-friction flow. Blank notes are discarded on dismiss. From the Notes
+//  tab it's a full page pushed onto the Notes stack; from the chat, a card
+//  sheet. The rich body lives in the swappable `NoteBodyEditor`; this screen
+//  owns the title, auto-save, and discard-empty behavior.
 //
 
 import SwiftUI
@@ -13,6 +14,11 @@ import SwiftData
 
 struct NoteEditorView: View {
     @Bindable var note: Note
+    /// How the editor is shown: its own page pushed onto the Notes stack, or a
+    /// card sheet (opened from the chat).
+    var style: Style = .sheet
+
+    enum Style { case page, sheet }
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var context
@@ -34,94 +40,157 @@ struct NoteEditorView: View {
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
     var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 0) {
-                TextField("Title", text: $note.title)
-                    // The note's h3-sized heading (matches the body editor's
-                    // "Title" style: Nunito 28 extra-bold).
-                    .font(.nunito(size: 28, weight: .heavy))
-                    .foregroundStyle(palette.text)
-                    .tint(palette.primary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity)
-                    .focused($titleFocused)
-                    .submitLabel(.next)
-                    .padding(.horizontal, EvrySpace.gutter)
-                    .padding(.top, 16)
-                    .padding(.bottom, 8)
-
-                NoteBodyEditor(text: $bodyText, palette: palette, onEdit: { newBody in
-                    saver.edited(newBody, note: note)
-                })
-                .padding(.horizontal, 12)
-                .padding(.top, 4)
-            }
-            .background(editorBackground)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) { folderMenu }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showBgColorPicker = true } label: {
-                        Image(systemName: "paintpalette")
-                            .font(.nunito(size: 17, weight: .semibold))
-                            .foregroundStyle(palette.primary)
-                            .frame(minWidth: EvrySpace.tap, minHeight: EvrySpace.tap)
-                    }
-                    .accessibilityLabel("Change background")
+        chrome
+            .tint(palette.primary)
+            .sheet(isPresented: $showBgColorPicker) {
+                NoteBackgroundPicker(
+                    selectedHex: note.backgroundColorHex,
+                    palette: palette
+                ) { hex in
+                    note.backgroundColorHex = hex
+                    note.modifiedAt = Date()
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button { dismiss() } label: {
-                        Text("Done")
-                            .font(.evryLabel)
-                            .foregroundStyle(palette.primary)
-                    }
+                .environment(appearance)
+            }
+            .onAppear {
+                // Coming back to a page whose blank note was already discarded
+                // (it disappeared when another tab took over) — leave it.
+                if note.isDeleted || note.modelContext == nil {
+                    dismiss()
+                    return
+                }
+                openedEmpty = note.isEmpty
+                bodyText = note.body
+                // A freshly created note opens ready to type its title.
+                if note.title.isEmpty {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { titleFocused = true }
                 }
             }
-        }
-        .tint(palette.primary)
-        .presentationCornerRadius(EvryRadius.panel)
-        .preferredColorScheme(appearance.preferredColorScheme)
-        .sheet(isPresented: $showBgColorPicker) {
-            NoteBackgroundPicker(
-                selectedHex: note.backgroundColorHex,
-                palette: palette
-            ) { hex in
-                note.backgroundColorHex = hex
+            .onChange(of: note.title) { _, _ in
                 note.modifiedAt = Date()
             }
-            .environment(appearance)
-        }
-        .onAppear {
-            openedEmpty = note.isEmpty
-            bodyText = note.body
-            // A freshly created note opens ready to type its title.
-            if note.title.isEmpty {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { titleFocused = true }
+            // Leaving the app mid-pause still writes the last edit.
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active { saver.flush(note) }
             }
-        }
-        .onChange(of: note.title) { _, _ in
-            note.modifiedAt = Date()
-        }
-        // Leaving the app mid-pause still writes the last edit.
-        .onChange(of: scenePhase) { _, phase in
-            if phase != .active { saver.flush(note) }
-        }
-        .onDisappear {
-            // Write any edit still waiting on the debounce first.
-            saver.flush(note)
-            // A brand-new note left blank is discarded. An existing note that's
-            // been emptied goes to Recently Deleted (with its 30-day undo)
-            // instead of vanishing for good.
-            if note.isEmpty {
-                if openedEmpty { context.delete(note) } else { NoteActions.softDelete(note) }
+            .onDisappear {
+                guard !note.isDeleted, note.modelContext != nil else { return }
+                // Write any edit still waiting on the debounce first.
+                saver.flush(note)
+                // A brand-new note left blank is discarded. An existing note that's
+                // been emptied goes to Recently Deleted (with its 30-day undo)
+                // instead of vanishing for good.
+                if note.isEmpty {
+                    if openedEmpty { context.delete(note) } else { NoteActions.softDelete(note) }
+                }
+                try? context.save()
+                // A brand-new note that was actually written can earn a little XP.
+                if openedEmpty && !note.isEmpty { EvryXP.rollBonus(.noteCreated) }
+                // Only with note-extraction consent; only structured facts are kept.
+                CoreHooks.noteSaved(note)
             }
-            try? context.save()
-            // A brand-new note that was actually written can earn a little XP.
-            if openedEmpty && !note.isEmpty { EvryXP.rollBonus(.noteCreated) }
-            // Only with note-extraction consent; only structured facts are kept.
-            CoreHooks.noteSaved(note)
+    }
+
+    // MARK: Chrome
+
+    /// A page in the Notes stack gets a back button (and the tab bar steps
+    /// away); the chat's card sheet keeps its own stack and a Done button.
+    @ViewBuilder
+    private var chrome: some View {
+        switch style {
+        case .page:
+            editor
+                .navigationBarBackButtonHidden(true)
+                // The notes list hides the bar for its custom header; this page
+                // brings it back for the back / folder / background buttons.
+                .toolbar(.visible, for: .navigationBar)
+                .toolbar(.hidden, for: .tabBar)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { dismiss() } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.nunito(size: 18, weight: .bold))
+                                .foregroundStyle(palette.primary)
+                                .frame(minWidth: EvrySpace.tap, minHeight: EvrySpace.tap)
+                                .contentShape(Rectangle())
+                        }
+                        .accessibilityLabel("Back to notes")
+                    }
+                    ToolbarItem(placement: .principal) { folderMenu }
+                    ToolbarItem(placement: .topBarTrailing) { backgroundButton }
+                }
+                // Swipe from the left edge to go back — hiding the system back
+                // button turns off its pop gesture (same catcher as the list).
+                .overlay(alignment: .leading) {
+                    Color.clear
+                        .frame(width: 18)
+                        .frame(maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 20)
+                                .onEnded { value in
+                                    if value.translation.width > 70 && abs(value.translation.height) < 60 {
+                                        dismiss()
+                                    }
+                                }
+                        )
+                }
+        case .sheet:
+            NavigationStack {
+                editor
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) { folderMenu }
+                        ToolbarItem(placement: .topBarTrailing) { backgroundButton }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button { dismiss() } label: {
+                                Text("Done")
+                                    .font(.evryLabel)
+                                    .foregroundStyle(palette.primary)
+                            }
+                        }
+                    }
+            }
+            .presentationCornerRadius(EvryRadius.panel)
+            .preferredColorScheme(appearance.preferredColorScheme)
         }
+    }
+
+    /// Title + rich body on the note's surface.
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TextField("Title", text: $note.title)
+                // The note's h3-sized heading (matches the body editor's
+                // "Title" style: Nunito 28 extra-bold).
+                .font(.nunito(size: 28, weight: .heavy))
+                .foregroundStyle(palette.text)
+                .tint(palette.primary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .focused($titleFocused)
+                .submitLabel(.next)
+                .padding(.horizontal, EvrySpace.gutter)
+                .padding(.top, 16)
+                .padding(.bottom, 8)
+
+            NoteBodyEditor(text: $bodyText, palette: palette, onEdit: { newBody in
+                saver.edited(newBody, note: note)
+            })
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
+        }
+        .background(editorBackground)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(.hidden, for: .navigationBar)
+    }
+
+    private var backgroundButton: some View {
+        Button { showBgColorPicker = true } label: {
+            Image(systemName: "paintpalette")
+                .font(.nunito(size: 17, weight: .semibold))
+                .foregroundStyle(palette.primary)
+                .frame(minWidth: EvrySpace.tap, minHeight: EvrySpace.tap)
+        }
+        .accessibilityLabel("Change background")
     }
 
     // MARK: Background

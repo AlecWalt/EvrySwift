@@ -30,26 +30,9 @@ struct InboxView: View {
     @State private var timelineDayOffset = 0
     /// Tasks or Schedule — Schedule by default.
     @State private var mode: InboxMode = .schedule
-    /// How far the main card has slid aside for the menu (shared with the root,
-    /// so the add handle rides along).
-    @Environment(InboxDrawerState.self) private var drawer
-    private var menuProgress: CGFloat { drawer.progress }
-    @State private var menuAtDragStart: CGFloat = 0
     /// The finger's offset at the moment a swipe was recognised — subtracted, so
-    /// the card starts moving from where it is instead of jumping ahead.
+    /// the page starts moving from where it is instead of jumping ahead.
     @State private var lockDX: CGFloat = 0
-    /// The menu has settled fully open (the tab bar steps away only then, and
-    /// returns once it's fully closed — so nothing reflows mid-swipe).
-    @State private var menuSettledOpen = false
-    @State private var openHapticFired = false
-    /// The tab bar can be faded directly (see TabBarFader).
-    @State private var tabBarFades = true
-    /// Length of the current settle (open/close after release), so the tab bar
-    /// fade finishes with the card.
-    @State private var settleDuration: Double = 0.26
-    /// Safe-area insets measured while the menu is closed. The menu and card lay
-    /// out with these, so the tab bar hiding/returning never reflows them.
-    @State private var restInsets = EdgeInsets()
     /// Live finger offset while swiping between Schedule and Tasks.
     @State private var pageDrag = InboxPageDrag()
     @State private var navDrag: NavDrag = .none
@@ -59,9 +42,16 @@ struct InboxView: View {
     /// Bottom of the task list, in global space — swipes that start below it
     /// (empty space) switch views from anywhere, not just the outer thirds.
     @State private var tasksListMaxY: CGFloat = .infinity
-    private enum NavDrag { case none, ignored, page, menu }
+    private enum NavDrag { case none, ignored, page }
     /// The week strip, opened by tapping the day's name.
     @State private var weekOpen = false
+    /// The month view, opened by pulling down on the week strip.
+    @State private var monthOpen = false
+    @State private var monthPull = InboxMonthPull()
+    /// The month the month view is scrolled to (its header title).
+    @State private var visibleMonth = Date()
+    /// The selected day's circle travels between the week and the month.
+    @Namespace private var daySelectionNS
     /// Direction of the last day change, so the title slides the right way.
     @State private var dayForward = true
     @AppStorage("inbox_hide_notes") private var hideNotes = false
@@ -69,7 +59,7 @@ struct InboxView: View {
     // Multi-select
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
-    // Grouping the selection into a shaded folder.
+    // Grouping the selection into a shaded group.
     @State private var showGroupSheet = false
     @State private var pendingGroupTasks: [TaskItem] = []
     // Drag reorder
@@ -99,7 +89,9 @@ struct InboxView: View {
                 }
 
                 // Schedule and Tasks side by side; the visible one follows
-                // the finger while swiping between them.
+                // the finger while swiping between them. They fade away for
+                // the month view, which opens in their place.
+                ZStack(alignment: .top) {
                 GeometryReader { geo in
                     let w = geo.size.width
                     HStack(spacing: 0) {
@@ -112,17 +104,28 @@ struct InboxView: View {
                     // While a view swipe is underway the page rides along
                     // under the finger — so a swipe that began on a checkbox
                     // would end on it and count as a tap. No taps mid-swipe.
-                    // (Page swipes only — the menu swipe moves the whole card,
-                    // so nothing shifts under the finger, and disabling would
-                    // briefly dim buttons as it ends.)
                     .disabled(navDrag == .page)
                     // Hold the page's own vertical scroll still during any
                     // sideways swipe, so it can't nudge or bounce underneath.
-                    .scrollDisabled(navDrag == .page || navDrag == .menu)
+                    .scrollDisabled(navDrag == .page)
                 }
                 .clipped()
                 // Schedule and Tasks share this spot on screen.
                 .tourTarget(.inboxContent)
+                .modifier(MonthPullFade(pull: monthPull, open: monthOpen))
+                .allowsHitTesting(!monthOpen)
+                .accessibilityHidden(monthOpen)
+
+                if monthOpen {
+                    InboxMonthPicker(dayOffset: $timelineDayOffset, palette: palette,
+                                     selectionNS: daySelectionNS,
+                                     onVisibleMonth: { visibleMonth = $0 },
+                                     onPick: { monthOpen = false })
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.94, anchor: .top)),
+                            removal: .opacity.combined(with: .scale(scale: 0.97, anchor: .top))))
+                }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(inFocusMode ? Color.clear : palette.bg)
@@ -193,61 +196,25 @@ struct InboxView: View {
 
     // MARK: Swipe layout
 
-    /// The main screen as a card over the menu. Swiping right on Schedule slides
-    /// the card aside (shrinking into a rounded Liquid Glass card) to reveal the
-    /// menu on the left; swiping left goes to Tasks. On Tasks, swipes in the
-    /// middle third act on the task rows, and swipes in the outer thirds go back
-    /// to Schedule.
+    /// Schedule and Tasks side by side. Swiping left on Schedule goes to Tasks.
+    /// On Tasks, swipes in the middle third act on the task rows, and swipes in
+    /// the outer thirds go back to Schedule.
     private var swipeLayoutBody: some View {
         GeometryReader { geo in
-            let w = geo.size.width
-            let insets = restInsets
-            let fullHeight = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-            ZStack(alignment: .topLeading) {
-                palette.bg
-
-                // The menu: a wheel of days. Turning it moves the card's day.
-                InboxDateWheel(dayOffset: $timelineDayOffset, palette: palette)
-                .padding(.top, insets.top)
-                .padding(.bottom, insets.bottom)
-                // Still, like Claude's: the card simply slides over it.
-                .modifier(DrawerMenuVisibility())
-
-                // The card spans the whole screen — its white runs under the status
-                // bar and home indicator, with the insets applied inside — so as it
-                // slides aside it's a full-height card, not one that stops short.
-                mainContent
-                    .padding(.top, insets.top)
-                    .padding(.bottom, insets.bottom)
-                    .frame(width: w, height: fullHeight)
-                    .modifier(GlassCardModifier(palette: palette))
-                    .modifier(DrawerCardSlide(onClose: { closeMenu() }))
-            }
-            .ignoresSafeArea()
-            .simultaneousGesture(navGesture(width: w))
-            .onAppear { restInsets = geo.safeAreaInsets }
-            .onChange(of: geo.safeAreaInsets) { _, new in
-                // Only track insets while closed (tab bar in its usual place).
-                if !menuSettledOpen && menuProgress <= 0.001 { restInsets = new }
-            }
+            mainContent
+                .simultaneousGesture(navGesture(width: geo.size.width))
         }
-        // The tab bar fades with the menu, in step with the finger (and eases
-        // over the settle when released). If it can't be faded, it's hidden
-        // once the menu is fully open instead.
-        .toolbar(menuSettledOpen && !tabBarFades ? .hidden : .automatic, for: .tabBar)
-        .background(DrawerTabBarSync(settleDuration: settleDuration,
-                                     settledOpen: $menuSettledOpen, tabBarFades: $tabBarFades))
         .onAppear { RowSwipeZone.middleThirdOnly = mode == .tasks }
         // First visit: Evry's tour of the Inbox, once the page has settled.
         .task {
             try? await Task.sleep(for: .milliseconds(900))
             requestTour()
         }
-        .onDisappear {
-            RowSwipeZone.middleThirdOnly = false
-            TabBarFader.set(alpha: 1, animated: false)
+        .onDisappear { RowSwipeZone.middleThirdOnly = false }
+        .onChange(of: mode, initial: true) { _, m in
+            RowSwipeZone.middleThirdOnly = m == .tasks
+            scheduleDrag.page = m
         }
-        .onChange(of: mode) { _, m in RowSwipeZone.middleThirdOnly = m == .tasks }
     }
 
     private var currentDayHasTasks: Bool {
@@ -265,45 +232,6 @@ struct InboxView: View {
         }
     }
 
-    private func closeMenu(then action: (() -> Void)? = nil) {
-        let duration = settle(to: 0, velocity: 0)
-        if let action {
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(Int(duration * 1000) + 20))
-                action()
-            }
-        }
-    }
-
-    /// Finishes the slide carrying the finger's momentum: a critically damped
-    /// spring (no bounce) that starts at exactly the release speed, then glides
-    /// to rest — no speed break when you let go, no overshoot or wobble at the
-    /// end. Returns roughly how long it takes.
-    @discardableResult
-    private func settle(to target: CGFloat, velocity: CGFloat) -> Double {
-        let remaining = target - drawer.progress
-        // The spring's initial velocity is relative to the distance left:
-        // (points/s ÷ menu width) = progress/s, ÷ remaining = "remainings"/s.
-        let progressPerSecond = velocity / InboxDrawerState.menuWidth
-        let relative = abs(remaining) > 0.001 ? Double(progressPerSecond / remaining) : 0
-        // Only carry momentum that's heading the right way.
-        let initial = max(relative, 0)
-        // A critically damped spring overshoots (and snaps back — the jitter at
-        // high speeds) once its starting speed passes its natural frequency
-        // ω = 2π / duration. So a faster flick gets a *shorter* spring, keeping
-        // the release speed while staying just under that limit.
-        let base = 0.38
-        let limit = 0.85 * 2 * Double.pi / base
-        let duration = initial > limit ? max(0.14, 0.85 * 2 * Double.pi / initial) : base
-        // At the shortest spring, cap the speed too, so it can never overshoot.
-        let startSpeed = min(initial, 0.85 * 2 * Double.pi / duration)
-        settleDuration = duration * 0.75
-        withAnimation(.interpolatingSpring(duration: duration, bounce: 0, initialVelocity: startSpeed)) {
-            drawer.progress = target
-        }
-        return duration
-    }
-
     private func navGesture(width w: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 8, coordinateSpace: .global)
             .onChanged { v in
@@ -315,12 +243,10 @@ struct InboxView: View {
                         if abs(dy) > 10 { navDrag = .ignored }
                         return
                     }
-                    if isSelecting || draggingID != nil || scheduleDrag.isEngaged || v.startLocation.y < headerMaxY {
+                    if monthOpen || isSelecting || draggingID != nil || scheduleDrag.isEngaged || v.startLocation.y < headerMaxY {
                         navDrag = .ignored
-                    } else if menuProgress > 0.5 {
-                        navDrag = .menu
                     } else if mode == .schedule {
-                        navDrag = dx > 0 ? .menu : .page
+                        navDrag = .page
                     } else {
                         // Tasks: over the rows, only the outer thirds switch
                         // views (the middle third swipes the task). Below the
@@ -329,25 +255,12 @@ struct InboxView: View {
                         let overRows = currentDayHasTasks && v.startLocation.y < tasksListMaxY
                         navDrag = (!overRows || x < w / 3 || x > w * 2 / 3) ? .page : .ignored
                     }
-                    menuAtDragStart = menuProgress
                     lockDX = dx
-                    openHapticFired = menuAtDragStart >= 0.999
                 }
                 // Measured from where the swipe was recognised: 1:1 and linear,
                 // no leap at the start.
                 let travel = dx - lockDX
                 switch navDrag {
-                case .menu:
-                    let p = min(max(menuAtDragStart + travel / InboxDrawerState.menuWidth, 0), 1)
-                    var t = Transaction()
-                    t.disablesAnimations = true
-                    withTransaction(t) { drawer.progress = p }
-                    // The open tap lands just before it's all the way out.
-                    if p >= 0.9 && !openHapticFired {
-                        openHapticFired = true
-                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                    }
-                    if p < 0.8 { openHapticFired = false }
                 case .page:
                     // Schedule can only move towards Tasks (left); Tasks only back
                     // towards Schedule (right). The other way rubber-bands.
@@ -362,18 +275,6 @@ struct InboxView: View {
                 let kind = navDrag
                 navDrag = .none
                 switch kind {
-                case .menu:
-                    // A deliberate flick decides on its own; otherwise go by where
-                    // the momentum would carry the card.
-                    let projected = menuAtDragStart + (v.predictedEndTranslation.width - lockDX) / InboxDrawerState.menuWidth
-                    let open = abs(v.velocity.width) > 350 ? v.velocity.width > 0 : projected > 0.5
-                    // Carries on at the finger's speed, in a straight line — and a
-                    // single soft tap as it opens (unless the drag already gave it).
-                    settle(to: open ? 1 : 0, velocity: v.velocity.width)
-                    if open && !openHapticFired {
-                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                    }
-                    openHapticFired = false
                 case .page:
                     let dx = v.predictedEndTranslation.width - lockDX
                     let flip = mode == .schedule ? dx < -w * 0.3 : dx > w * 0.3
@@ -393,8 +294,26 @@ struct InboxView: View {
             // slides in from the right; the chevron flips and moves to the edge.
             ZStack(alignment: .leading) {
                 if weekOpen {
-                    InboxWeekStrip(dayOffset: $timelineDayOffset, palette: palette)
+                    InboxWeekStrip(dayOffset: $timelineDayOffset, palette: palette,
+                                   selectionNS: daySelectionNS, isFront: !monthOpen)
+                        // Under the month view's title while it's open.
+                        .opacity(monthOpen ? 0 : 1)
+                        .allowsHitTesting(!monthOpen)
+                        .overlay(alignment: .leading) {
+                            if monthOpen {
+                                Text(visibleMonth.formatted(.dateTime.month(.wide).year()))
+                                    .font(.evryH3)
+                                    .foregroundStyle(palette.text)
+                                    .contentTransition(.opacity)
+                                    .animation(EvryMotion.settle, value: visibleMonth)
+                                    .padding(.leading, 6)
+                                    .transition(.opacity)
+                            }
+                        }
                         .padding(.leading, EvrySpace.tap - 14)   // room for the chevron at the edge
+                        // Pull down for the month view.
+                        .simultaneousGesture(monthPullGesture)
+                        .accessibilityAction(named: "Show the month") { setMonthOpen(true) }
                         .tourTarget(.inboxWeek)
                         .transition(.asymmetric(
                             insertion: .move(edge: .trailing).combined(with: .opacity),
@@ -435,6 +354,7 @@ struct InboxView: View {
             }
 
             pageHint
+                .opacity(monthOpen ? 0 : 1)
         }
         .onChange(of: timelineDayOffset) { old, new in dayForward = new >= old }
         // The Inbox tour waits for the person to open and close the week.
@@ -463,7 +383,7 @@ struct InboxView: View {
         .animation(EvryMotion.settle, value: mode)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(mode.title) view")
-        .accessibilityHint("Swipe left for Tasks, or right for the menu.")
+        .accessibilityHint(mode == .schedule ? "Swipe left for Tasks." : "Swipe right for Schedule.")
     }
 
     /// Width of the day's name, so the chevron can sit just after it.
@@ -471,7 +391,39 @@ struct InboxView: View {
 
     private func toggleWeek() {
         UISelectionFeedbackGenerator().selectionChanged()
+        // From the month view, the chevron folds back to the week first.
+        if monthOpen { setMonthOpen(false); return }
         withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) { weekOpen.toggle() }
+    }
+
+    private func setMonthOpen(_ open: Bool) {
+        if open && isSelecting { cancelSelection() }
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+            monthOpen = open
+            monthPull.y = 0
+        }
+    }
+
+    /// Pulling down on the week strip fades the pages with the finger, and
+    /// opens the month view once it's pulled far enough (or flicked).
+    private var monthPullGesture: some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { v in
+                guard !monthOpen, v.translation.height > abs(v.translation.width) else { return }
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { monthPull.y = v.translation.height }
+            }
+            .onEnded { v in
+                guard !monthOpen else { return }
+                let down = v.translation.height > abs(v.translation.width)
+                if down && (v.translation.height > 70 || v.predictedEndTranslation.height > 160) {
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    setMonthOpen(true)
+                } else {
+                    withAnimation(EvryMotion.settle) { monthPull.y = 0 }
+                }
+            }
     }
 
     /// The chevron: points right beside the day's name, flips to point left at
@@ -486,7 +438,7 @@ struct InboxView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(weekOpen ? "Back to the day" : "Show the week")
+        .accessibilityLabel(monthOpen ? "Back to the week" : (weekOpen ? "Back to the day" : "Show the week"))
         // Measured on the button itself, so the tour's circle centres on it.
         .tourTarget(.inboxBack)
     }
@@ -518,7 +470,7 @@ struct InboxView: View {
     /// The Inbox's first-visit tour: Schedule, Tasks, the week (which the
     /// person opens and closes themselves), then Evry's own button.
     private func requestTour() {
-        guard !inFocusMode, menuProgress < 0.01, !isSelecting else { return }
+        guard !inFocusMode, !isSelecting else { return }
         TourCenter.shared.request("inbox", section: AppTab.inbox.rawValue, steps: [
             TourStep(target: .inboxContent,
                      text: "This is your schedule! It compiles your tasks, events, and calendar all in one compact view",
@@ -689,7 +641,7 @@ struct InboxView: View {
         for task in toDelete { onDelete(task) }
     }
 
-    /// Open the folder sheet for the current selection.
+    /// Open the group sheet for the current selection.
     private func startGroupSelected() {
         let sel = tasks.filter { selectedIDs.contains($0.uid) }
         guard !sel.isEmpty else { return }
@@ -697,7 +649,7 @@ struct InboxView: View {
         showGroupSheet = true
     }
 
-    /// Create a folder from the pending selection and drop the selected tasks in.
+    /// Create a group from the pending selection and drop the selected tasks in.
     private func createGroup(name: String) {
         guard !pendingGroupTasks.isEmpty else { return }
         // Colour is automatic: the next sky→navy shade in sequence.
@@ -708,7 +660,7 @@ struct InboxView: View {
         addPendingTasks(to: group)
     }
 
-    /// Drop the pending selection into an existing folder.
+    /// Drop the pending selection into an existing group.
     private func addToGroup(_ group: TaskGroup) {
         guard !pendingGroupTasks.isEmpty else { return }
         addPendingTasks(to: group)
@@ -724,12 +676,6 @@ struct InboxView: View {
     }
 
 }
-
-// MARK: - Brain Dump sheet
-//
-// The Brain Dump engine + UI now live in BrainDumpSheet.swift (shared by the
-// Inbox and Notes). The inbox presents it with a `.tasks` context.
-
 
 // MARK: - Timeline layout
 
@@ -868,7 +814,7 @@ private struct TimelineDayPage: View {
     @State private var showRescheduleFor: TaskItem? = nil
     @State private var multiSelectArm: DispatchWorkItem? = nil
     @State private var suppressTapAction = false
-    // Which task-group folders are expanded (collapsed by default).
+    // Which task groups are fanned out (stacked by default).
     @State private var expandedGroups: Set<UUID> = []
     // Per-task nonce bumped on swipe-to-complete so the checkbox plays the same
     // completion animation + delayed commit as a tap.
@@ -889,7 +835,7 @@ private struct TimelineDayPage: View {
     }
 
     /// If the task picked in search is on this (front) day: reveal it — opening
-    /// its folder or the Completed section if it's tucked away — scroll it into
+    /// its group or the Completed section if it's tucked away — scroll it into
     /// view, and play a brief highlight.
     private func focusSearchedTask(_ proxy: ScrollViewProxy) {
         guard reportsHeight, let id = projectNavState.focusTaskID,
@@ -917,8 +863,8 @@ private struct TimelineDayPage: View {
             VStack(alignment: .leading, spacing: 0) {
                 // Tasks — manual order (sortOrder, then newest), with pinned tasks
                 // floated to the top. The partition is stable, and the loose list
-                // and each folder are filtered from it, so a pinned task tops the
-                // Inbox list or its own folder.
+                // and each group are filtered from it, so a pinned task tops the
+                // Inbox list or its own group.
                 let sorted = sortPinnedFirst(dayTasks.sorted {
                     if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
                     return $0.createdAt > $1.createdAt
@@ -948,9 +894,9 @@ private struct TimelineDayPage: View {
                             ForEach(ungrouped) { task in
                                 timelineRow(task, in: ungrouped, preview: preview)
                             }
-                            // Grouped tasks live inside collapsible folders.
+                            // Grouped tasks stack up, like grouped notifications.
                             ForEach(groupSections, id: \.group.uid) { section in
-                                groupFolder(section.group, members: section.members)
+                                groupStack(section.group, members: section.members)
                             }
                         }
                         // Same 20pt page margin as the title and every other tab.
@@ -1037,9 +983,9 @@ private struct TimelineDayPage: View {
 
     // MARK: Task groups
 
-    /// The day's grouped tasks, bucketed by folder in folder sort order.
+    /// The day's grouped tasks, bucketed by group in group sort order.
     private func groupedSections(_ active: [TaskItem]) -> [(group: TaskGroup, members: [TaskItem])] {
-        // One pass; members keep their order within each folder.
+        // One pass; members keep their order within each group.
         var groups: [UUID: TaskGroup] = [:]
         var members: [UUID: [TaskItem]] = [:]
         for t in active {
@@ -1048,82 +994,125 @@ private struct TimelineDayPage: View {
             members[g.uid, default: []].append(t)
         }
         return groups.values
-            // Stable order even when two folders share a sortOrder.
+            // Stable order even when two groups share a sortOrder.
             .sorted { ($0.sortOrder, $0.createdAt) < ($1.sortOrder, $1.createdAt) }
             .map { ($0, members[$0.uid] ?? []) }
     }
 
-    /// A collapsible folder holding grouped tasks, marked with its sky/navy shade.
+    /// A group of tasks, stacked like grouped notifications: collapsed, its
+    /// first task sits on top with the rest peeking out underneath; one tap
+    /// fans them all out. The group's sky/navy shade marks its name.
     @ViewBuilder
-    private func groupFolder(_ group: TaskGroup, members: [TaskItem]) -> some View {
-        let expanded = expandedGroups.contains(group.uid)
-        let tint = group.tint(palette)
-        // Opens like the "Completed" section: an easeInOut reveal of the members
-        // below the header (no drawer/tuck).
-        VStack(spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    if expanded { expandedGroups.remove(group.uid) } else { expandedGroups.insert(group.uid) }
-                }
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "folder.fill")
-                        .font(.nunito(size: 18))
-                        .foregroundStyle(tint)
-                        .frame(width: 38, height: 38)
-                        .background(tint.opacity(0.15), in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(group.name.isEmpty ? "Folder" : group.name)
-                            .font(.evryLabel)
-                            .foregroundStyle(palette.text)
-                        Text("\(members.count) task\(members.count == 1 ? "" : "s")")
-                            .font(.nunito(size: 13))
-                            .foregroundStyle(palette.textSec)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.down")
-                        .font(.nunito(size: 12, weight: .bold))
-                        .foregroundStyle(palette.textSec)
-                        .rotationEffect(.degrees(expanded ? 0 : -90))
-                        .accessibilityHidden(true)
-                }
-                .padding(.horizontal, EvrySpace.gutter)
-                .padding(.vertical, 12)
-                // Flat like the task rows: white fill + hairline, no shadow.
-                .evryField(palette)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .contextMenu {
-                Button(role: .destructive) { ungroup(members) } label: {
-                    Label("Ungroup", systemImage: "folder.badge.minus")
-                }
-            }
-            .timelineScrollFade()
+    private func groupStack(_ group: TaskGroup, members: [TaskItem]) -> some View {
+        let stacks = members.count > 1
+        let expanded = !stacks || expandedGroups.contains(group.uid)
+        let shown = expanded ? members : Array(members.prefix(1))
+        let preview = reorderPreview(for: members)
+        VStack(alignment: .leading, spacing: 8) {
+            groupHeader(group, members: members, expanded: expanded, stacks: stacks)
 
-            if expanded {
-                VStack(spacing: 8) {
-                    let preview = reorderPreview(for: members)
-                    ForEach(members) { task in
-                        timelineRow(task, in: members, preview: preview)
+            ForEach(Array(shown.enumerated()), id: \.element.uid) { i, task in
+                timelineRow(task, in: members, preview: preview)
+                    .overlay {
+                        // Collapsed, the whole stack is one tap target.
+                        if !expanded {
+                            Color.white.opacity(0.001)
+                                .onTapGesture { setGroup(group, expanded: true) }
+                                .accessibilityElement()
+                                .accessibilityLabel("\(group.name.isEmpty ? "Group" : group.name), \(members.count) tasks")
+                                .accessibilityHint("Shows every task in the group")
+                                .accessibilityAddTraits(.isButton)
+                        }
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                // Not indented — instead a faint rail in the folder's colour runs
-                // down the page margin, continuous along every task in the folder.
-                .background(alignment: .leading) {
-                    Capsule()
-                        .fill(tint.opacity(0.45))
-                        .frame(width: 3)
-                        .offset(x: -11)
-                }
-                .padding(.top, 8)
+                    .background(alignment: .bottom) {
+                        if !expanded { stackedPlates(count: members.count - 1) }
+                    }
+                    // The rest fan out from under the top card.
+                    .transition(i == 0 ? .identity : .asymmetric(
+                        insertion: .opacity.combined(with: .offset(y: -28)).combined(with: .scale(scale: 0.94, anchor: .top)),
+                        removal: .opacity.combined(with: .offset(y: -20)).combined(with: .scale(scale: 0.94, anchor: .top))))
+                    .zIndex(Double(shown.count - i))
             }
+        }
+        // Room for the cards peeking out under a collapsed stack.
+        .padding(.bottom, !expanded ? (members.count > 2 ? 14 : 7) : 0)
+    }
+
+    /// The group's name and size; expanded, a "Show less" pill folds it back.
+    private func groupHeader(_ group: TaskGroup, members: [TaskItem], expanded: Bool, stacks: Bool) -> some View {
+        let tint = group.tint(palette)
+        let count = members.count
+        return HStack(spacing: 8) {
+            Circle()
+                .fill(tint)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Text(group.name.isEmpty ? "Group" : group.name)
+                .font(.nunito(size: 15, weight: .bold))
+                .foregroundStyle(palette.text)
+                .lineLimit(1)
+            Text("\(count) task\(count == 1 ? "" : "s")")
+                .font(.nunito(size: 13, weight: .semibold))
+                .foregroundStyle(palette.textSec)
+            Spacer(minLength: 8)
+            if stacks && expanded {
+                Button { setGroup(group, expanded: false) } label: {
+                    Text("Show less")
+                        .font(.nunito(size: 13, weight: .bold))
+                        .foregroundStyle(palette.text)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 30)
+                        .evryButtonFace(palette, in: Capsule())
+                        .frame(minHeight: EvrySpace.tap)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressScaleStyle())
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
+        }
+        .frame(minHeight: EvrySpace.tap)
+        .padding(.horizontal, 4)
+        .contentShape(Rectangle())
+        .onTapGesture { if stacks { setGroup(group, expanded: !expanded) } }
+        .contextMenu {
+            Button(role: .destructive) { ungroup(members) } label: {
+                Label("Ungroup", systemImage: "rectangle.stack.badge.minus")
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+        .timelineScrollFade()
+    }
+
+    /// The edges of the cards stacked under a collapsed group's top task.
+    private func stackedPlates(count: Int) -> some View {
+        let plate = RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous)
+        return ZStack(alignment: .bottom) {
+            if count > 1 {
+                plate.fill(palette.card)
+                    .overlay(plate.strokeBorder(palette.border, lineWidth: 1))
+                    .frame(height: 28)
+                    .padding(.horizontal, 22)
+                    .offset(y: 14)
+            }
+            plate.fill(palette.card)
+                .overlay(plate.strokeBorder(palette.border, lineWidth: 1))
+                .frame(height: 28)
+                .padding(.horizontal, 11)
+                .offset(y: 7)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func setGroup(_ group: TaskGroup, expanded: Bool) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
+            if expanded { expandedGroups.insert(group.uid) } else { expandedGroups.remove(group.uid) }
         }
     }
 
-    /// Detach the given tasks from their folder (and delete a now-empty folder).
+    /// Take the given tasks out of their group (and delete a now-empty group).
     private func ungroup(_ members: [TaskItem]) {
         let group = members.first?.group
         withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
@@ -1253,7 +1242,7 @@ private struct TimelineDayPage: View {
         // A 0.5s hold lifts the row: drag it to carry the task onto the
         // Schedule, or let go in place to multi-select. A UIKit long press on
         // the scroll view (`HoldDragCatcher`) rather than a SwiftUI sequenced
-        // gesture, which stole vertical scrolls inside folders.
+        // gesture, which stole vertical scrolls inside groups.
         .background(HoldDragCatcher(
             onLift: { p in holdBegan(task, at: p) },
             onMove: { p in holdMoved(task, to: p) },
@@ -1350,7 +1339,7 @@ private struct TimelineDayPage: View {
     }
 
     /// The smallest on-screen step between adjacent rows (from the drag-select
-    /// frames). Using the minimum ignores the large gaps across folder/section
+    /// frames). Using the minimum ignores the large gaps across group/section
     /// headers, so it reflects a single row's true height + spacing.
     private func measuredStride() -> CGFloat {
         let ys = dragSel.frames.values.map(\.midY).sorted()
@@ -1480,7 +1469,7 @@ private func applyDragSelect(_ selector: inout DragSelector,
 
 // MARK: - New task-group sheet
 
-/// Names a new folder for the selected tasks. Its colour is automatic (the next
+/// Names a new group for the selected tasks. Its colour is automatic (the next
 /// sky→navy shade), previewed here.
 private struct NewTaskGroupSheet: View {
     let taskCount: Int
@@ -1492,24 +1481,24 @@ private struct NewTaskGroupSheet: View {
     @Environment(Appearance.self) private var appearance
 
     @Query(sort: \TaskGroup.sortOrder) private var allGroups: [TaskGroup]
-    /// Only folders that still hold tasks — an empty folder is never offered.
+    /// Only groups that still hold tasks — an empty group is never offered.
     private var groups: [TaskGroup] {
         allGroups.filter { !(($0.tasks ?? []).filter { !$0.isTrashed }).isEmpty }
     }
 
     @State private var name = ""
 
-    /// The shade the new folder will be given.
+    /// The shade the new group will be given.
     private var tint: Color { palette.folderColor(shade: FolderShade.peek(FolderShade.taskGroupsKey)) }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    // Existing folders — tap one to drop the selection straight in.
+                    // Existing groups — tap one to drop the selection straight in.
                     if !groups.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Add to a folder")
+                            Text("Add to a group")
                                 .font(.evrySmall)
                                 .foregroundStyle(palette.textSec)
                             VStack(spacing: 8) {
@@ -1521,13 +1510,13 @@ private struct NewTaskGroupSheet: View {
                                         dismiss()
                                     } label: {
                                         HStack(spacing: 12) {
-                                            Image(systemName: "folder.fill")
+                                            Image(systemName: "square.stack.fill")
                                                 .font(.nunito(size: 16))
                                                 .foregroundStyle(gTint)
                                                 .frame(width: 34, height: 34)
                                                 .background(gTint.opacity(0.15), in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
                                                 .accessibilityHidden(true)
-                                            Text(group.name.isEmpty ? "Folder" : group.name)
+                                            Text(group.name.isEmpty ? "Group" : group.name)
                                                 .font(.nunito(size: 16, weight: .semibold))
                                                 .foregroundStyle(palette.text)
                                             Spacer()
@@ -1545,7 +1534,7 @@ private struct NewTaskGroupSheet: View {
                                         .evryField(palette, cornerRadius: EvryRadius.field)
                                     }
                                     .buttonStyle(PressScaleStyle())
-                                    .accessibilityHint("Adds the selected tasks to this folder")
+                                    .accessibilityHint("Adds the selected tasks to this group")
                                 }
                             }
                         }
@@ -1557,14 +1546,14 @@ private struct NewTaskGroupSheet: View {
 
                     // Preview
                     HStack(spacing: 14) {
-                        Image(systemName: "folder.fill")
+                        Image(systemName: "square.stack.fill")
                             .font(.nunito(size: 22))
                             .foregroundStyle(tint)
                             .frame(width: 52, height: 52)
                             .background(tint.opacity(0.16), in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(name.isEmpty ? "New folder" : name)
+                            Text(name.isEmpty ? "New group" : name)
                                 .font(.evryTitle)
                                 .foregroundStyle(palette.text)
                             Text("\(taskCount) task\(taskCount == 1 ? "" : "s")")
@@ -1574,7 +1563,7 @@ private struct NewTaskGroupSheet: View {
                         Spacer()
                     }
 
-                    TextField("Folder name", text: $name)
+                    TextField("Group name", text: $name)
                         .evryTextField(palette)
                 }
                 .padding(20)

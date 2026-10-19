@@ -351,7 +351,10 @@ struct DailyGoalXPWatcher: View {
 /// One crystal of queued XP flying from the bottom of the screen into the
 /// profile photo.
 struct XPFlight: Identifiable {
+    /// The base flight time; each crystal varies ±10% around it.
     static let duration = 0.7
+    /// The longest a crystal can take, for waits that must outlast any flight.
+    static let maxDuration = duration * 1.1
 
     let id = UUID()
     let amount: Int
@@ -359,6 +362,8 @@ struct XPFlight: Identifiable {
     /// cut short (the page closed) lands harmlessly.
     let run: Int
     let start: CGPoint
+    /// This crystal's own flight time — picked once at launch, so it's stable.
+    var duration: Double = XPFlight.duration
 }
 
 /// The flying crystal: straight from the bottom of the screen to the centre
@@ -381,7 +386,7 @@ struct XPFlyingCrystal: View {
             .modifier(StraightFlight(t: t, start: flight.start, end: target))
             .onAppear {
                 // Gathers speed as it goes, so it strikes the photo.
-                withAnimation(.timingCurve(0.45, 0, 0.85, 0.55, duration: XPFlight.duration)) { t = 1 } completion: {
+                withAnimation(.timingCurve(0.45, 0, 0.85, 0.55, duration: flight.duration)) { t = 1 } completion: {
                     onLand(target)
                 }
             }
@@ -409,7 +414,7 @@ private struct StraightFlight: ViewModifier, Animatable {
 }
 
 /// Plays queued XP into the profile photo: takes the queue, launches one
-/// crystal per 5 XP from the bottom middle of the screen, and applies each
+/// crystal per 5 XP from along the bottom of the screen, and applies each
 /// crystal's XP as it lands, so the level ring fills crystal by crystal. A
 /// level-up gets room to play out before the next crystals fly. If the page
 /// closes mid-stream, whatever hasn't landed goes back on the queue.
@@ -462,9 +467,9 @@ final class XPStream {
                 let levelsUp = EvryXP.progress(for: xp + piece).level > EvryXP.progress(for: xp).level
                 xp += piece
                 // A level-up fills the ring, bursts and refills (~2.7 s) — wait it out.
-                try? await Task.sleep(for: .seconds(levelsUp ? XPFlight.duration + 2.8 : gap))
+                try? await Task.sleep(for: .seconds(levelsUp ? XPFlight.maxDuration + 2.8 : gap))
             }
-            try? await Task.sleep(for: .seconds(XPFlight.duration + 0.4))
+            try? await Task.sleep(for: .seconds(XPFlight.maxDuration + 0.4))
             if let self, self.run == thisRun { self.task = nil }
         }
     }
@@ -498,8 +503,12 @@ final class XPStream {
     private func launch(_ amount: Int, run: Int) {
         let width = layerSize.width > 0 ? layerSize.width : 390
         let height = layerSize.height > 0 ? layerSize.height : 800
-        // From the bottom middle, just off screen.
-        flights.append(XPFlight(amount: amount, run: run, start: CGPoint(x: width / 2, y: height + 30)))
+        // From a random point along the bottom, just off screen, at a slightly
+        // varied speed — all converge on the photo. Picked once here, so each
+        // crystal keeps its own path.
+        let x = CGFloat.random(in: (width * 0.08)...(width * 0.92))
+        let duration = XPFlight.duration * Double.random(in: 0.9...1.1)
+        flights.append(XPFlight(amount: amount, run: run, start: CGPoint(x: x, y: height + 30), duration: duration))
     }
 }
 

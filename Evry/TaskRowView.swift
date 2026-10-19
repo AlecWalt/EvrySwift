@@ -46,6 +46,12 @@ struct TaskRowView: View {
     @State private var showDirectionsChooser = false
     // Measured card width so the subtask container can sit at ~90% of it.
     @State private var cardW: CGFloat = 0
+    /// The title shows one line; tapping a cut-off title opens it out in full.
+    @State private var titleExpanded = false
+    /// The title's natural one-line width, and the width it's given.
+    @State private var titleFullWidth: CGFloat = 0
+    @State private var titleShownWidth: CGFloat = 0
+    private var titleTruncated: Bool { titleFullWidth > titleShownWidth + 1 }
 
     private enum MapsProvider { case apple, google }
 
@@ -174,12 +180,35 @@ struct TaskRowView: View {
                             .foregroundStyle(task.priority == .low ? palette.textSec : palette.text)
                             .accessibilityLabel("\(task.priority.label) priority")
                     }
-                    // Same type as the Schedule's cards: a bold 17pt title.
+                    // Same type as the Schedule's cards: a bold 17pt title. One
+                    // line only; a title that's cut off opens out when tapped.
                     Text(task.title)
                         .font(.nunito(size: 17, weight: .bold))
                         .foregroundStyle(task.completed ? palette.textSec : palette.text)
                         .strikethrough(task.completed, color: palette.textPh)
                         .multilineTextAlignment(.leading)
+                        .lineLimit(titleExpanded ? nil : 1)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { titleShownWidth = $0 }
+                        .background(alignment: .leading) {
+                            // Measures the whole title on one line, to tell
+                            // whether the shown line is cut off.
+                            Text(task.title)
+                                .font(.nunito(size: 17, weight: .bold))
+                                .fixedSize()
+                                .hidden()
+                                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { titleFullWidth = $0 }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if isSelecting {
+                                onSelect()
+                            } else if titleTruncated {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { titleExpanded.toggle() }
+                            } else {
+                                onEdit()
+                            }
+                        }
+                        .accessibilityAction(named: "Edit") { onEdit() }
                     // Assigned-time bubble ("at 3:00 PM") — a quiet sky-soft chip so
                     // the time reads as metadata, not an accent.
                     if let time = dueTimeLabel {
@@ -221,11 +250,11 @@ struct TaskRowView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            // In multi-select the trailing reorder handle overlays this edge, so
-            // wrap the text earlier to keep it clear of the handle icon.
-            .padding(.trailing, isSelecting ? 40 : 0)
 
-            if !isSelecting && !task.location.isEmpty {
+            // In multi-select the trailing buttons step aside but keep their
+            // space (the reorder handle sits where the trash was), so the text
+            // never shifts or rewraps.
+            if !task.location.isEmpty {
                 Button {
                     showDirectionsChooser = true
                 } label: {
@@ -237,11 +266,15 @@ struct TaskRowView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Directions")
+                .opacity(isSelecting ? 0 : 1)
+                .allowsHitTesting(!isSelecting)
+                .accessibilityHidden(isSelecting)
             }
 
-            if !isSelecting {
-                TrashBurstButton(palette: palette, action: onDelete)
-            }
+            TrashBurstButton(palette: palette, action: onDelete)
+                .opacity(isSelecting ? 0 : 1)
+                .allowsHitTesting(!isSelecting)
+                .accessibilityHidden(isSelecting)
         }
         .padding(.vertical, compact ? 8 : 12)
         .padding(.horizontal, EvrySpace.gutter)

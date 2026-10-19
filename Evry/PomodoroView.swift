@@ -2,9 +2,8 @@
 //  PomodoroView.swift
 //  Evry
 //
-//  Pomodoro UI — a full-screen focus experience styled as a matched pair with
-//  the Brain Dump screen. Both are the app's "navy band": a full navy surface
-//  with white / white-85 text, sky accents and sky / ghost-light buttons. A
+//  Pomodoro UI — a full-screen focus experience in the app's "navy band": a
+//  full navy surface with white / white-85 text, sky accents and sky / ghost-light buttons. A
 //  large progress ring with a rolling countdown, a phase pill + calm line, and
 //  a circular control cluster. Phases differ by their pill, glyph and words
 //  (and the ring's sky strength), never by a new hue.
@@ -338,13 +337,13 @@ struct PomodoroView: View {
     @Environment(Appearance.self) private var appearance
     @Environment(\.dismiss) private var dismiss
 
-    // Fill-wipe intro (same style as Brain Dump): sky sweeps out, the navy
+    // Fill-wipe intro: sky sweeps out, the navy
     // surface sweeps over it, then content appears.
     @State private var appeared = false
     @State private var loading = true
     @State private var accentFill: CGFloat = 0
     @State private var bgFill: CGFloat = 0
-    // Fades the whole screen out on close (mirroring Brain Dump), with the cover's
+    // Fades the whole screen out on close, with the cover's
     // own slide suppressed so it reads as a dissolve rather than a pan-down.
     @State private var closing = false
 
@@ -433,7 +432,7 @@ struct PomodoroView: View {
     }
 
     /// Two stacked fills growing from the origin: sky first, then the navy
-    /// surface over it — matching Brain Dump's intro.
+    /// surface over it.
     private var fillLoader: some View {
         ZStack {
             CornerFillShape(progress: accentFill, origin: fillOrigin).fill(Color.evrySky)
@@ -443,7 +442,7 @@ struct PomodoroView: View {
     }
 
     /// Fades the screen out, then removes the cover with its slide suppressed —
-    /// the mirror of the fade-in (matching Brain Dump's close).
+    /// the mirror of the fade-in.
     private func close(then: (() -> Void)? = nil) {
         withAnimation(.easeIn(duration: 0.22)) { closing = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
@@ -467,7 +466,7 @@ struct PomodoroView: View {
     }
 
     /// One-time screen shown on the first Pomo Focus open: what it is + how it
-    /// works. Same styling and layout as Brain Dump's explainer.
+    /// works.
     private var introScreen: some View {
         ZStack {
             palette.bg.ignoresSafeArea()

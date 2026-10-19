@@ -1100,7 +1100,6 @@ struct SettingsSheet: View {
     @AppStorage("user_name") private var userName = ""
     @AppStorage("user_email") private var userEmail = ""
     @AppStorage("membership_plan") private var membershipPlan = ""
-    @AppStorage("pro_welcomed") private var proWelcomed = false
     @AppStorage("tab_inbox_visible") private var tabInbox = true
     @AppStorage("tab_habits_visible") private var tabHabits = true
     @AppStorage("tab_notes_visible") private var tabNotes = true
@@ -1343,12 +1342,7 @@ struct SettingsSheet: View {
         }
         .sheet(isPresented: $showProfile)         { ProfileAccountSheet() }
         .sheet(isPresented: $showAppearance)      { AppearanceSettingsView() }
-        .fullScreenCover(isPresented: $showMembershipPlans, onDismiss: {
-            // If the user just upgraded here, close Settings too so the root can
-            // present the Pro welcome — a fullScreenCover can't layer over this
-            // still-open sheet, which is why the celebration didn't play.
-            if membershipPlan == "pro" && !proWelcomed { dismiss() }
-        }) { MembershipPlansView() }
+        .fullScreenCover(isPresented: $showMembershipPlans) { MembershipPlansView() }
         .sheet(isPresented: $showCalendars)       { CalendarsSettingsView() }
         .sheet(isPresented: $showNotifications)   { NotificationsSettingsView() }
         .sheet(isPresented: $showLayout)          { LayoutSettingsView() }

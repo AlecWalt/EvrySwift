@@ -40,13 +40,7 @@ struct ContentView: View {
     // The user's daily goals (set in Profile), surfaced in the daily recap.
     @AppStorage("daily_pomo_goal") private var dailyPomoGoal = 60
 
-    // Pro welcome + guided setup (shown once, right after upgrading).
-    @AppStorage("pro_welcomed") private var proWelcomed = false
-    @State private var showProWelcome = false
-    @State private var showWelcomeBrainDump = false
-
     // Tools launched from the add-handle's press-and-hold radial menu.
-    @State private var showHandleBrainDump = false
     @State private var showHandlePomodoro = false
     // Screen point of the tapped add-handle bubble, so the cover's fill-wipe grows from it.
     @State private var handleFillOrigin: CGPoint? = nil
@@ -71,7 +65,6 @@ struct ContentView: View {
     // Habits quick-add, opened from the same swipe-up handle on the Habits tab.
     @State private var showAddHabit = false
     @State private var addHabitSession = 0
-    @State private var addingNote: Note?
     @State private var showNewFolder = false
     @State private var editingTask: TaskItem?
     @State private var toast: ToastData?
@@ -89,16 +82,15 @@ struct ContentView: View {
     @State private var confirmExitFocus = false
     @State private var showPomodoro = false
     @State private var showChat = false
-    /// The Inbox's swipe-layout menu (the add handle rides along with its card).
-    @State private var inboxDrawer = InboxDrawerState()
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
     /// The swipe-up add bar only shows where adding makes sense — Inbox adds
     /// a task, Habits adds a habit, Notes adds a note. (The Calendar tab has its
-    /// own add button.)
+    /// own add button.) It steps away while a note's own page is open.
     private var showsAddHandle: Bool {
-        selectedTab == .inbox || selectedTab == .habits || selectedTab == .notes
+        selectedTab == .inbox || selectedTab == .habits
+            || (selectedTab == .notes && !notesNavState.noteOpen)
     }
 
     var body: some View {
@@ -136,7 +128,6 @@ struct ContentView: View {
         }
         .environment(projectNavState)
         .environment(notesNavState)
-        .environment(inboxDrawer)
         // Pays out XP the moment a daily task or habit goal is completed.
         .background(DailyGoalXPWatcher())
         .tint(palette.primary)
@@ -161,36 +152,7 @@ struct ContentView: View {
         // clock changing (e.g. the dev reset/expire tools) does too.
         .onChange(of: membershipPlan) { _, _ in evaluateAccess() }
         .onChange(of: firstUsed) { _, _ in evaluateAccess() }
-        // Celebrate + guide the user right after they upgrade to Pro.
-        .onChange(of: membershipPlan) { _, plan in
-            guard plan == "pro", !proWelcomed else { return }
-            // Upgrading from the promo dismisses two stacked presentations (the
-            // plans cover, then the promo sheet). Wait for that whole chain to
-            // finish, otherwise this cover is presented into a still-dismissing
-            // hierarchy and silently dropped (the celebration never plays).
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { showProWelcome = true }
-        }
-        .fullScreenCover(isPresented: $showProWelcome) {
-            ProWelcomeView(
-                onBrainDump: {
-                    proWelcomed = true
-                    showProWelcome = false
-                    selectedTab = .inbox
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { showWelcomeBrainDump = true }
-                },
-                onFinish: {
-                    proWelcomed = true
-                    showProWelcome = false
-                }
-            )
-        }
-        .fullScreenCover(isPresented: $showWelcomeBrainDump) {
-            BrainDumpSheet(context: .tasks(add: insertBrainDumpTasks))
-        }
-        // Add-handle radial menu tools — the fill-wipe grows from the tapped bubble.
-        .fullScreenCover(isPresented: $showHandleBrainDump) {
-            BrainDumpSheet(context: .tasks(add: insertBrainDumpTasks), fillOrigin: handleFillOrigin)
-        }
+        // Add-handle radial menu tool — the fill-wipe grows from the tapped bubble.
         .fullScreenCover(isPresented: $showHandlePomodoro) {
             PomodoroView(onStart: enterFocusMode, fillOrigin: handleFillOrigin)
         }
@@ -246,10 +208,6 @@ struct ContentView: View {
         .sheet(item: $editingTask) { task in
             EditTaskSheet(task: task, onDelete: deleteTask)
         }
-        .sheet(item: $addingNote) { note in
-            NoteEditorView(note: note)
-                .environment(appearance)
-        }
         // Presented from the root so a promo card can close itself and hand off to
         // the full-screen plans page.
         .fullScreenCover(isPresented: $router.showPlans) {
@@ -296,12 +254,10 @@ struct ContentView: View {
 
     /// Which section is showing for tours, and whether anything covers it.
     private var tourGate: TourCenter.Gate {
-        let covered = showChat || showDailyRecap || showProWelcome || showWelcomeBrainDump
-            || showHandleBrainDump || showHandlePomodoro || showTrialWall || membershipRouter.showPlans
-            || focusMode || confirmExitFocus || editingTask != nil || addingNote != nil
+        let covered = showChat || showDailyRecap
+            || showHandlePomodoro || showTrialWall || membershipRouter.showPlans
+            || focusMode || confirmExitFocus || editingTask != nil || notesNavState.noteOpen
             || showAddTask || showAddHabit || showNewFolder
-        // (The Inbox's own menu is checked by the Inbox, not here: reading its
-        // drag progress would redraw the whole shell on every frame.)
         return TourCenter.Gate(blocked: covered, section: selectedTab.rawValue)
     }
 
@@ -322,18 +278,21 @@ struct ContentView: View {
                 InboxView(palette: palette, onEdit: { editingTask = $0 }, onDelete: deleteTask,
                           onOpenChat: { showChat = true })
                     .tabPageBackground(palette)
+                    .tabPageEntrance(.inbox, selected: selectedTab)
                     .tabItem { EvryTabLabel(tab: .inbox) }
                     .tag(AppTab.inbox)
             }
             if tabHabitsVisible {
                 HabitsView(palette: palette)
                     .tabPageBackground(palette)
+                    .tabPageEntrance(.habits, selected: selectedTab)
                     .tabItem { EvryTabLabel(tab: .habits) }
                     .tag(AppTab.habits)
             }
             if tabNotesVisible {
                 NotesView(palette: palette)
                     .tabPageBackground(palette)
+                    .tabPageEntrance(.notes, selected: selectedTab)
                     .tabItem { EvryTabLabel(tab: .notes) }
                     .tag(AppTab.notes)
             }
@@ -341,6 +300,7 @@ struct ContentView: View {
             // so it can't be turned off in the Layout screen.
             ProfileView(palette: palette, onEnterFocusMode: enterFocusMode)
                 .tabPageBackground(palette)
+                .tabPageEntrance(.profile, selected: selectedTab)
                 .tabItem { EvryTabLabel(tab: .profile) }
                 .tag(AppTab.profile)
         }
@@ -378,13 +338,9 @@ struct ContentView: View {
                             withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) { showAddTask = true }
                         }
                     },
-                    onBrainDump: { origin in handleFillOrigin = origin; showHandleBrainDump = true },
                     onPomodoro: { origin in handleFillOrigin = origin; showHandlePomodoro = true }
                 )
                 .padding(.bottom, 42)
-                // Part of the main screen: slides with the Inbox card when its
-                // menu opens, rather than going anywhere.
-                .modifier(DrawerFollower(active: selectedTab == .inbox))
                 // Pinned above the tab bar regardless of the keyboard, so when a
                 // quick-add card closes the pill always pops back in at its home
                 // spot (instead of riding the keyboard down or up from below).
@@ -545,26 +501,12 @@ struct ContentView: View {
     // MARK: Shared handlers
 
     /// Swipe-up / tap inside a notes scope creates a blank note there and opens
-    /// the editor. Blank notes are discarded on dismiss by the editor itself.
-    /// Inserts tasks produced by a Brain Dump into the store.
-    private func insertBrainDumpTasks(_ tasks: [BrainPreviewTask]) {
-        for task in tasks {
-            let item = TaskItem(title: task.title)
-            item.dueDate = task.dueDate ?? Calendar.current.startOfDay(for: Date())
-            item.priority = task.priority
-            modelContext.insert(item)
-            // Same as every other way of adding tasks: a reminder, then save.
-            NotificationService.schedule(item)
-            CoreHooks.taskCreated(item)
-        }
-        try? modelContext.save()
-    }
-
+    /// it on its own page. Blank notes are discarded on dismiss by the editor itself.
     private func createNoteFromHandle(folder: Folder?) {
         let note = Note(folder: folder)
         modelContext.insert(note)
         try? modelContext.save()
-        addingNote = note
+        notesNavState.requestedNote = note
     }
 
     /// Shows the hard wall when the free trial has ended and the user hasn't
@@ -703,5 +645,51 @@ extension View {
         background(palette.bg.ignoresSafeArea())
             // The page's own controls stay navy; the blue is the tab bar's.
             .tint(palette.primary)
+    }
+}
+
+/// Slides a tab page in from the side of the tab bar it was reached from, so
+/// switching tabs moves rather than just cutting or fading. The system tab
+/// view swaps pages instantly; this animates the arriving page into place.
+private struct TabPageEntrance: ViewModifier {
+    let tab: AppTab
+    let selected: AppTab
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shift: CGFloat = 0
+    @State private var fade: Double = 1
+
+    func body(content: Content) -> some View {
+        content
+            .offset(x: shift)
+            .opacity(fade)
+            .onChange(of: selected) { old, new in
+                guard new == tab else { return }
+                // Arrive from the side of the tab bar the old tab sits on.
+                let order = AppTab.allCases
+                let direction: CGFloat = (order.firstIndex(of: new) ?? 0) >= (order.firstIndex(of: old) ?? 0) ? 1 : -1
+                if reduceMotion {
+                    fade = 0.4
+                    withAnimation(.easeOut(duration: 0.2)) { fade = 1 }
+                    return
+                }
+                // Start just off to the side, then glide home.
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) {
+                    shift = 64 * direction
+                    fade = 0.2
+                }
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                    shift = 0
+                    fade = 1
+                }
+            }
+    }
+}
+
+extension View {
+    fileprivate func tabPageEntrance(_ tab: AppTab, selected: AppTab) -> some View {
+        modifier(TabPageEntrance(tab: tab, selected: selected))
     }
 }

@@ -136,7 +136,7 @@ struct MembershipPromoView: View {
                               title: "Clear your head with Distill",
                               benefits: ["Talk or type everything on your mind, unfiltered",
                                          "Distill turns the jumble into clear, dated tasks"]) {
-                        PromoBrainDumpArt(palette: palette)
+                        PromoDistillArt(palette: palette)
                     }
                     .tag(Self.distillPage)
                     // …and its Evry only shows while it's the current page.
@@ -575,7 +575,7 @@ private struct PromoHabitsArt: View {
 
 /// Rambling half-sentences drift around, get pulled in by Evry, and come out
 /// as clear tasks with due days — messy thinking in, actionable list out.
-private struct PromoBrainDumpArt: View {
+private struct PromoDistillArt: View {
     let palette: Palette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -955,7 +955,6 @@ struct MembershipPlansView: View {
     @Environment(\.dismiss) private var dismiss
 
     @AppStorage("membership_plan") private var membershipPlan = ""
-    @AppStorage("pro_welcomed") private var proWelcomed = false
     /// Monthly by default — it's the better deal.
     @State private var isMonthly = true
     @State private var showCancelConfirm = false
@@ -1052,8 +1051,6 @@ struct MembershipPlansView: View {
             cancelTitle: "No"
         ) {
             membershipPlan = ""
-            // Let a future re-subscribe replay the welcome celebration.
-            proWelcomed = false
             dismiss()
         }
         .onAppear {
@@ -1224,237 +1221,5 @@ private struct BillingToggleTab: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(active ? .isSelected : [])
-    }
-}
-
-// MARK: - Pro welcome + guided setup
-
-/// Shown right after a user upgrades: a celebratory beat, then a short guided
-/// setup ("Let's plan your day") that walks them through the headline Pro tools.
-struct ProWelcomeView: View {
-    @Environment(\.colorScheme) private var scheme
-    @Environment(Appearance.self) private var appearance
-    @Environment(CalendarService.self) private var calendarService
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// Called when the user chooses to try Brain Dump (host opens it).
-    var onBrainDump: () -> Void
-    /// Called when the user finishes the flow.
-    var onFinish: () -> Void
-
-    @State private var stage = 0          // 0 = celebration, 1 = setup
-    @State private var celebrate = false
-    /// The celebration's Evry glides into the setup bubble — one Evry, moving.
-    @Namespace private var evryNS
-
-    private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
-    private var calendarConnected: Bool { calendarService.isAuthorized }
-
-    var body: some View {
-        // The 440pt glows sit in the background, so they can't widen the page
-        // past the screen (which pushed everything to its edges).
-        Group {
-            if stage == 0 { celebration } else { setup }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background {
-            ZStack(alignment: .topTrailing) {
-                palette.bg
-                EvryGlow(onNavy: palette.dark)
-                    .offset(x: 150, y: -160)
-            }
-            .ignoresSafeArea()
-        }
-        .tint(palette.primary)
-        .preferredColorScheme(appearance.preferredColorScheme)
-        .onAppear {
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            withAnimation(reduceMotion ? .easeOut(duration: 0.3) : EvryMotion.spring) { celebrate = true }
-        }
-    }
-
-    // MARK: Celebration
-
-    private var celebration: some View {
-        VStack(spacing: EvrySpace.grid) {
-            Spacer()
-            ZStack {
-                // A small burst of sky dots radiating outward (off under Reduce Motion).
-                if !reduceMotion {
-                    ForEach(0..<12, id: \.self) { i in
-                        EvryBullet(size: 8 + CGFloat(i % 3) * 3)
-                            .offset(
-                                x: celebrate ? CGFloat(cos(Double(i) / 12 * 2 * .pi)) * 130 : 0,
-                                y: celebrate ? CGFloat(sin(Double(i) / 12 * 2 * .pi)) * 130 : 0
-                            )
-                            .opacity(celebrate ? 0 : 1)
-                            .animation(.easeOut(duration: 1.3).delay(0.1), value: celebrate)
-                    }
-                }
-                EvryMascot(size: 140, float: true, shadow: true)
-                    .matchedGeometryEffect(id: "evry", in: evryNS)
-                    .scaleEffect(celebrate || reduceMotion ? 1 : 0.4)
-                    .animation(EvryMotion.spring, value: celebrate)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 200)
-            .background { EvryGlow(onNavy: palette.dark) }
-
-            VStack(spacing: 16) {
-                Text("Thanks for subscribing")
-                    .font(.evryH2)
-                    .tracking(EvryTracking.h2)
-                    .foregroundStyle(palette.text)
-                    .multilineTextAlignment(.center)
-                Text("We’re glad to have you. Let’s pick up right where you left off.")
-                    .font(.evryLead)
-                    .foregroundStyle(palette.textSec)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity)
-            .opacity(celebrate ? 1 : 0)
-            .offset(y: celebrate || reduceMotion ? 0 : 14)
-            .animation(EvryMotion.reveal.delay(0.35), value: celebrate)
-
-            Spacer()
-
-            Button("Let’s go") {
-                withAnimation(EvryMotion.settle) { stage = 1 }
-            }
-            .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
-        }
-        // Clear margins on every side, inside the safe area.
-        .padding(.horizontal, 28)
-        .padding(.top, 24)
-        .padding(.bottom, 32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: Guided setup
-
-    private var setup: some View {
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("Let’s plan your day")
-                    .font(.evryH2)
-                    .tracking(EvryTracking.h2)
-                    .foregroundStyle(palette.text)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                WelcomeBubble(text: "I’ll help you get set up in a few quick steps. Shall we start with your calendar?",
-                              palette: palette, evryNS: evryNS)
-            }
-            .padding(.horizontal, EvrySpace.grid)
-            .padding(.top, 44)
-
-            Spacer()
-
-            VStack(spacing: 16) {
-                stepCard(title: "Connect your calendar",
-                         subtitle: "See Apple, Google and Outlook events beside your tasks.",
-                         done: calendarConnected,
-                         actionLabel: "Connect",
-                         action: { Task { await calendarService.requestAccess() } }) {
-                    ToolIcon(tool: .calendar, tile: 44, palette: palette)
-                }
-                stepCard(title: "Try Distill",
-                         subtitle: "Speak or type what’s on your mind, and Evry turns it into a clear task list.",
-                         done: false, actionLabel: "Try it",
-                         action: { onBrainDump() }) {
-                    ToolIcon(tool: .tasks, tile: 44, palette: palette)
-                }
-                stepCard(title: "Start a focus session",
-                         subtitle: "Calm, timed Pomo sessions with gentle breaks.",
-                         done: false, actionLabel: nil, action: nil) {
-                    Image(systemName: "timer")
-                        .font(.nunito(size: 20, weight: .semibold))
-                        .foregroundStyle(Color.evryNavy)
-                        .frame(width: 44, height: 44)
-                        .background(Color.evrySky.opacity(0.7), in: Circle())
-                        .accessibilityHidden(true)
-                }
-            }
-            .padding(.horizontal, EvrySpace.gutter)
-
-            Spacer()
-
-            Button("I’m all set") { onFinish() }
-                .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
-                .padding(.horizontal, EvrySpace.grid)
-                .padding(.bottom, 32)
-        }
-    }
-
-    private func stepCard<Icon: View>(title: String, subtitle: String, done: Bool,
-                                      actionLabel: String?,
-                                      action: (() -> Void)?,
-                                      @ViewBuilder icon: () -> Icon) -> some View {
-        HStack(spacing: 16) {
-            icon()
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.evryLabel)
-                    .foregroundStyle(palette.text)
-                Text(subtitle)
-                    .font(.nunito(size: 14))
-                    .foregroundStyle(palette.textSec)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
-            if done {
-                EvryCheck(size: 24)
-                    .accessibilityLabel("Done")
-                    .accessibilityHidden(false)
-            } else if let actionLabel, let action {
-                Button(action: action) {
-                    Text(actionLabel)
-                        .font(.evrySmall)
-                        .padding(.horizontal, 16)
-                        .frame(minHeight: EvrySpace.tap)
-                        .evryButtonFace(palette, in: Capsule())
-                }
-                .buttonStyle(PressScaleStyle())
-            }
-        }
-        .padding(16)
-        .evryCard(palette)
-    }
-}
-
-// MARK: - Welcome bubble
-
-/// Evry's line in the Pro welcome: the mascot beside a sky-soft bubble (1pt sky
-/// ring, tail bottom-left), matching `EvryBubble`. Kept local because
-/// `EvryBubble` sizes its bubble to 85% of the *screen* width, which overflows
-/// padded layouts.
-private struct WelcomeBubble: View {
-    let text: String
-    let palette: Palette
-    /// Shared with the celebration's mascot so Evry moves rather than doubles.
-    let evryNS: Namespace.ID
-
-    private var shape: UnevenRoundedRectangle {
-        UnevenRoundedRectangle(topLeadingRadius: EvryRadius.field, bottomLeadingRadius: EvryRadius.tail,
-                               bottomTrailingRadius: EvryRadius.field, topTrailingRadius: EvryRadius.field,
-                               style: .continuous)
-    }
-
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            EvryMascot(size: 40)
-                .matchedGeometryEffect(id: "evry", in: evryNS)
-            Text(text)
-                .font(.evryBubble)
-                .lineSpacing(5)
-                .foregroundStyle(palette.text)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(palette.skySoft, in: shape)
-                .overlay(shape.strokeBorder(Color.evrySky, lineWidth: 1))
-            Spacer(minLength: 0)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Evry says: " + text)
     }
 }

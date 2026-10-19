@@ -160,7 +160,7 @@ private struct RichTextEditorRepresentable: UIViewRepresentable {
             controller.lastDark = palette.dark
             tv.configure(palette: palette)
         }
-        // Reflect external content changes (initial load, brain dump append).
+        // Reflect external content changes (initial load).
         // Compare plain strings so attribute-only differences don't reload.
         if (tv.attributedText?.string ?? "") != text.string {
             tv.setAttributedTextPreservingSelection(text)
