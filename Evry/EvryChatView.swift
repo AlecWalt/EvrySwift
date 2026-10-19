@@ -27,7 +27,7 @@ private struct ChatMessage: Identifiable, Equatable {
         /// The three feature chips (Distill, Pomo, Write).
         case suggestions
         /// Tasks extracted by Distill, waiting to be added.
-        case tasks([BrainPreviewTask])
+        case tasks([DistilledTask])
         /// Pomodoro session choices.
         case pomoPresets
         /// A note created by Write.
@@ -152,6 +152,8 @@ struct EvryChatOverlay: View {
     /// The welcome greeting fades in a beat after the card arrives.
     @State private var greetingShown = false
     @State private var thinkingSpin = false
+    /// The transcript is taller than the card (Evry then rests above the composer).
+    @State private var transcriptOverflows = false
     /// Evry messages that have finished typing (their options show after).
     @State private var typed: Set<UUID> = []
     @Namespace private var mascotSpace
@@ -200,10 +202,8 @@ struct EvryChatOverlay: View {
         VStack(spacing: 0) {
             topBar
             if started {
-                ListeningMascot(size: composerFocused ? 52 : 72, listening: isListeningToUser)
-                    .matchedGeometryEffect(id: "evry", in: mascotSpace)
-                    .padding(.bottom, 4)
-                    .animation(EvryMotion.settle, value: composerFocused)
+                // Evry itself rides along the transcript as the speaker of its
+                // latest reply (see `speaker`), so it isn't drawn up here too.
                 transcript
             } else {
                 welcome
@@ -359,11 +359,28 @@ struct EvryChatOverlay: View {
                         .frame(height: 16)
                 }
             }
+            // Once the conversation is taller than the card, Evry stops moving
+            // down and stays put while older messages scroll away.
+            .onScrollGeometryChange(for: Bool.self) { geo in
+                geo.contentSize.height > geo.containerSize.height + 1
+            } action: { _, overflows in
+                transcriptOverflows = overflows
+            }
+            // Drawn over the mask, so Evry never fades with the messages.
+            .overlayPreferenceValue(EvrySpeakerAnchor.self) { anchor in speaker(anchor) }
             .onAppear { scrollToEnd(proxy) }
             .onChange(of: messages.count) { _, _ in scrollToEnd(proxy) }
             .onChange(of: thinking) { _, _ in scrollToEnd(proxy) }
-            // Options appear when a line finishes typing — keep them in view.
-            .onChange(of: typed.count) { _, _ in scrollToEnd(proxy) }
+            // Options appear when a line finishes typing — keep them in view,
+            // and follow again once cards have finished popping in (their
+            // height lands a moment later).
+            .onChange(of: typed.count) { _, _ in
+                scrollToEnd(proxy)
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(450))
+                    scrollToEnd(proxy)
+                }
+            }
             // The keyboard shrinks the list; follow the conversation once it's up.
             .onChange(of: composerFocused) { _, focused in
                 guard focused else { return }
@@ -377,6 +394,48 @@ struct EvryChatOverlay: View {
 
     private func scrollToEnd(_ proxy: ScrollViewProxy) {
         withAnimation(EvryMotion.settle) { proxy.scrollTo("bottom", anchor: .bottom) }
+    }
+
+    // MARK: Speaker
+
+    /// Evry's size beside its replies.
+    private static let speakerSize: CGFloat = 44
+
+    /// The row Evry is speaking from: the reply it's writing, else its latest.
+    private var speakerRowID: String? {
+        if thinking { return "typing" }
+        return messages.last(where: { $0.role == .evry })?.id.uuidString
+    }
+
+    /// Evry, once the conversation starts: beside its latest reply (slightly
+    /// under the person's message, as if answering it), moving down with each
+    /// reply — then, once the transcript fills the card, resting just above
+    /// the composer while the messages scroll off the top. The single mascot
+    /// on screen; it glides here from the welcome's centre.
+    private func speaker(_ anchor: Anchor<CGPoint>?) -> some View {
+        GeometryReader { geo in
+            let size = Self.speakerSize
+            let rest = CGPoint(x: EvrySpace.grid + size / 2, y: geo.size.height - size / 2 - 18)
+            let target = transcriptOverflows ? rest : (anchor.map { geo[$0] } ?? rest)
+            ListeningMascot(size: size, listening: isListeningToUser)
+                .frame(width: size, height: size)
+                .matchedGeometryEffect(id: "evry", in: mascotSpace)
+                .position(x: target.x, y: min(max(target.y, size / 2 + 8), rest.y))
+                .animation(reduceMotion ? .easeOut(duration: 0.2) : EvryMotion.settle, value: speakerRowID)
+                .animation(EvryMotion.settle, value: transcriptOverflows)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// The empty column Evry's replies are indented by; the speaking row
+    /// publishes its centre so Evry can sit in it.
+    private func speakerGutter(_ rowID: String) -> some View {
+        Color.clear
+            .frame(width: Self.speakerSize, height: Self.speakerSize)
+            .anchorPreference(key: EvrySpeakerAnchor.self, value: .center) { anchor in
+                rowID == speakerRowID ? anchor : nil
+            }
     }
 
     /// Evry's replies are plain text across the card; the person's messages sit
@@ -398,6 +457,8 @@ struct EvryChatOverlay: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("You: \(message.text)")
         case .evry:
+            HStack(alignment: .top, spacing: 10) {
+            speakerGutter(message.id.uuidString)
             VStack(alignment: .leading, spacing: 12) {
                 TypewriterText(text: message.text) {
                     withAnimation(EvryMotion.settle) { _ = typed.insert(message.id) }
@@ -435,27 +496,29 @@ struct EvryChatOverlay: View {
                     }
                 }
             }
+            }
         }
     }
 
-    /// Evry's star turning gently while it works on a reply.
+    /// Three dots beside Evry while it works on a reply. (Not the star mark:
+    /// Evry is already on screen right next to it.)
     private var typingIndicator: some View {
-        HStack(spacing: 8) {
-            Image("EvryIconStar")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 22, height: 22)
-                .foregroundStyle(palette.text)
-                .rotationEffect(.degrees(thinkingSpin && !reduceMotion ? 360 : 0))
-                .scaleEffect(thinkingSpin && !reduceMotion ? 0.85 : 1)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 1.1).repeatForever(autoreverses: false),
-                           value: thinkingSpin)
-                .onAppear { thinkingSpin = true }
-                .onDisappear { thinkingSpin = false }
+        HStack(alignment: .center, spacing: 10) {
+            speakerGutter("typing")
+            HStack(spacing: 6) {
+                ForEach(0..<3, id: \.self) { i in
+                    Circle()
+                        .fill(palette.text.opacity(0.55))
+                        .frame(width: 8, height: 8)
+                        .scaleEffect(thinkingSpin && !reduceMotion ? 1 : 0.55)
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.5)
+                            .repeatForever(autoreverses: true).delay(Double(i) * 0.16), value: thinkingSpin)
+                }
+            }
+            .onAppear { thinkingSpin = true }
+            .onDisappear { thinkingSpin = false }
             Spacer(minLength: 0)
         }
-        .frame(height: 28)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Evry is writing")
     }
@@ -489,17 +552,25 @@ struct EvryChatOverlay: View {
         }
     }
 
-    private func taskList(_ tasks: [BrainPreviewTask], message: ChatMessage, done: Bool) -> some View {
+    private func taskList(_ tasks: [DistilledTask], message: ChatMessage, done: Bool) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
                     if index > 0 { Rectangle().fill(palette.hairline).frame(height: 1) }
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         if done { EvryCheck(size: 18) } else { EvryBullet(size: 10) }
-                        Text(task.title)
-                            .font(.evryBody)
-                            .foregroundStyle(palette.text)
-                            .fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(task.title)
+                                .font(.evryBody)
+                                .foregroundStyle(palette.text)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !task.location.isEmpty {
+                                Label(task.location, systemImage: "mappin.and.ellipse")
+                                    .font(.nunito(size: 13))
+                                    .foregroundStyle(palette.textSec)
+                                    .lineLimit(1)
+                            }
+                        }
                         Spacer(minLength: 0)
                         if task.priority != .normal, let symbol = task.priority.symbol {
                             Image(systemName: symbol)
@@ -534,7 +605,7 @@ struct EvryChatOverlay: View {
                         .font(.evryLabel)
                         .foregroundStyle(palette.text)
                         .lineLimit(1)
-                    Text(NoteBodyCodec.plainText(note.body).replacingOccurrences(of: "•\t", with: ""))
+                    Text(note.plainText.replacingOccurrences(of: "•\t", with: ""))
                         .font(.nunito(size: 13))
                         .foregroundStyle(palette.textSec)
                         .lineLimit(2)
@@ -585,9 +656,13 @@ struct EvryChatOverlay: View {
 
     private func confirmDelete(_ pending: EvryPendingDelete, from message: ChatMessage) {
         resolved.insert(message.id)
-        actionDesk().confirm(pending)
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
-        reply("Deleted “\(pending.title)”.")
+        if actionDesk().confirm(pending) {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            reply("Deleted “\(pending.title)”.")
+        } else {
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            reply("I couldn’t delete “\(pending.title)” — please try again in the app.")
+        }
     }
 
     private func actionChip(_ title: String, message: ChatMessage, disabled: Bool) -> some View {
@@ -749,6 +824,7 @@ struct EvryChatOverlay: View {
 
     private func open() {
         guard !greetingShown else { return }
+        CoreHooks.mascotOpened()
         // The card settles, then Evry's greeting rises in and the options pop in.
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(reduceMotion ? 0 : 420))
@@ -917,25 +993,30 @@ struct EvryChatOverlay: View {
     private func appData() -> EvryAppData {
         let cal = Calendar.current
         let now = Date()
-        let tasks = ((try? context.fetch(FetchDescriptor<TaskItem>())) ?? []).filter { !$0.isTrashed && !$0.isNote }
         func record(_ t: TaskItem) -> EvryAppData.Task {
-            EvryAppData.Task(title: t.title, due: t.dueDate, done: t.completed, priority: t.priority.rawValue,
+            EvryAppData.Task(title: t.title, due: t.dueDate, priority: t.priority.rawValue,
                              folder: t.group?.name, notes: t.notes)
         }
-        let open = tasks.filter { !$0.completed }
+        // Filtered in the store rather than fetching everything and filtering here.
+        let openFetch = FetchDescriptor<TaskItem>(predicate: #Predicate {
+            !$0.completed && !$0.isNote && $0.deletedAt == nil
+        })
+        let open = ((try? context.fetch(openFetch)) ?? [])
             .sorted { ($0.dueDate ?? .distantFuture) < ($1.dueDate ?? .distantFuture) }
         let weekAgo = cal.date(byAdding: .day, value: -7, to: now) ?? now
-        let done = tasks.filter { $0.completed && ($0.completedAt ?? .distantPast) >= weekAgo }
-            .sorted { ($0.completedAt ?? .distantPast) > ($1.completedAt ?? .distantPast) }
+        let doneFetch = FetchDescriptor<TaskItem>(predicate: #Predicate { t in
+            if let at = t.completedAt { t.completed && !t.isNote && t.deletedAt == nil && at >= weekAgo } else { false }
+        }, sortBy: [SortDescriptor(\.completedAt, order: .reverse)])
+        let done = (try? context.fetch(doneFetch)) ?? []
 
-        let notes = ((try? context.fetch(FetchDescriptor<Note>())) ?? []).filter { !$0.isTrashed }
-            .sorted { $0.modifiedAt > $1.modifiedAt }
+        let notesFetch = FetchDescriptor<Note>(predicate: #Predicate { $0.deletedAt == nil },
+                                               sortBy: [SortDescriptor(\.modifiedAt, order: .reverse)])
+        let notes = ((try? context.fetch(notesFetch)) ?? [])
             .map { n in
                 EvryAppData.Note(title: n.title, folder: n.folder?.name,
-                                 text: NoteBodyCodec.plainText(n.body)
+                                 text: n.plainText
                                     .replacingOccurrences(of: "•\t", with: "")
-                                    .replacingOccurrences(of: "\n", with: " "),
-                                 modified: n.modifiedAt)
+                                    .replacingOccurrences(of: "\n", with: " "))
             }
 
         let start = cal.startOfDay(for: now)
@@ -945,8 +1026,8 @@ struct EvryChatOverlay: View {
         }
 
         let habits = ((try? context.fetch(FetchDescriptor<Habit>())) ?? [])
-            .filter { !$0.isFormed && $0.isScheduled(on: start) }
-            .map { EvryAppData.Habit(name: $0.name, doneToday: HabitStats(habit: $0).todayDone) }
+            .filter { $0.isDue(on: start) }
+            .map { EvryAppData.Habit(name: $0.name, doneToday: $0.isDoneToday) }
 
         return EvryAppData(openTasks: open.map(record), recentlyDone: done.map(record),
                            notes: notes, events: events, habitsToday: habits)
@@ -956,9 +1037,9 @@ struct EvryChatOverlay: View {
 
     private func distill(_ text: String) {
         withThinking {
-            let tasks: [BrainPreviewTask]
+            let tasks: [DistilledTask]
             do {
-                tasks = try await EvryAssistant.distill(text, usesPrioritiesOften: usesPrioritiesOften)
+                tasks = try await EvryAssistant.distill(text, usesPrioritiesOften: EvryAssistant.usesPrioritiesOften(context))
             } catch {
                 // The model couldn't run this time — split the text instead, so
                 // the person still gets their tasks.
@@ -974,23 +1055,17 @@ struct EvryChatOverlay: View {
         }
     }
 
-    /// True when the user labels a meaningful share of their own tasks with a
-    /// priority (matches Brain dump's behaviour).
-    private var usesPrioritiesOften: Bool {
-        let all = (try? context.fetch(FetchDescriptor<TaskItem>())) ?? []
-        let real = all.filter { !$0.isTrashed && !$0.isNote }
-        guard real.count >= 5 else { return false }
-        let labeled = real.filter { $0.priority != .normal }.count
-        return Double(labeled) / Double(real.count) >= 0.4
-    }
-
-    private func addTasks(_ tasks: [BrainPreviewTask], from message: ChatMessage) {
+    /// Adds the reviewed Distill tasks to the inbox, with the location Distill
+    /// found (or none — no second guess from the title).
+    private func addTasks(_ tasks: [DistilledTask], from message: ChatMessage) {
         for task in tasks {
-            let item = TaskItem(title: task.title)
+            let item = TaskItem(title: task.title, location: task.location, autoLocation: false)
             // Every task needs a due date — default to today when none was said.
             item.dueDate = task.dueDate ?? Calendar.current.startOfDay(for: Date())
             item.priority = task.priority
             context.insert(item)
+            NotificationService.schedule(item)
+            CoreHooks.taskCreated(item)
         }
         try? context.save()
         UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -1051,6 +1126,16 @@ struct EvryChatOverlay: View {
             try? await Task.sleep(for: .milliseconds(400))
             action()
         }
+    }
+}
+
+// MARK: - Speaker anchor
+
+/// The centre of the gutter beside the row Evry is speaking from.
+private struct EvrySpeakerAnchor: PreferenceKey {
+    static let defaultValue: Anchor<CGPoint>? = nil
+    static func reduce(value: inout Anchor<CGPoint>?, nextValue: () -> Anchor<CGPoint>?) {
+        value = nextValue() ?? value
     }
 }
 

@@ -225,7 +225,9 @@ private let timePatterns: [TimePattern] = [
         (Int(g[1]) ?? 0, Int(g[2]) ?? 0)
     },
     TimePattern(regex: rx(#"\b(?:at\s+)?noon\b"#)) { _ in (12, 0) },
-    TimePattern(regex: rx(#"\b(?:at\s+)?midnight\b"#)) { _ in (0, 0) },
+    // The end of that day, not 00:00 — which reads as "no time" and, with no
+    // date given, rolled to the start of tomorrow.
+    TimePattern(regex: rx(#"\b(?:at\s+)?midnight\b"#)) { _ in (23, 59) },
 ]
 
 private let tagPattern = rx(#"#(\w+)"#)

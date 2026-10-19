@@ -59,8 +59,8 @@ final class Folder {
     var uid: UUID = UUID()
     var name: String = ""
     var icon: String = "folder"
-    /// Legacy folder tint (hex), from when colours were picked. Still decoded,
-    /// but only ever rendered as a brand sky/navy shade.
+    /// Legacy folder tint (hex), from when colours were picked. Kept only so
+    /// the store needs no migration — it is no longer read.
     var colorHex: Int?
     /// Automatic colour: a position (0…1) between sky (0) and navy (1),
     /// assigned in sequence when the folder is created. Takes precedence over
@@ -72,16 +72,9 @@ final class Folder {
     @Relationship(deleteRule: .nullify, inverse: \Note.folder)
     var notes: [Note]? = []
 
-    init(name: String, icon: String = "folder", colorHex: Int? = nil) {
+    init(name: String, icon: String = "folder") {
         self.name = name
         self.icon = icon
-        self.colorHex = colorHex
-    }
-
-    /// Legacy accessor. Old picked hues (blue, pink, orange…) are never shown;
-    /// any stored colour resolves to the brand's mid sky/navy shade.
-    var color: Color? {
-        colorHex.map { _ in Color.evrySky.mix(with: .evryNavy, by: 0.55) }
     }
 
     /// The folder's display colour in the current theme.

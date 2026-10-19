@@ -63,6 +63,19 @@ final class Habit {
         weekdays.isEmpty || weekdays.contains(calendar.component(.weekday, from: day))
     }
 
+    /// Due on `day`: still being built (not yet formed) and scheduled then.
+    func isDue(on day: Date) -> Bool { !isFormed && isScheduled(on: day) }
+
+    /// Check-ins logged on `day` — a single pass over the entries, for places
+    /// that only need "done today?" rather than the full `HabitStats` walk.
+    func checkIns(on day: Date) -> Int {
+        let start = Calendar.current.startOfDay(for: day)
+        return (entries ?? []).reduce(0) { $0 + ($1.day == start ? 1 : 0) }
+    }
+
+    /// Today's target is met.
+    var isDoneToday: Bool { checkIns(on: Date()) >= max(1, dailyTarget) }
+
     /// Check-ins per day, keyed by start of day, built in one pass.
     var countsByDay: [Date: Int] {
         var counts: [Date: Int] = [:]
@@ -235,6 +248,32 @@ struct HabitStats {
     }
 }
 
+// MARK: - Stats cache
+
+/// Reuses each habit's `HabitStats` (a walk over its whole history) until
+/// something it depends on changes — check-ins, target, schedule, goal or the
+/// day. The Habits page re-renders on every carousel swipe; this keeps that
+/// from re-walking every habit's history each time.
+@MainActor
+final class HabitStatsCache {
+    private var store: [UUID: (key: Int, stats: HabitStats)] = [:]
+
+    func stats(for habit: Habit, today: Date) -> HabitStats {
+        var hasher = Hasher()
+        hasher.combine(habit.entries?.count ?? 0)
+        hasher.combine(habit.dailyTarget)
+        hasher.combine(habit.weekdays)
+        hasher.combine(habit.goalDays)
+        hasher.combine(habit.createdAt)
+        hasher.combine(today)
+        let key = hasher.finalize()
+        if let hit = store[habit.uid], hit.key == key { return hit.stats }
+        let fresh = HabitStats(habit: habit)
+        store[habit.uid] = (key, fresh)
+        return fresh
+    }
+}
+
 // MARK: - Actions
 
 enum HabitActions {
@@ -244,12 +283,16 @@ enum HabitActions {
         context.insert(entry)
         try? context.save()
         refreshFormed(habit, context: context)
+        CoreHooks.habitCheckedIn(habit)
     }
 
     /// Stamps (or clears) `formedAt` as completed days cross the long-term goal.
     /// Called after every change to a habit's history or goal length.
     static func refreshFormed(_ habit: Habit, context: ModelContext) {
-        let reached = HabitStats(habit: habit).goalReached
+        // Only the completed-day count matters here (no streak walk needed).
+        let target = max(1, habit.dailyTarget)
+        let completedDays = habit.countsByDay.values.filter { $0 >= target }.count
+        let reached = completedDays >= max(1, habit.goalDays)
         if reached && habit.formedAt == nil {
             habit.formedAt = Date()
         } else if !reached && habit.formedAt != nil {
@@ -269,6 +312,7 @@ enum HabitActions {
         context.delete(last)
         try? context.save()
         refreshFormed(habit, context: context)
+        CoreHooks.habitChanged(habit)
     }
 
     #if DEBUG
@@ -298,6 +342,7 @@ enum HabitActions {
 
     /// Deletes the habit and (via cascade) its whole history.
     static func delete(_ habit: Habit, context: ModelContext) {
+        CoreHooks.habitDeleted(id: habit.uid)
         context.delete(habit)
         try? context.save()
     }

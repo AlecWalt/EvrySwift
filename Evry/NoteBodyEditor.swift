@@ -141,6 +141,7 @@ private struct RichTextEditorRepresentable: UIViewRepresentable {
         controller.textBinding = $text
         controller.onEdit = onEdit
         tv.configure(palette: palette)
+        controller.lastDark = palette.dark
         tv.setAttributedTextPreservingSelection(text.length > 0 ? text : NSAttributedString(string: "", attributes: tv.bodyTypingAttributes))
         tv.typingAttributes = tv.bodyTypingAttributes
         tv.placeholderText = placeholder
@@ -152,8 +153,14 @@ private struct RichTextEditorRepresentable: UIViewRepresentable {
     func updateUIView(_ tv: NoteTextView, context: Context) {
         controller.textBinding = $text
         controller.onEdit = onEdit
-        tv.configure(palette: palette)
-        // Reflect external content changes (initial load, brain dump append).
+        // This runs on every keystroke (the binding is kept in sync), so only
+        // restyle — and rebuild the formatting bar — when the theme changes.
+        let themeChanged = controller.lastDark != palette.dark
+        if themeChanged {
+            controller.lastDark = palette.dark
+            tv.configure(palette: palette)
+        }
+        // Reflect external content changes (initial load).
         // Compare plain strings so attribute-only differences don't reload.
         if (tv.attributedText?.string ?? "") != text.string {
             tv.setAttributedTextPreservingSelection(text)
@@ -161,7 +168,7 @@ private struct RichTextEditorRepresentable: UIViewRepresentable {
         tv.placeholderText = placeholder
         tv.refreshPlaceholder()
         // Keep the hosted bar's palette in sync (e.g. light/dark change).
-        if let host = controller.accessoryHost as? UIHostingController<NoteFormattingBar> {
+        if themeChanged, let host = controller.accessoryHost as? UIHostingController<NoteFormattingBar> {
             host.rootView = NoteFormattingBar(controller: controller, palette: palette)
         }
     }
@@ -193,6 +200,8 @@ final class RichTextController: NSObject, UITextViewDelegate {
     @ObservationIgnored var onEdit: ((NSAttributedString) -> Void)?
     /// Retains the hosting controller for the inputAccessoryView formatting bar.
     @ObservationIgnored var accessoryHost: UIViewController?
+    /// The theme the text view was last styled for.
+    @ObservationIgnored var lastDark: Bool?
 
     var isBold = false
     var isItalic = false
@@ -476,8 +485,6 @@ extension UIFont {
     static func nunito(size: CGFloat, weight: UIFont.Weight = .regular, italic: Bool = false) -> UIFont {
         let base: String
         switch weight {
-        case .ultraLight, .thin: base = "ExtraLight"
-        case .light: base = "Light"
         case .medium: base = "Medium"
         case .semibold: base = "SemiBold"
         case .bold: base = "Bold"

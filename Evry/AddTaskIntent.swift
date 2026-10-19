@@ -25,15 +25,16 @@ struct AddTaskIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         // parseTaskInput / formatDueDate are @MainActor-isolated (TaskParsing.swift imports SwiftUI).
-        let (finalTitle, finalDate, dateSuffix) = await MainActor.run {
+        let (finalTitle, finalDate, dateSuffix, tags, priority) = await MainActor.run {
             let parsed = parseTaskInput(taskTitle)
             let title = parsed.title.isEmpty ? taskTitle : parsed.title
             let date = dueDate ?? parsed.date  // explicit Siri date wins
             let suffix = date.flatMap { formatDueDate($0) }.map { " due \($0)" } ?? ""
-            return (title, date, suffix)
+            return (title, date, suffix, parsed.tags, parsed.priority.rawValue)
         }
 
-        var entry: [String: Any] = ["title": finalTitle]
+        // Tags and priority parsed from the title ("#work !high") ride along too.
+        var entry: [String: Any] = ["title": finalTitle, "tags": tags, "priority": priority]
         if let due = finalDate {
             entry["dueDate"] = due.timeIntervalSince1970
         }

@@ -34,9 +34,6 @@ struct AddTaskSheet: View {
     /// Presented as a bottom overlay (not a system sheet) so there's no dimming
     /// layer; this drives its visibility.
     @Binding var isPresented: Bool
-    /// Seeds the due date when the typed text doesn't specify one — used by the
-    /// Calendar tab to drop a new task onto the selected day.
-    var defaultDate: Date? = nil
 
     @State private var text = ""
     @State private var notes = ""
@@ -477,6 +474,7 @@ struct AddTaskSheet: View {
         }
         .onChange(of: showLocation) { _, newValue in
             if newValue {
+                locationProvider.locate()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     locationFocused = true
                 }
@@ -649,7 +647,7 @@ struct AddTaskSheet: View {
         let task = TaskItem(
             title: parsed.title,
             // Return with no typed date lands on today.
-            dueDate: overrideDate ?? parsed.date ?? defaultDate ?? startOfDay(Date()),
+            dueDate: overrideDate ?? parsed.date ?? startOfDay(Date()),
             tags: parsed.tags,
             // A long-press high-priority flag wins over the parsed priority.
             priority: isHighPriority ? .high : parsed.priority,
@@ -669,6 +667,7 @@ struct AddTaskSheet: View {
             context.insert(task)
         }
         NotificationService.schedule(task)
+        CoreHooks.taskCreated(task)
         // Move first responder straight to the title field FIRST so the keyboard
         // never drops — otherwise, in list mode, collapsing the checklist section
         // resigns its field and the keyboard closes while the card stays up.
@@ -714,6 +713,10 @@ struct EditTaskSheet: View {
 
     @State private var newSubtask = ""
     @State private var tagsText = ""
+    /// What the reminder shows, as opened — it's rebuilt if any of it changes.
+    @State private var opened: (title: String, priority: TaskPriority, tags: [String])?
+    /// The rest of what the Core counts as an edit, and the due date as opened.
+    @State private var openedDetail: (notes: String, location: String, subtasks: [SubtaskData], due: Date?)?
     @FocusState private var focus: Field?
     private enum Field: Hashable { case title, notes, location, tags, subtask }
 
@@ -743,12 +746,31 @@ struct EditTaskSheet: View {
         .background(palette.bg.ignoresSafeArea())
         .presentationDragIndicator(.visible)
         .tint(palette.primary)
+        // Opening the editor changes nothing: an undated task shows today in the
+        // picker (see `due`) but stays undated until a day is actually picked.
         .onAppear {
-            if task.dueDate == nil { task.dueDate = startOfDay(Date()) }
             tagsText = task.tags.joined(separator: ", ")
+            opened = (task.title, task.priority, task.tags)
+            openedDetail = (task.notes, task.location, task.subtasks, task.dueDate)
         }
         .onChange(of: task.dueDate) {
             NotificationService.schedule(task)
+        }
+        .onDisappear {
+            // The reminder carries the title, priority and tags — refresh it.
+            if let opened, opened.title != task.title || opened.priority != task.priority || opened.tags != task.tags {
+                NotificationService.schedule(task)
+            }
+            // The Core counts one edit per visit to the editor, and a date move.
+            if let opened, let detail = openedDetail, !task.isTrashed {
+                if opened.title != task.title || opened.priority != task.priority || opened.tags != task.tags
+                    || detail.notes != task.notes || detail.location != task.location || detail.subtasks != task.subtasks {
+                    CoreHooks.taskEdited(task)
+                }
+                if let due = task.dueDate, due != detail.due {
+                    CoreHooks.taskRescheduled(task, from: detail.due, to: due)
+                }
+            }
         }
     }
 
@@ -861,6 +883,9 @@ struct EditTaskSheet: View {
                     .focused($focus, equals: .tags)
                     .submitLabel(.done)
                     .onChange(of: tagsText) {
+                        // Skip the initial fill on appear, which would otherwise
+                        // rewrite the tags (lowercased) without any edit.
+                        guard tagsText != task.tags.joined(separator: ", ") else { return }
                         task.tags = tagsText
                             .split(separator: ",")
                             .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -1133,142 +1158,31 @@ private func doneGlyph(_ done: Bool, palette: Palette, size: CGFloat) -> some Vi
 
 @Observable
 private final class CurrentLocationProvider: NSObject, CLLocationManagerDelegate {
-    private let manager = CLLocationManager()
+    /// Made on first use: the quick-add card is rebuilt often, and a location
+    /// search is the only thing that needs this.
+    @ObservationIgnored private lazy var manager: CLLocationManager = {
+        let m = CLLocationManager()
+        m.delegate = self
+        m.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        return m
+    }()
     var coordinate: CLLocationCoordinate2D?
 
-    override init() {
-        super.init()
-        manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-        manager.startUpdatingLocation()
+    /// A one-off fix (no continuous GPS). The last known location is used
+    /// straight away so the first search is already biased nearby.
+    func locate() {
+        if coordinate == nil { coordinate = manager.location?.coordinate }
+        let status = manager.authorizationStatus
+        guard status == .authorizedWhenInUse || status == .authorizedAlways else { return }
+        manager.requestLocation()
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         coordinate = locations.last?.coordinate
     }
-}
 
-struct LocationPickerSheet: View {
-    @Binding var location: String
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var scheme
-    @Environment(Appearance.self) private var appearance
-
-    @State private var query = ""
-    @State private var results: [MKMapItem] = []
-    @State private var searchTask: Task<Void, Never>? = nil
-    @State private var locationProvider = CurrentLocationProvider()
-
-    private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                if results.isEmpty && query.isEmpty {
-                    HStack(spacing: 14) {
-                        ZStack {
-                            Circle()
-                                .fill(palette.skySoft)
-                                .frame(width: 38, height: 38)
-                            Image(systemName: "mappin")
-                                .font(.nunito(size: 16, weight: .bold))
-                                .foregroundStyle(palette.text)
-                        }
-                        .accessibilityHidden(true)
-                        Text("Search for a place or address")
-                            .font(.evryBody)
-                            .foregroundStyle(palette.textSec)
-                    }
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                } else if results.isEmpty && !query.isEmpty {
-                    HStack(spacing: 14) {
-                        ZStack {
-                            Circle()
-                                .fill(palette.skySoft)
-                                .frame(width: 38, height: 38)
-                            Image(systemName: "magnifyingglass")
-                                .font(.nunito(size: 16, weight: .bold))
-                                .foregroundStyle(palette.text)
-                        }
-                        .accessibilityHidden(true)
-                        Text("Nothing matches “\(query)” yet. Try a different name or address.")
-                            .font(.evryBody)
-                            .foregroundStyle(palette.textSec)
-                    }
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                } else {
-                    ForEach(results, id: \.self) { item in
-                        Button {
-                            location = mapItemLabel(item, fallback: item.name ?? "")
-                            dismiss()
-                        } label: {
-                            HStack(spacing: 14) {
-                                ZStack {
-                                    Circle()
-                                        .fill(palette.skySoft)
-                                        .frame(width: 38, height: 38)
-                                    Image(systemName: "mappin")
-                                        .font(.nunito(size: 16, weight: .bold))
-                                        .foregroundStyle(palette.text)
-                                }
-                                .accessibilityHidden(true)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(item.name ?? "Unnamed place")
-                                        .font(.nunito(size: 16, weight: .semibold))
-                                        .foregroundStyle(palette.text)
-                                    let subtitle = mapItemSubtitle(item)
-                                    if !subtitle.isEmpty {
-                                        Text(subtitle)
-                                            .font(.nunito(size: 12))
-                                            .foregroundStyle(palette.textSec)
-                                            .lineLimit(1)
-                                    }
-                                }
-                                Spacer()
-                            }
-                            .padding(.vertical, 2)
-                        }
-                        .listRowBackground(Color.clear)
-                        .listRowSeparatorTint(palette.border)
-                    }
-                }
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .background(palette.bg)
-            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search for a place…")
-            .onChange(of: query) { _, new in scheduleSearch(new) }
-            .navigationTitle("Add a location")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-            }
-        }
-        .tint(palette.primary)
-    }
-
-    private func scheduleSearch(_ q: String) {
-        searchTask?.cancel()
-        let trimmed = q.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { results = []; return }
-        searchTask = Task {
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !Task.isCancelled else { return }
-            let request = MKLocalSearch.Request()
-            request.naturalLanguageQuery = trimmed
-            let coord = locationProvider.coordinate
-            if let coord {
-                request.region = MKCoordinateRegion(center: coord, latitudinalMeters: 50_000, longitudinalMeters: 50_000)
-            }
-            if let response = try? await MKLocalSearch(request: request).start() {
-                let sorted = sortByDistance(response.mapItems, near: coord)
-                await MainActor.run { results = sorted }
-            }
-        }
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        // No fix: searches simply aren't biased to the current area.
     }
 }
 

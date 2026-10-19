@@ -580,6 +580,9 @@ struct EventEditorView: View {
             if span == .futureEvents || !event.hasRecurrenceRules { EventTravel.store(.none, for: event) }
             close(changed: true)
         } catch {
+            // Drop any half-applied change, as a failed save does, so a retry
+            // (or the calendar on screen) starts from what's really stored.
+            store.reset()
             errorMessage = "We couldn't delete this event. Please try again."
         }
     }

@@ -2,8 +2,8 @@
 //  EvryAssistant.swift
 //  Evry
 //
-//  The on-device engine behind Evry, the assistant: turning a brain dump into
-//  tasks (Distill), turning a spoken message into a formatted note (Write), and
+//  The on-device engine behind Evry, the assistant: turning a jumble of
+//  thoughts into tasks (Distill), turning a spoken message into a formatted note (Write), and
 //  short conversational replies in the chat. Everything runs on device through
 //  FoundationModels; when the model isn't available each feature falls back to a
 //  plain, predictable result so the user is never left empty-handed.
@@ -14,26 +14,57 @@
 
 import Foundation
 import FoundationModels
+import SwiftData
 import UIKit
 
 enum EvryAssistant {
     /// True when the on-device language model can be used right now.
     static var isAvailable: Bool { SystemLanguageModel.default.isAvailable }
+
+    /// True when the person labels a meaningful share (40%+) of their own tasks
+    /// with a priority — so Distill can use priorities freely too. Needs a small
+    /// sample, so a brand-new user defaults to sparing. Two counts in the
+    /// store, not a fetch of every task.
+    static func usesPrioritiesOften(_ context: ModelContext) -> Bool {
+        let real = FetchDescriptor<TaskItem>(predicate: #Predicate { !$0.isNote && $0.deletedAt == nil })
+        let total = (try? context.fetchCount(real)) ?? 0
+        guard total >= 5 else { return false }
+        let normal = TaskPriority.normal.rawValue
+        let labeled = FetchDescriptor<TaskItem>(predicate: #Predicate {
+            !$0.isNote && $0.deletedAt == nil && $0.priorityRaw != normal
+        })
+        let count = (try? context.fetchCount(labeled)) ?? 0
+        return Double(count) / Double(total) >= 0.4
+    }
 }
 
-// MARK: - Distill (brain dump → tasks)
+// MARK: - Distill (thoughts → tasks)
 
-@Generable(description: "A single actionable task extracted from a brain dump")
+/// A task Distill found, shown in the chat for review before it's added.
+struct DistilledTask: Identifiable {
+    let id = UUID()
+    var title: String
+    var dueDate: Date?
+    var priority: TaskPriority
+    /// The task's location field ("" for none) — a saved place's full
+    /// location when one matches, otherwise the place as said.
+    var location: String = ""
+}
+
+@Generable(description: "A single actionable task extracted from the user's thoughts")
 private struct DumpedTask {
     @Guide(description: "Concise action-first task title. No filler words. Include timing naturally in the title.")
     var title: String
 
     @Guide(description: "Priority: one of high, medium, low, or normal. Default to 'normal' — only deviate when the text clearly signals unusual importance or unimportance.")
     var priority: String
+
+    @Guide(description: "The place it happens, only if the user named one (e.g. \"Target\", \"the gym\"). Otherwise empty.")
+    var location: String
 }
 
-@Generable(description: "Actionable tasks extracted and cleaned from a free-form brain dump")
-private struct BrainDumpResult {
+@Generable(description: "Actionable tasks extracted and cleaned from free-form thoughts")
+private struct DistillResult {
     @Guide(description: "All actionable tasks, filler words removed, max 20.", .maximumCount(20))
     var tasks: [DumpedTask]
 }
@@ -42,7 +73,7 @@ extension EvryAssistant {
     /// Extracts tasks from a free-form dump. `usesPrioritiesOften` reflects the
     /// user's own habit, so priorities are assigned freely only for people who
     /// lean on them. Throws only if the model fails outright.
-    static func distill(_ input: String, usesPrioritiesOften: Bool) async throws -> [BrainPreviewTask] {
+    static func distill(_ input: String, usesPrioritiesOften: Bool) async throws -> [DistilledTask] {
         // Too little to reason about — skip the model (which otherwise tends to
         // emit schema/instruction text as a task) and just use the raw text.
         let wordCount = input.split(whereSeparator: { $0 == " " || $0 == "\n" }).count
@@ -50,7 +81,7 @@ extension EvryAssistant {
 
         let session = LanguageModelSession(instructions: """
             You are a productivity assistant. Extract clear, actionable tasks \
-            ONLY from the user's own free-form brain dump (spoken or typed).
+            ONLY from the user's own free-form thoughts (spoken or typed).
             Rules:
             - Use ONLY the content the user provided. NEVER invent, assume, or add \
             tasks that are not in their text. Do not use any example tasks.
@@ -64,35 +95,63 @@ extension EvryAssistant {
             time (e.g. "7pm"), keep just the time — never turn it into \
             "today", "tomorrow", or any specific day.
             \(priorityGuidance(usesPrioritiesOften))
+            - If the user names where a task happens, put that place in \
+            location. Never invent a place.
             - Merge duplicates into one task
             - Today's date is \(Date().formatted(.dateTime.weekday().day().month().year()))
             """)
         let response = try await session.respond(
-            to: "Extract tasks from this brain dump:\n\n\(input)",
-            generating: BrainDumpResult.self
+            to: "Extract tasks from these thoughts:\n\n\(input)",
+            generating: DistillResult.self
         )
-        let tasks: [BrainPreviewTask] = response.content.tasks.compactMap { dumped in
+        let tasks: [DistilledTask] = response.content.tasks.compactMap { dumped in
             guard !isSchemaArtifact(dumped.title) else { return nil }
-            let parsed = parseTaskInput(dumped.title)
+            let parsed = parseSpokenTask(dumped.title)
             let priority: TaskPriority = switch dumped.priority.lowercased() {
             case "high":   .high
             case "medium": .medium
             case "low":    .low
             default:       parsed.priority
             }
-            return BrainPreviewTask(
-                title: parsed.title.isEmpty ? dumped.title : parsed.title,
+            let title = parsed.title.isEmpty ? dumped.title : parsed.title
+            let place = placeField(said: dumped.location, title: title)
+            return DistilledTask(
+                title: place.title,
                 dueDate: parsed.date ?? Calendar.current.startOfDay(for: Date()),
-                priority: priority
+                priority: priority,
+                location: place.location
             )
         }
         // If the model returned nothing usable, fall back to splitting the raw text.
         return tasks.isEmpty ? fallbackTasks(input) : tasks
     }
 
+    /// `parseTaskInput`, plus the relative day words people say ("today",
+    /// "tomorrow", "tonight") — which quick add leaves to its swipe gestures,
+    /// but which Distill must honour: "call mom tomorrow" is due tomorrow, and
+    /// the word comes out of the title.
+    static func parseSpokenTask(_ text: String) -> ParsedTask {
+        let parsed = parseTaskInput(text)
+        let pattern = #"(?i)\b(?:(?:on|for)\s+)?(tomorrow|today|tonight|this evening)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let m = regex.firstMatch(in: parsed.title, range: NSRange(parsed.title.startIndex..., in: parsed.title)),
+              let whole = Range(m.range, in: parsed.title), let word = Range(m.range(at: 1), in: parsed.title),
+              var day = EvryWhen.parse(String(parsed.title[word])) else { return parsed }
+        // Keep a time that was given ("tomorrow 3pm" → tomorrow at 3 PM).
+        if let d = parsed.date, EvryWhen.hasTime(d) {
+            let t = Calendar.current.dateComponents([.hour, .minute], from: d)
+            day = Calendar.current.date(bySettingHour: t.hour ?? 0, minute: t.minute ?? 0, second: 0, of: day) ?? day
+        }
+        var title = parsed.title
+        title.removeSubrange(whole)
+        title = title.split(separator: " ").joined(separator: " ")
+        return ParsedTask(title: title.isEmpty ? parsed.title : title, date: day,
+                          tags: parsed.tags, priority: parsed.priority)
+    }
+
     /// Splits the raw dump into tasks without the model — for very short input
     /// and as a safety net when the model returns nothing usable.
-    static func fallbackTasks(_ input: String) -> [BrainPreviewTask] {
+    static func fallbackTasks(_ input: String) -> [DistilledTask] {
         let pieces = input
             .components(separatedBy: CharacterSet(charactersIn: "\n,"))
             .map { stripLeadingJoiner($0.trimmingCharacters(in: .whitespaces)) }
@@ -101,13 +160,39 @@ extension EvryAssistant {
             ? [input.trimmingCharacters(in: .whitespacesAndNewlines)]
             : pieces
         return sources.filter { !$0.isEmpty }.map { line in
-            let parsed = parseTaskInput(line)
-            return BrainPreviewTask(
-                title: parsed.title.isEmpty ? line : parsed.title,
+            let parsed = parseSpokenTask(line)
+            let title = parsed.title.isEmpty ? line : parsed.title
+            return DistilledTask(
+                title: title,
                 dueDate: parsed.date ?? Calendar.current.startOfDay(for: Date()),
-                priority: parsed.priority
+                priority: parsed.priority,
+                location: FrequentPlaces.match(for: title)?.locationString ?? ""
             )
         }
+    }
+
+    /// The location field for a place the model pulled out — a saved place's
+    /// full location when one matches, else the place as said — and the title
+    /// with any leftover mention ("at Target") stripped. With no place said, a
+    /// saved place the title mentions ("go to the gym") still fills it in.
+    private static func placeField(said: String, title: String) -> (title: String, location: String) {
+        let spot = said.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        guard spot.count >= 2, !isSchemaArtifact(spot), spot.lowercased() != "none" else {
+            return (title, FrequentPlaces.match(for: title)?.locationString ?? "")
+        }
+        let location = FrequentPlaces.match(for: spot)?.locationString ?? spot
+        // Drop "at/to/from/in (the) <place>" (or the bare place) from the title,
+        // unless that leaves under two words ("Go to the gym" stays whole).
+        let escaped = NSRegularExpression.escapedPattern(for: spot)
+        let pattern = #"(?i)\s*\b(?:(?:at|to|from|in|near)\s+)?(?:the\s+)?"# + escaped + #"\b"#
+        var stripped = title
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            stripped = regex.stringByReplacingMatches(in: title, range: NSRange(title.startIndex..., in: title),
+                                                      withTemplate: "")
+        }
+        stripped = stripped.split(separator: " ").joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces.union(CharacterSet(charactersIn: ",-–")))
+        return (stripped.split(separator: " ").count < 2 ? title : stripped, location)
     }
 
     /// "…, and book the dentist" → "book the dentist": drops the joining word a
@@ -126,7 +211,6 @@ extension EvryAssistant {
         let l = title.lowercased()
         return l.contains("response format") || l.contains("json")
             || l.contains("schema") || l.contains("actionable task")
-            || l.contains("brain dump")
     }
 
     /// Priority instructions for the extractor — sparing by default, generous only
@@ -278,8 +362,8 @@ extension EvryAssistant {
 /// questions about. Built on the main actor from SwiftData / EventKit, then
 /// handed to the model as plain text.
 struct EvryAppData: Sendable {
-    struct Task: Sendable { let title: String; let due: Date?; let done: Bool; let priority: String; let folder: String?; let notes: String }
-    struct Note: Sendable { let title: String; let folder: String?; let text: String; let modified: Date }
+    struct Task: Sendable { let title: String; let due: Date?; let priority: String; let folder: String?; let notes: String }
+    struct Note: Sendable { let title: String; let folder: String?; let text: String }
     struct Event: Sendable { let title: String; let start: Date; let end: Date; let allDay: Bool }
     struct Habit: Sendable { let name: String; let doneToday: Bool }
 
@@ -353,6 +437,10 @@ final class EvryConversation {
         let result: Reply
         if EvryAssistant.isAvailable, let modelReply = await modelReply(to: message, data: data, desk: desk) {
             result = modelReply
+        } else if !desk.log.isEmpty || !desk.pendingDeletes.isEmpty {
+            // The model ran tools and then failed to reply — the work is done,
+            // so don't run the keyword fallback too (it would add the task twice).
+            result = .answer("All set!")
         } else if let done = Self.fallbackAction(message, desk: desk) {
             result = .answer(done)
         } else {
@@ -383,21 +471,31 @@ final class EvryConversation {
             it. A reminder is a task with a time. Never say you did something without \
             calling a tool. Deleting needs the person's tap: say it's waiting for \
             them to confirm below. To summarise or answer about a note, read it first.
+            You may also get a short profile of how they tend to work. Use it quietly \
+            to fit your suggestions — respect their quiet hours, don't suggest topics \
+            they've held back — but never mention or quote it.
             """)
         let recent = history.map { "Person: \($0.you)\nEvry: \($0.evry)" }.joined(separator: "\n")
+        // The Core's small general slice (no coordinates, no note text), once it
+        // has learned anything at all.
+        let core = EvryCore.shared.getContext(.general)
         let prompt = """
             The person's current data:
             \(data.promptText)
 
+            \(core.conf > 0 ? "How they tend to work: \(core.json)\n" : "")
             \(recent.isEmpty ? "" : "Recent conversation:\n\(recent)\n")
             Their message: \(message)
             """
         do {
             let response = try await session.respond(to: prompt, generating: ChatAnswer.self)
             let answer = response.content
-            guard answer.aboutApp else { return .offTopic }
+            let acted = !desk.log.isEmpty || !desk.pendingDeletes.isEmpty
+            // If tools ran, it was about the app whatever the flag says.
+            guard answer.aboutApp || acted else { return .offTopic }
             let text = Self.formatBullets(answer.reply.trimmingCharacters(in: .whitespacesAndNewlines))
-            return text.isEmpty ? nil : .answer(text)
+            if text.isEmpty { return acted ? .answer("All set!") : nil }
+            return .answer(text)
         } catch {
             return nil
         }
@@ -424,7 +522,9 @@ final class EvryConversation {
         let lower = message.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let leads = ["remind me to ", "remind me ", "add a task to ", "add a task ", "add task ",
                      "new task ", "create a task to ", "create a task ", "add ", "i need to ", "todo ", "to do "]
-        guard let lead = leads.first(where: { lower.hasPrefix($0) }) else { return nil }
+        guard let lead = leads.first(where: { lower.hasPrefix($0) }),
+              // "Add up…" is arithmetic, not "add a task".
+              !lower.hasPrefix("add up ") else { return nil }
         let rest = String(message.dropFirst(lead.count))
         // The date words go to the time; the rest is the title.
         var title = rest

@@ -110,6 +110,7 @@ final class EvryActionDesk {
                             priority: highPriority ? .high : parsed.priority,
                             notes: notes.trimmingCharacters(in: .whitespacesAndNewlines))
         context.insert(task)
+        CoreHooks.taskCreated(task)
         // A timed task gets its reminder at that time.
         NotificationService.schedule(task)
         try? context.save()
@@ -146,7 +147,7 @@ final class EvryActionDesk {
             let old = task.title
             task.title = newTitle
             record(.task, newTitle, "Renamed from “\(old)”")
-        case let a where a.contains("delete") || a.contains("remove"):
+        case let a where a.contains("delete") || (a.contains("remove") && !a.contains("priority")):
             pendingDeletes.append(EvryPendingDelete(target: .task(task), title: task.title))
             return "Asked the person to confirm deleting \"\(task.title)\". It is not deleted yet."
         case let a where a.contains("normal") || a.contains("remove priority") || a.contains("low"):
@@ -202,28 +203,44 @@ final class EvryActionDesk {
         }
         guard event.calendar?.allowsContentModifications ?? false else { return "That event's calendar is read-only." }
         let title = event.title ?? "Event"
+        let done: EvryDone
         switch action.lowercased() {
         case let a where a.contains("delete") || a.contains("cancel") || a.contains("remove"):
             pendingDeletes.append(EvryPendingDelete(target: .event(event), title: title))
             return "Asked the person to confirm deleting \"\(title)\". It is not deleted yet."
         case let a where a.contains("move") || a.contains("resched") || a.contains("time"):
             guard let start = EvryWhen.parse(value) else { return "Couldn't understand the new time \"\(value)\"." }
-            let length = event.endDate.timeIntervalSince(event.startDate)
-            event.startDate = start
-            event.endDate = start.addingTimeInterval(length)
-            record(.event, title, "Moved to \(EvryWhen.describe(start))")
+            if event.isAllDay && EvryWhen.hasTime(start) {
+                // Given a time, it's no longer an all-day event (keep an hour).
+                event.isAllDay = false
+                event.startDate = start
+                event.endDate = start.addingTimeInterval(3600)
+            } else {
+                let length = event.endDate.timeIntervalSince(event.startDate)
+                event.startDate = start
+                event.endDate = start.addingTimeInterval(length)
+            }
+            done = EvryDone(kind: .event, title: title, detail: "Moved to \(EvryWhen.describe(start))")
         case let a where a.contains("rename") || a.contains("title"):
             event.title = value
-            record(.event, value, "Renamed from “\(title)”")
+            done = EvryDone(kind: .event, title: value, detail: "Renamed from “\(title)”")
         case let a where a.contains("place") || a.contains("location"):
             let spot = value.trimmingCharacters(in: .whitespacesAndNewlines)
             event.location = FrequentPlaces.match(for: spot)?.locationString ?? spot
-            record(.event, title, "At \(event.location ?? spot)")
+            done = EvryDone(kind: .event, title: title, detail: "At \(event.location ?? spot)")
         default:
             return "Unknown event action \"\(action)\"."
         }
-        do { try calendar.eventStore.save(event, span: .thisEvent) } catch { return "Saving the event failed." }
-        return "Done: \(log.last?.text ?? action)."
+        do {
+            try calendar.eventStore.save(event, span: .thisEvent)
+        } catch {
+            // Don't leave the unsaved change on the shared event object.
+            calendar.eventStore.reset()
+            return "Saving the event failed."
+        }
+        // Only shown once it's actually saved.
+        log.append(done)
+        return "Done: \(done.text)."
     }
 
     // MARK: Notes
@@ -233,6 +250,8 @@ final class EvryActionDesk {
         let note = Note(title: title.isEmpty ? "New note" : title, body: body)
         context.insert(note)
         try? context.save()
+        CoreHooks.noteSaved(note)
+        EvryXP.rollBonus(.noteCreated)
         record(.note, note.title, "Note saved")
         return "Created the note \"\(note.title)\"."
     }
@@ -240,7 +259,7 @@ final class EvryActionDesk {
     func readNote(named name: String) -> String {
         let notes = ((try? context.fetch(FetchDescriptor<Note>())) ?? []).filter { !$0.isTrashed }
         guard let note = find(name, in: notes, title: \.title) else { return "There's no note matching \"\(name)\"." }
-        let text = NoteBodyCodec.plainText(note.body).replacingOccurrences(of: "•\t", with: "- ")
+        let text = note.plainText.replacingOccurrences(of: "•\t", with: "- ")
         return "Note \"\(note.title)\":\n\(text.prefix(1500))"
     }
 
@@ -249,7 +268,7 @@ final class EvryActionDesk {
     func checkInHabit(named name: String) -> String {
         let habits = ((try? context.fetch(FetchDescriptor<Habit>())) ?? []).filter { !$0.isFormed }
         guard let habit = find(name, in: habits, title: \.name) else { return "There's no habit matching \"\(name)\"." }
-        guard !HabitStats(habit: habit).todayDone else { return "\"\(habit.name)\" is already done today." }
+        guard !habit.isDoneToday else { return "\"\(habit.name)\" is already done today." }
         HabitActions.checkIn(habit, context: context)
         record(.habit, habit.name, "Done for today")
         return "Checked in \"\(habit.name)\"."
@@ -263,16 +282,20 @@ final class EvryActionDesk {
 
     // MARK: Confirmed deletes
 
-    func confirm(_ pending: EvryPendingDelete) {
+    /// Carries out a confirmed deletion. Returns false if it didn't happen.
+    @discardableResult
+    func confirm(_ pending: EvryPendingDelete) -> Bool {
         switch pending.target {
         case .task(let task):
             TaskActions.delete(task)
         case .event(let event):
-            try? calendar.eventStore.remove(event, span: .thisEvent, commit: true)
+            do { try calendar.eventStore.remove(event, span: .thisEvent, commit: true) } catch { return false }
         case .note(let note):
             note.deletedAt = Date()
+            CoreHooks.noteDeleted(note)
         }
-        try? context.save()
+        do { try context.save() } catch { return false }
+        return true
     }
 
     // MARK: Finding things by name
@@ -294,7 +317,11 @@ final class EvryActionDesk {
         let q = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return nil }
         if let exact = items.first(where: { title($0).lowercased() == q }) { return exact }
-        if let contains = items.first(where: { title($0).lowercased().contains(q) || q.contains(title($0).lowercased()) && !title($0).isEmpty }) {
+        if let contains = items.first(where: { item in
+            let t = title(item).lowercased()
+            // "Go" mustn't match "Google meeting": the reverse check needs a real word.
+            return t.contains(q) || (t.count >= 4 && q.contains(t))
+        }) {
             return contains
         }
         let qWords = Set(PlaceLabels.words(q).filter { $0.count > 2 })
@@ -337,11 +364,13 @@ enum EvryWhen {
         }
         // "In 20 minutes", "in 2 hours", "in 3 days".
         if result == nil,
-           let m = s.range(of: #"\bin\s+(\d+)\s*(minute|min|hour|hr|day|week)s?\b"#, options: .regularExpression) {
-            let parts = s[m].split(separator: " ").filter { !$0.isEmpty }
-            let digits = s[m].filter(\.isNumber)
-            if let n = Int(digits), let unit = parts.last {
-                let u = unit.lowercased()
+           let regex = try? NSRegularExpression(pattern: #"\bin\s+(\d+)\s*(minute|min|hour|hr|day|week)s?\b"#),
+           let m = regex.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+           let numRange = Range(m.range(at: 1), in: s), let unitRange = Range(m.range(at: 2), in: s) {
+            // The unit comes from its own capture group, so "in 20min" (no space)
+            // reads as minutes — not the trailing token "20min".
+            if let n = Int(s[numRange]) {
+                let u = String(s[unitRange])
                 let seconds: Double = u.hasPrefix("min") ? 60 : u.hasPrefix("h") ? 3600 : u.hasPrefix("d") ? 86_400 : 604_800
                 let target = Date().addingTimeInterval(Double(n) * seconds)
                 // Whole days and weeks land on the day; minutes and hours keep the time.

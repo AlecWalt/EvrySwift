@@ -70,9 +70,6 @@ extension Color {
     static let evryWhite60 = Color.white.opacity(0.6)
     static let evryWhite35 = Color.white.opacity(0.35)  // ghost-light border
     static let evryWhite10 = Color.white.opacity(0.1)   // ghost-light fill
-
-    /// Centre of the soft radial glow (the only gradient in the system).
-    static let evrySkyGlow = evrySky.opacity(0.55)
 }
 
 // MARK: - Shape, spacing, motion tokens
@@ -81,9 +78,7 @@ enum EvryRadius {
     static let field: CGFloat = 16   // fields, store buttons, bubbles, inset panels
     static let card: CGFloat = 24    // cards, forms
     static let panel: CGFloat = 32   // plan cards, large panels, sheets
-    static let band: CGFloat = 40    // the navy CTA band
     static let tile: CGFloat = 12    // tool icon tiles
-    static let focus: CGFloat = 8
     static let tail: CGFloat = 6     // speech-bubble tail corner
 }
 
@@ -91,7 +86,6 @@ enum EvrySpace {
     static let gutter: CGFloat = 16
     static let grid: CGFloat = 24
     static let card: CGFloat = 28
-    static let heading: CGFloat = 40
     static let buttonX: CGFloat = 24
     static let buttonY: CGFloat = 12
     static let buttonHeight: CGFloat = 48
@@ -234,10 +228,6 @@ struct Palette {
     /// Completed / done fill: the sky "check disc", with navy ink on top.
     static let doneFill = Color.evrySky
 
-    var successLight: Color { skySoft }
-    var dangerLight: Color  { skySoft }
-    var warningLight: Color { skySoft }
-
     /// Date-chip ink. Urgency is carried by weight and the alert glyph (see
     /// `DateChip`), not hue: overdue and today use full ink, then soften.
     func dateColor(_ category: DateCategory) -> Color {
@@ -337,16 +327,13 @@ extension Font {
         case .bold:       "Nunito-Bold"
         case .semibold:   "Nunito-SemiBold"
         case .medium:     "Nunito-Medium"
-        case .light:      "Nunito-Light"
-        case .ultraLight, .thin: "Nunito-ExtraLight"
+        // The light faces aren't bundled (the app never uses them).
         default:          "Nunito-Regular"
         }
     }
 
     // The Evry type scale (phone sizes of the fluid web styles). Headlines are
     // heavy and tight; body is regular; bold is for labels and buttons.
-    /// text-display: the screen's one hero line. Tracking -0.02em.
-    static let evryDisplay = nunito(size: 40, weight: .heavy)
     /// text-h2: page titles and section headings. Tracking -0.015em.
     static let evryH2      = nunito(size: 32, weight: .heavy)
     /// text-h3: card, sheet and plan titles.
@@ -373,7 +360,6 @@ extension Font {
 
 /// Letter-spacing for the type scale, in points at the style's base size.
 enum EvryTracking {
-    static let display: CGFloat = -0.8   // -0.02em @ 40
     static let h2: CGFloat = -0.48       // -0.015em @ 32
     static let wordmark: CGFloat = 0.72  // +0.03em @ 24
     static let price: CGFloat = -1.2     // -0.025em @ 48

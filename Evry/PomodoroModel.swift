@@ -23,7 +23,9 @@ enum FocusLog {
         UserDefaults.standard.set(UserDefaults.standard.integer(forKey: k) + minutes, forKey: k)
     }
     static func minutes(on date: Date) -> Int {
-        UserDefaults.standard.integer(forKey: key(date))
+        // Plus anything logged under the old locale-formatted key that day.
+        let legacy = "focus_min_" + AccomplishmentsStore.legacyDateKey(date)
+        return UserDefaults.standard.integer(forKey: key(date)) + UserDefaults.standard.integer(forKey: legacy)
     }
 }
 
@@ -38,14 +40,6 @@ enum PomodoroPhase: String, Codable {
         }
     }
 
-    /// Path-tab status label ("Focusing" while working).
-    var statusLabel: String {
-        switch self {
-        case .work: "Focusing"
-        case .shortBreak: "Short break"
-        case .longBreak: "Long break"
-        }
-    }
 }
 
 struct PomodoroPreset: Identifiable, Equatable {
@@ -92,6 +86,8 @@ final class PomodoroModel {
     /// Fires once per phase change so the shell can raise a toast wherever
     /// the user is.
     @ObservationIgnored var onPhaseChange: ((PomodoroPhase) -> Void)?
+    /// Fires when the last of the target sessions finishes on its own.
+    @ObservationIgnored var onTargetReached: (() -> Void)?
 
     /// Ticked by the timer while running — observing views re-derive
     /// `remaining` from it every second.
@@ -102,6 +98,8 @@ final class PomodoroModel {
     @ObservationIgnored private var timer: Timer?
 
     private static let storageKey = "pomodoro_state_v1"
+    /// How long past a phase's end the timer is treated as abandoned.
+    private static let abandonedAfter: TimeInterval = 8 * 3600
     private static let encoder = JSONEncoder()
     private static let decoder = JSONDecoder()
 
@@ -165,10 +163,14 @@ final class PomodoroModel {
     }
 
     func skip() {
-        if advancePhase() {
-            save()
-            syncTimer()
-            return
+        // A skipped focus block isn't a completed session — only the minutes
+        // actually spent count toward the day's focus time.
+        if phase == .work {
+            let spent = Int((totalDuration - remaining) / 60)
+            if spent > 0 { FocusLog.add(minutes: spent) }
+            phase = (completedSessions + 1) % preset.sessionsUntilLongBreak == 0 ? .longBreak : .shortBreak
+        } else {
+            phase = .work
         }
         if running {
             phaseEndAt = Date().addingTimeInterval(totalDuration)
@@ -191,13 +193,13 @@ final class PomodoroModel {
 
     // MARK: Internals
 
-    /// Returns `true` if the session target was just reached (caller should stop rather than continue).
-    @discardableResult
-    private func advancePhase() -> Bool {
+    /// Moves past a phase that ran to its end. Returns `true` if the session
+    /// target was just reached (caller should stop rather than continue).
+    private func advancePhase(endedOn day: Date = Date()) -> Bool {
         if phase == .work {
             completedSessions += 1
             // Log the just-finished focus block for the daily recap.
-            FocusLog.add(minutes: preset.workMin)
+            FocusLog.add(minutes: preset.workMin, on: day)
             if targetSessions > 0 && completedSessions >= targetSessions {
                 running = false
                 phaseEndAt = nil
@@ -212,19 +214,38 @@ final class PomodoroModel {
         return false
     }
 
-    private func tick() {
-        now = Date()
-        if running, let end = phaseEndAt, now >= end {
-            if advancePhase() {
+    /// Advances the clock (internal so tests can drive it).
+    func tick(at date: Date = Date()) {
+        now = date
+        guard running, var end = phaseEndAt, now >= end else { return }
+        // Left running for hours (e.g. overnight): count the phase that ended,
+        // then wait at the next one rather than logging hours of absent focus.
+        if now.timeIntervalSince(end) > Self.abandonedAfter {
+            if !advancePhase(endedOn: end) {
+                running = false
+                phaseEndAt = nil
+                remainingAtPause = nil
+            }
+            save()
+            syncTimer()
+            return
+        }
+        // Catch up on every phase that ended while the app was away, each
+        // starting where the last one ended (not "now"), so no time is lost.
+        repeat {
+            if advancePhase(endedOn: end) {
                 save()
                 syncTimer()
+                playPhaseTransitionFeedback()
+                onTargetReached?()
                 return
             }
-            phaseEndAt = now.addingTimeInterval(totalDuration)
-            save()
-            playPhaseTransitionFeedback()
-            onPhaseChange?(phase)
-        }
+            end = end.addingTimeInterval(totalDuration)
+        } while end <= now
+        phaseEndAt = end
+        save()
+        playPhaseTransitionFeedback()
+        onPhaseChange?(phase)
     }
 
     private func playPhaseTransitionFeedback() {

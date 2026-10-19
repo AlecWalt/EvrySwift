@@ -10,7 +10,7 @@ import SwiftUI
 import UIKit
 
 enum AppTab: String, CaseIterable, Identifiable {
-    case inbox, habits, calendar, notes, profile
+    case inbox, habits, notes, profile
 
     var id: String { rawValue }
 
@@ -18,7 +18,6 @@ enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .inbox: "Inbox"
         case .habits: "Habits"
-        case .calendar: "Calendar"
         case .notes: "Notes"
         case .profile: "Profile"
         }
@@ -30,7 +29,6 @@ enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .inbox: EvryTool.tasks.glyph
         case .habits: EvryTool.habits.glyph
-        case .calendar: EvryTool.calendar.glyph
         case .notes: EvryTool.notes.glyph
         case .profile: nil
         }
@@ -96,16 +94,17 @@ enum EvryTabBarAppearance {
 /// The navy pull-up pill that opens quick add.
 ///
 /// - **Tap** or **swipe up** → the primary add action.
-/// - **Press and hold** → the pill morphs into a half-circle and two tool
-///   bubbles (Brain Dump, Pomo Focus) pop up. Drag over one and release to
-///   activate it; release on neither to cancel.
+/// - **Press and hold** → the pill morphs into a half-circle and the Pomo
+///   Focus bubble pops up above it. Drag over it and release to activate it;
+///   release anywhere else to cancel.
 struct SwipeHandle: View {
     let palette: Palette
+    /// What the primary action adds, for VoiceOver ("Add task", "Add habit"…).
+    var actionLabel: String = "Add task"
     let action: () -> Void
-    var onBrainDump: (CGPoint) -> Void = { _ in }
     var onPomodoro: (CGPoint) -> Void = { _ in }
 
-    private enum Tool: Equatable { case brainDump, pomodoro }
+    private enum Tool: Equatable { case pomodoro }
 
     @State private var pull: CGFloat = 0
     @State private var menuOpen = false
@@ -122,12 +121,10 @@ struct SwipeHandle: View {
     private let armDistance: CGFloat = 34
     private let autoCommitDistance: CGFloat = 96
 
-    // Bubble centers as an offset from the handle's center (y negative = up).
-    private let bubbleDX: CGFloat = 82
+    // Bubble center as an offset from the handle's center (y negative = up).
     private let bubbleDY: CGFloat = -104
     private let hitRadius: CGFloat = 58
-    private var brainOffset: CGSize { CGSize(width: -bubbleDX, height: bubbleDY) }
-    private var pomoOffset: CGSize { CGSize(width: bubbleDX, height: bubbleDY) }
+    private var pomoOffset: CGSize { CGSize(width: 0, height: bubbleDY) }
 
     var body: some View {
         GeometryReader { geo in
@@ -143,8 +140,8 @@ struct SwipeHandle: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: 36)
-        .accessibilityLabel("Add task")
-        .accessibilityHint("Double tap to add. Touch and hold for Brain dump or Pomo focus.")
+        .accessibilityLabel(actionLabel)
+        .accessibilityHint("Double tap to add. Touch and hold for Pomo focus.")
         .accessibilityAddTraits(.isButton)
     }
 
@@ -173,8 +170,6 @@ struct SwipeHandle: View {
                 .frame(width: 104, height: 52)
                 .position(x: center.x, y: center.y)
 
-            toolBubble(.brainDump, icon: "lightbulb.fill", label: "Brain dump")
-                .position(x: center.x + brainOffset.width, y: center.y + brainOffset.height)
             toolBubble(.pomodoro, icon: "timer", label: "Pomo focus")
                 .position(x: center.x + pomoOffset.width, y: center.y + pomoOffset.height)
         }
@@ -299,14 +294,11 @@ struct SwipeHandle: View {
         }
     }
 
-    /// Which bubble the finger is over, if any (nearest within the hit radius).
+    /// Which bubble the finger is over, if any (within the hit radius).
     private func toolAt(_ loc: CGPoint, center: CGPoint) -> Tool? {
         let p = CGPoint(x: loc.x - center.x, y: loc.y - center.y)
-        let dBrain = hypot(p.x - brainOffset.width, p.y - brainOffset.height)
-        let dPomo  = hypot(p.x - pomoOffset.width,  p.y - pomoOffset.height)
-        if dBrain <= dPomo && dBrain < hitRadius { return .brainDump }
-        if dPomo < hitRadius { return .pomodoro }
-        return nil
+        let dPomo = hypot(p.x - pomoOffset.width, p.y - pomoOffset.height)
+        return dPomo < hitRadius ? .pomodoro : nil
     }
 
     private func updateSelection(_ tool: Tool?) {
@@ -334,11 +326,9 @@ struct SwipeHandle: View {
     private func activate(_ tool: Tool?, globalFrame: CGRect) {
         guard let tool else { return }
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        let off = tool == .brainDump ? brainOffset : pomoOffset
-        let origin = CGPoint(x: globalFrame.midX + off.width, y: globalFrame.midY + off.height)
+        let origin = CGPoint(x: globalFrame.midX + pomoOffset.width, y: globalFrame.midY + pomoOffset.height)
         switch tool {
-        case .brainDump: onBrainDump(origin)
-        case .pomodoro:  onPomodoro(origin)
+        case .pomodoro: onPomodoro(origin)
         }
     }
 }

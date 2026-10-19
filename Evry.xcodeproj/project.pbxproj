@@ -7,39 +7,15 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		6D458BD5302F3A3000FDAA1B /* CalendarTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D458BD4302F3A3000FDAA1B /* CalendarTabView.swift */; };
-		6D99BC9A3049EDEF00BDF239 /* Nunito-ExtraLightItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC903049EDEF00BDF239 /* Nunito-ExtraLightItalic.ttf */; };
 		6D99BC9B3049EDEF00BDF239 /* Nunito-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC963049EDEF00BDF239 /* Nunito-Regular.ttf */; };
-		6D99BC9C3049EDEF00BDF239 /* Nunito-ExtraLight.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC8F3049EDEF00BDF239 /* Nunito-ExtraLight.ttf */; };
 		6D99BC9D3049EDEF00BDF239 /* Nunito-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC943049EDEF00BDF239 /* Nunito-Medium.ttf */; };
 		6D99BC9E3049EDEF00BDF239 /* Nunito-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC913049EDEF00BDF239 /* Nunito-Italic.ttf */; };
-		6D99BC9F3049EDEF00BDF239 /* Nunito-LightItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC933049EDEF00BDF239 /* Nunito-LightItalic.ttf */; };
 		6D99BCA03049EDEF00BDF239 /* Nunito-ExtraBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC8D3049EDEF00BDF239 /* Nunito-ExtraBold.ttf */; };
 		6D99BCA13049EDEF00BDF239 /* Nunito-Black.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC893049EDEF00BDF239 /* Nunito-Black.ttf */; };
 		6D99BCA23049EDEF00BDF239 /* Nunito-ExtraBoldItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC8E3049EDEF00BDF239 /* Nunito-ExtraBoldItalic.ttf */; };
-		6D99BCA33049EDEF00BDF239 /* Nunito-SemiBoldItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC983049EDEF00BDF239 /* Nunito-SemiBoldItalic.ttf */; };
-		6D99BCA43049EDEF00BDF239 /* Nunito-Light.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC923049EDEF00BDF239 /* Nunito-Light.ttf */; };
-		6D99BCA53049EDEF00BDF239 /* Nunito-BlackItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC8A3049EDEF00BDF239 /* Nunito-BlackItalic.ttf */; };
 		6D99BCA63049EDEF00BDF239 /* Nunito-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC8B3049EDEF00BDF239 /* Nunito-Bold.ttf */; };
 		6D99BCA73049EDEF00BDF239 /* Nunito-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC973049EDEF00BDF239 /* Nunito-SemiBold.ttf */; };
 		6D99BCA83049EDEF00BDF239 /* Nunito-BoldItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC8C3049EDEF00BDF239 /* Nunito-BoldItalic.ttf */; };
-		6D99BCA93049EDEF00BDF239 /* Nunito-MediumItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6D99BC953049EDEF00BDF239 /* Nunito-MediumItalic.ttf */; };
-		6DA1D09A307C2803001C7A71 /* habits.svg in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D08A307C2803001C7A71 /* habits.svg */; };
-		6DA1D09B307C2803001C7A71 /* evry-apple-touch-icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D091307C2803001C7A71 /* evry-apple-touch-icon.png */; };
-		6DA1D09C307C2803001C7A71 /* calendar.svg in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D087307C2803001C7A71 /* calendar.svg */; };
-		6DA1D09D307C2803001C7A71 /* EvryDesignSystem.md in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D098307C2803001C7A71 /* EvryDesignSystem.md */; };
-		6DA1D09E307C2803001C7A71 /* notes.svg in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D08B307C2803001C7A71 /* notes.svg */; };
-		6DA1D09F307C2803001C7A71 /* alert.svg in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D085307C2803001C7A71 /* alert.svg */; };
-		6DA1D0A0307C2803001C7A71 /* plus.svg in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D08D307C2803001C7A71 /* plus.svg */; };
-		6DA1D0A1307C2803001C7A71 /* evry.svg in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D089307C2803001C7A71 /* evry.svg */; };
-		6DA1D0A2307C2803001C7A71 /* pencil.svg in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D08C307C2803001C7A71 /* pencil.svg */; };
-		6DA1D0A3307C2803001C7A71 /* evry-plain-mark.png in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D092307C2803001C7A71 /* evry-plain-mark.png */; };
-		6DA1D0A4307C2803001C7A71 /* evry.png in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D094307C2803001C7A71 /* evry.png */; };
-		6DA1D0A5307C2803001C7A71 /* evry-tokens.json in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D097307C2803001C7A71 /* evry-tokens.json */; };
-		6DA1D0A6307C2803001C7A71 /* arrow-right.svg in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D086307C2803001C7A71 /* arrow-right.svg */; };
-		6DA1D0A7307C2803001C7A71 /* evry-app-icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D090307C2803001C7A71 /* evry-app-icon.png */; };
-		6DA1D0A8307C2803001C7A71 /* tasks.svg in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D08E307C2803001C7A71 /* tasks.svg */; };
-		6DA1D0A9307C2803001C7A71 /* check.svg in Resources */ = {isa = PBXBuildFile; fileRef = 6DA1D088307C2803001C7A71 /* check.svg */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -60,23 +36,15 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		6D458BD4302F3A3000FDAA1B /* CalendarTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarTabView.swift; sourceTree = "<group>"; };
 		6D99BC893049EDEF00BDF239 /* Nunito-Black.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-Black.ttf"; sourceTree = "<group>"; };
-		6D99BC8A3049EDEF00BDF239 /* Nunito-BlackItalic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-BlackItalic.ttf"; sourceTree = "<group>"; };
 		6D99BC8B3049EDEF00BDF239 /* Nunito-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-Bold.ttf"; sourceTree = "<group>"; };
 		6D99BC8C3049EDEF00BDF239 /* Nunito-BoldItalic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-BoldItalic.ttf"; sourceTree = "<group>"; };
 		6D99BC8D3049EDEF00BDF239 /* Nunito-ExtraBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-ExtraBold.ttf"; sourceTree = "<group>"; };
 		6D99BC8E3049EDEF00BDF239 /* Nunito-ExtraBoldItalic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-ExtraBoldItalic.ttf"; sourceTree = "<group>"; };
-		6D99BC8F3049EDEF00BDF239 /* Nunito-ExtraLight.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-ExtraLight.ttf"; sourceTree = "<group>"; };
-		6D99BC903049EDEF00BDF239 /* Nunito-ExtraLightItalic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-ExtraLightItalic.ttf"; sourceTree = "<group>"; };
 		6D99BC913049EDEF00BDF239 /* Nunito-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-Italic.ttf"; sourceTree = "<group>"; };
-		6D99BC923049EDEF00BDF239 /* Nunito-Light.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-Light.ttf"; sourceTree = "<group>"; };
-		6D99BC933049EDEF00BDF239 /* Nunito-LightItalic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-LightItalic.ttf"; sourceTree = "<group>"; };
 		6D99BC943049EDEF00BDF239 /* Nunito-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-Medium.ttf"; sourceTree = "<group>"; };
-		6D99BC953049EDEF00BDF239 /* Nunito-MediumItalic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-MediumItalic.ttf"; sourceTree = "<group>"; };
 		6D99BC963049EDEF00BDF239 /* Nunito-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-Regular.ttf"; sourceTree = "<group>"; };
 		6D99BC973049EDEF00BDF239 /* Nunito-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-SemiBold.ttf"; sourceTree = "<group>"; };
-		6D99BC983049EDEF00BDF239 /* Nunito-SemiBoldItalic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Nunito-SemiBoldItalic.ttf"; sourceTree = "<group>"; };
 		6DA1D085307C2803001C7A71 /* alert.svg */ = {isa = PBXFileReference; lastKnownFileType = text; path = alert.svg; sourceTree = "<group>"; };
 		6DA1D086307C2803001C7A71 /* arrow-right.svg */ = {isa = PBXFileReference; lastKnownFileType = text; path = "arrow-right.svg"; sourceTree = "<group>"; };
 		6DA1D087307C2803001C7A71 /* calendar.svg */ = {isa = PBXFileReference; lastKnownFileType = text; path = calendar.svg; sourceTree = "<group>"; };
@@ -145,21 +113,14 @@
 			isa = PBXGroup;
 			children = (
 				6D99BC893049EDEF00BDF239 /* Nunito-Black.ttf */,
-				6D99BC8A3049EDEF00BDF239 /* Nunito-BlackItalic.ttf */,
 				6D99BC8B3049EDEF00BDF239 /* Nunito-Bold.ttf */,
 				6D99BC8C3049EDEF00BDF239 /* Nunito-BoldItalic.ttf */,
 				6D99BC8D3049EDEF00BDF239 /* Nunito-ExtraBold.ttf */,
 				6D99BC8E3049EDEF00BDF239 /* Nunito-ExtraBoldItalic.ttf */,
-				6D99BC8F3049EDEF00BDF239 /* Nunito-ExtraLight.ttf */,
-				6D99BC903049EDEF00BDF239 /* Nunito-ExtraLightItalic.ttf */,
 				6D99BC913049EDEF00BDF239 /* Nunito-Italic.ttf */,
-				6D99BC923049EDEF00BDF239 /* Nunito-Light.ttf */,
-				6D99BC933049EDEF00BDF239 /* Nunito-LightItalic.ttf */,
 				6D99BC943049EDEF00BDF239 /* Nunito-Medium.ttf */,
-				6D99BC953049EDEF00BDF239 /* Nunito-MediumItalic.ttf */,
 				6D99BC963049EDEF00BDF239 /* Nunito-Regular.ttf */,
 				6D99BC973049EDEF00BDF239 /* Nunito-SemiBold.ttf */,
-				6D99BC983049EDEF00BDF239 /* Nunito-SemiBoldItalic.ttf */,
 			);
 			path = static;
 			sourceTree = "<group>";
@@ -226,7 +187,6 @@
 				6DB437A830122F7700EDBE61 /* EvryTests */,
 				6DB437B230122F7700EDBE61 /* EvryUITests */,
 				6DB4379730122F7600EDBE61 /* Products */,
-				6D458BD4302F3A3000FDAA1B /* CalendarTabView.swift */,
 				6D99BC993049EDEF00BDF239 /* static */,
 				6DA1D099307C2803001C7A71 /* EvryDesignSystem */,
 			);
@@ -321,7 +281,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2660;
-				LastUpgradeCheck = 2660;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					6DB4379530122F7600EDBE61 = {
 						CreatedOnToolsVersion = 26.6;
@@ -362,38 +322,15 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				6D99BC9A3049EDEF00BDF239 /* Nunito-ExtraLightItalic.ttf in Resources */,
 				6D99BC9B3049EDEF00BDF239 /* Nunito-Regular.ttf in Resources */,
-				6D99BC9C3049EDEF00BDF239 /* Nunito-ExtraLight.ttf in Resources */,
 				6D99BC9D3049EDEF00BDF239 /* Nunito-Medium.ttf in Resources */,
 				6D99BC9E3049EDEF00BDF239 /* Nunito-Italic.ttf in Resources */,
-				6D99BC9F3049EDEF00BDF239 /* Nunito-LightItalic.ttf in Resources */,
 				6D99BCA03049EDEF00BDF239 /* Nunito-ExtraBold.ttf in Resources */,
 				6D99BCA13049EDEF00BDF239 /* Nunito-Black.ttf in Resources */,
 				6D99BCA23049EDEF00BDF239 /* Nunito-ExtraBoldItalic.ttf in Resources */,
-				6D99BCA33049EDEF00BDF239 /* Nunito-SemiBoldItalic.ttf in Resources */,
-				6D99BCA43049EDEF00BDF239 /* Nunito-Light.ttf in Resources */,
-				6D99BCA53049EDEF00BDF239 /* Nunito-BlackItalic.ttf in Resources */,
 				6D99BCA63049EDEF00BDF239 /* Nunito-Bold.ttf in Resources */,
 				6D99BCA73049EDEF00BDF239 /* Nunito-SemiBold.ttf in Resources */,
 				6D99BCA83049EDEF00BDF239 /* Nunito-BoldItalic.ttf in Resources */,
-				6D99BCA93049EDEF00BDF239 /* Nunito-MediumItalic.ttf in Resources */,
-				6DA1D09A307C2803001C7A71 /* habits.svg in Resources */,
-				6DA1D09B307C2803001C7A71 /* evry-apple-touch-icon.png in Resources */,
-				6DA1D09C307C2803001C7A71 /* calendar.svg in Resources */,
-				6DA1D09D307C2803001C7A71 /* EvryDesignSystem.md in Resources */,
-				6DA1D09E307C2803001C7A71 /* notes.svg in Resources */,
-				6DA1D09F307C2803001C7A71 /* alert.svg in Resources */,
-				6DA1D0A0307C2803001C7A71 /* plus.svg in Resources */,
-				6DA1D0A1307C2803001C7A71 /* evry.svg in Resources */,
-				6DA1D0A2307C2803001C7A71 /* pencil.svg in Resources */,
-				6DA1D0A3307C2803001C7A71 /* evry-plain-mark.png in Resources */,
-				6DA1D0A4307C2803001C7A71 /* evry.png in Resources */,
-				6DA1D0A5307C2803001C7A71 /* evry-tokens.json in Resources */,
-				6DA1D0A6307C2803001C7A71 /* arrow-right.svg in Resources */,
-				6DA1D0A7307C2803001C7A71 /* evry-app-icon.png in Resources */,
-				6DA1D0A8307C2803001C7A71 /* tasks.svg in Resources */,
-				6DA1D0A9307C2803001C7A71 /* check.svg in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -418,7 +355,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				6D458BD5302F3A3000FDAA1B /* CalendarTabView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -486,6 +422,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = M3CS4TB4L8;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -509,6 +446,7 @@
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -548,6 +486,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = M3CS4TB4L8;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -564,6 +503,7 @@
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 			};
 			name = Release;
@@ -573,10 +513,11 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = EvryIcon2;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = M3CS4TB4L8;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -623,10 +564,11 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = EvryIcon2;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = M3CS4TB4L8;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -674,6 +616,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = M3CS4TB4L8;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
@@ -700,6 +643,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = M3CS4TB4L8;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
@@ -725,6 +669,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = M3CS4TB4L8;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
@@ -750,6 +695,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = M3CS4TB4L8;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;

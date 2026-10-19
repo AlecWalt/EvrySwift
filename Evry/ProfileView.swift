@@ -14,6 +14,7 @@ import StoreKit
 import PhotosUI
 import UIKit
 import MessageUI
+import ImageIO
 
 private let profileISO8601 = ISO8601DateFormatter()
 
@@ -51,25 +52,30 @@ struct ProfileView: View {
     let palette: Palette
     var onEnterFocusMode: () -> Void
 
-    @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    /// Trash is filtered in the store; the order doesn't matter here.
+    @Query(filter: #Predicate<TaskItem> { $0.deletedAt == nil }) private var tasks: [TaskItem]
     @Query private var habits: [Habit]
 
     @Environment(\.requestReview) private var requestReview
     @Environment(CalendarService.self) private var calendarService
-    @Environment(TourCoordinator.self) private var tourCoordinator
+    @Environment(ProjectNavigationState.self) private var projectNavState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @AppStorage("user_name") private var userName = ""
     @AppStorage("app_first_used") private var firstUsed = ""
     @AppStorage("membership_plan") private var membershipPlan = ""
     @State private var selectedPhoto: PhotosPickerItem? = nil
-    @State private var profileImageData: Data? = nil
+    /// The photo, decoded once (not on every render).
+    @State private var profileImage: UIImage? = nil
     @State private var cropItem: CropImage? = nil
     @State private var showSettings = false
     @State private var showSetupFlow = false
     @State private var showMembershipPromo = false
     @State private var showGlobalSearch = false
     @State private var showCrests = false
+    @State private var showPhotoPicker = false
+    /// The carousel peeks at the Core once, so people find it.
+    @AppStorage("core_carousel_hinted") private var carouselHinted = false
     @AppStorage(EvryXP.totalKey) private var xpTotal = 0
     /// The level the crest currently shows (animates on level-up).
     @State private var shownLevel = 1
@@ -89,14 +95,13 @@ struct ProfileView: View {
     @AppStorage("daily_pomo_goal") private var dailyFocusGoal = 60
     /// The frequent places from setup (JSON) — shown in the developer area.
     @AppStorage(FrequentPlaces.key) private var frequentPlacesData = Data()
-    /// How far the page is pulled down past its top (pull far enough to search).
-    @State private var pullDistance: CGFloat = 0
-    @State private var pullArmed = false
-    @State private var scrollInteracting = false
-    private static let pullToSearch: CGFloat = 80
-
-    private var tasks: [TaskItem] { allTasks.filter { !$0.isTrashed } }
-    private var stats: TaskStats { computeStats(tasks) }
+    /// Pull-to-search state, in its own observable so overscroll frames only
+    /// redraw the hint — not the whole page.
+    @State private var pull = PullToSearch()
+    /// Queued XP flying into the photo as crystals when the page opens.
+    @State private var xpStream = XPStream()
+    /// Bumped to bring the photo round to the front of the carousel.
+    @State private var photoRequest = 0
 
     private var initials: String {
         let words = userName.trimmingCharacters(in: .whitespaces).split(separator: " ")
@@ -118,6 +123,7 @@ struct ProfileView: View {
     private var tier: CrestTier { .forLevel(level.level) }
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: 0) {
                 header
@@ -129,58 +135,67 @@ struct ProfileView: View {
                     .padding(.horizontal, 8)
             }
             .padding(.top, 8)
+            .id(Self.topID)
+        }
+        .coordinateSpace(.named(Self.pageSpace))
+        // Queued XP flies in over everything, from the bottom of the screen.
+        .overlay { XPCrystalLayer(stream: xpStream, palette: palette) }
+        // The crystals fly into the photo, so it has to be in view.
+        .onChange(of: photoRequest) {
+            withAnimation(EvryMotion.settle) { proxy.scrollTo(Self.topID, anchor: .top) }
+        }
         }
         // Pull down from the top to open search.
         .onScrollGeometryChange(for: CGFloat.self) { geo in
             max(0, -(geo.contentOffset.y + geo.contentInsets.top))
-        } action: { _, pull in
-            pullDistance = pull
-            guard scrollInteracting else { return }
-            if pull >= Self.pullToSearch && !pullArmed {
-                pullArmed = true
-                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-            } else if pull < Self.pullToSearch * 0.8 && pullArmed {
-                pullArmed = false
-            }
+        } action: { _, distance in
+            pull.update(distance)
         }
         .onScrollPhaseChange { _, phase in
-            scrollInteracting = phase == .interacting
             // Opens as the finger lets go, if it was pulled far enough.
-            if phase != .interacting && pullArmed {
-                pullArmed = false
-                showGlobalSearch = true
-            }
+            if pull.phaseChanged(interacting: phase == .interacting) { showGlobalSearch = true }
         }
-        .overlay(alignment: .top) { pullHint }
+        .overlay(alignment: .top) { PullToSearchHint(pull: pull, palette: palette) }
         .background(pageBackground.ignoresSafeArea())
         .onAppear {
-            profileImageData = UserDefaults.standard.data(forKey: "profile_image_data")
+            loadProfileImage()
             if firstUsed.isEmpty {
                 firstUsed = profileISO8601.string(from: Date())
             }
             syncRingOnAppear()
+            playQueuedXP()
         }
+        // Leaving mid-stream puts whatever hasn't landed back on the queue.
+        .onDisappear { xpStream.stop() }
         .onChange(of: xpTotal) { old, new in playProgress(from: old, to: new) }
         .onChange(of: selectedPhoto) { _, item in
             // Load the full image, then let the user crop/zoom before saving.
             Task {
-                if let data = try? await item?.loadTransferable(type: Data.self),
-                   let img = UIImage(data: data) {
-                    await MainActor.run { cropItem = CropImage(image: img); selectedPhoto = nil }
+                guard item != nil else { return }
+                let data = try? await item?.loadTransferable(type: Data.self)
+                let img = data.flatMap { CropImage.downsampled($0) }
+                // Clear the selection even when loading fails, so picking the
+                // same photo again still fires.
+                await MainActor.run {
+                    if let img { cropItem = CropImage(image: img) }
+                    selectedPhoto = nil
                 }
             }
         }
         .fullScreenCover(item: $cropItem) { c in
             ProfilePhotoCropper(image: c.image, palette: palette) { jpeg in
-                profileImageData = jpeg
+                profileImage = UIImage(data: jpeg)
                 UserDefaults.standard.set(jpeg, forKey: "profile_image_data")
             }
         }
-        .sheet(isPresented: $showSettings) {
+        // The photo can be changed in Settings › Account — pick it up on return.
+        .sheet(isPresented: $showSettings, onDismiss: loadProfileImage) {
             SettingsSheet()
         }
         .fullScreenCover(isPresented: $showSetupFlow) { SetupFlowView() }
         .sheet(isPresented: $showMembershipPromo) { MembershipPromoView() }
+        .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhoto, matching: .images,
+                      photoLibrary: .shared())
         .sheet(isPresented: $showGlobalSearch) { GlobalSearchSheet() }
         .sheet(isPresented: $showCrests) {
             CrestGallerySheet(level: level.level, palette: palette)
@@ -188,24 +203,19 @@ struct ProfileView: View {
         }
     }
 
-    /// A magnifying glass that fades in above the header as the page is pulled
-    /// down, filling in once it's pulled far enough to open search.
-    private var pullHint: some View {
-        let progress = min(1, pullDistance / Self.pullToSearch)
-        return Image(systemName: "magnifyingglass")
-            .font(.nunito(size: 17, weight: .bold))
-            .foregroundStyle(pullArmed ? palette.onPrimary : palette.text)
-            .frame(width: 40, height: 40)
-            .background(pullArmed ? palette.primary : palette.hover, in: Circle())
-            .scaleEffect(0.6 + 0.4 * progress)
-            .opacity(Double(progress))
-            .offset(y: max(0, pullDistance / 2 - 20))
-            .animation(EvryMotion.pop, value: pullArmed)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-    }
-
     // MARK: Level ring
+
+    static let pageSpace = "profilePage"
+    private static let topID = "profileTop"
+
+    /// XP earned since the last visit flies in as crystals; each one that lands
+    /// adds its XP, which moves the ring (`playProgress`).
+    private func playQueuedXP() {
+        guard EvryXP.pending > 0 else { return }
+        // Crystals fly into the photo: it comes to the front, and into view.
+        photoRequest += 1
+        xpStream.play(reduceMotion: reduceMotion)
+    }
 
     private func syncRingOnAppear() {
         // First visit, or XP was reset: just show where things stand.
@@ -278,6 +288,10 @@ struct ProfileView: View {
         }
     }
 
+    private func loadProfileImage() {
+        profileImage = UserDefaults.standard.data(forKey: "profile_image_data").flatMap(UIImage.init(data:))
+    }
+
     // MARK: Header
 
     /// Search on the left, settings on the right, the name, level title and
@@ -288,13 +302,13 @@ struct ProfileView: View {
                 Text(userName.isEmpty ? "Your name" : userName)
                     .font(.nunito(size: 26, weight: .heavy))
                     .tracking(-0.3)
-                    .foregroundStyle(Color.evryNavy)
+                    .foregroundStyle(palette.text)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                 Button { showCrests = true } label: {
                     Text("\(tier.title) · Lv. \(shownLevel)")
                         .font(.nunito(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.evryNavy.opacity(0.8))
+                        .foregroundStyle(palette.dark ? Color.evryWhite85 : Color.evryNavy.opacity(0.8))
                         .monospacedDigit()
                         .contentTransition(.numericText())
                         .animation(EvryMotion.settle, value: shownLevel)
@@ -306,7 +320,7 @@ struct ProfileView: View {
             .padding(.horizontal, 60)
 
             HStack {
-                circleButton("magnifyingglass", label: "Search tasks, notes and projects") { showGlobalSearch = true }
+                circleButton("magnifyingglass", label: "Search tasks") { showGlobalSearch = true }
                 Spacer()
                 circleButton("gearshape.fill", label: "Open settings") { showSettings = true }
             }
@@ -328,15 +342,38 @@ struct ProfileView: View {
 
     // MARK: Avatar
 
+    /// The photo with the Core crystal behind it, on a carousel: swipe either
+    /// way and the two spin round and trade places.
+    private var avatar: some View {
+        let core = EvryCore.shared.progress
+        return ProfileCarousel(showHint: !carouselHinted, onHinted: { carouselHinted = true },
+                               canHint: { !xpStream.isRunning },
+                               photoRequest: photoRequest,
+                               onTapPhoto: { showPhotoPicker = true },
+                               photoValue: "Level \(level.level), \(Int((level.fraction * 100).rounded())) percent to the next level",
+                               coreValue: core.isComplete ? "Complete" : "\(Int((core.overall * 100).rounded())) percent built") {
+            photoFace
+        } back: {
+            CoreCrystalBadge(palette: palette)
+        }
+        // Where the XP crystals aim (the photo sits at the band's centre).
+        .onGeometryChange(for: CGPoint.self) { proxy in
+            let frame = proxy.frame(in: .named(Self.pageSpace))
+            return CGPoint(x: frame.midX, y: frame.midY)
+        } action: { center in
+            xpStream.photoCenter = center
+        }
+        .zIndex(1)
+    }
+
     /// The person's photo (or initials), large and centred, ringed by their
     /// progress to the next level. Tap to change the photo.
-    private var avatar: some View {
-        PhotosPicker(selection: $selectedPhoto, matching: .images, photoLibrary: .shared()) {
+    private var photoFace: some View {
             ZStack {
                 ZStack {
                     Circle()
-                        .fill(profileImageData != nil ? Color.clear : (userName.isEmpty ? palette.skySoft : avatarColor(for: userName)))
-                    if let data = profileImageData, let img = UIImage(data: data) {
+                        .fill(profileImage != nil ? Color.clear : (userName.isEmpty ? palette.skySoft : avatarColor(for: userName)))
+                    if let img = profileImage {
                         Image(uiImage: img)
                             .resizable()
                             .scaledToFill()
@@ -377,6 +414,24 @@ struct ProfileView: View {
                 SpringKeyframe(0.97, duration: 0.18, spring: .snappy)
                 SpringKeyframe(1, duration: 0.45, spring: .bouncy)
             }
+            // Each XP crystal that lands bounces the photo: knocked up and a
+            // touch squashed by the hit, then springing back.
+            .keyframeAnimator(initialValue: XPBounce(), trigger: xpStream.hits) { view, b in
+                view.scaleEffect(x: b.scaleX, y: b.scaleY).offset(y: b.lift)
+            } keyframes: { _ in
+                KeyframeTrack(\.lift) {
+                    SpringKeyframe(-9, duration: 0.09, spring: .snappy)
+                    SpringKeyframe(0, duration: 0.4, spring: .bouncy)
+                }
+                KeyframeTrack(\.scaleX) {
+                    SpringKeyframe(1.06, duration: 0.09, spring: .snappy)
+                    SpringKeyframe(1, duration: 0.35, spring: .bouncy)
+                }
+                KeyframeTrack(\.scaleY) {
+                    SpringKeyframe(0.95, duration: 0.09, spring: .snappy)
+                    SpringKeyframe(1, duration: 0.35, spring: .bouncy)
+                }
+            }
             .overlay(alignment: .bottom) {
                 if let reached = levelUpBanner {
                     Text("Level \(reached) reached")
@@ -390,11 +445,7 @@ struct ProfileView: View {
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
             }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Change profile photo")
-        .accessibilityValue("Level \(level.level), \(Int((level.fraction * 100).rounded())) percent to the next level")
-        .zIndex(1)
+            // Taps and VoiceOver are handled by the carousel.
     }
 
     // MARK: Container
@@ -403,13 +454,15 @@ struct ProfileView: View {
     /// bottom of the page, so the sky only shows at the top and as slim slivers
     /// down the sides.
     private var container: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        // Computed once per render and shared (it was recomputed per read).
+        let stats = computeStats(tasks)
+        return VStack(alignment: .leading, spacing: 18) {
             todayTiles
             if membershipPlan != "pro" {
                 upgradeRow
             }
-            statsTiles
-            activitySection
+            statsTiles(stats)
+            activitySection(stats)
             developerSection
         }
         .padding(.horizontal, 16)
@@ -453,8 +506,8 @@ struct ProfileView: View {
         }
         let tasksDone = dueTasks.filter(\.completed).count
         // Habits due today (built habits are records, so they don't count).
-        let dueHabits = habits.filter { !$0.isFormed && $0.isScheduled(on: today) }
-        let habitsDone = dueHabits.filter { HabitStats(habit: $0).todayDone }.count
+        let dueHabits = habits.filter { $0.isDue(on: today) }
+        let habitsDone = dueHabits.filter(\.isDoneToday).count
         let focus = FocusLog.minutes(on: Date())
         let focusGoal = max(1, dailyFocusGoal)
 
@@ -563,7 +616,7 @@ struct ProfileView: View {
 
     // MARK: Stats
 
-    private var statsTiles: some View {
+    private func statsTiles(_ stats: TaskStats) -> some View {
         let overdueCount = tasks.filter { !$0.completed && isOverdueDate($0.dueDate) }.count
         let activeTasks = tasks.filter { !$0.completed && !$0.isNote }.count
         let cells: [(value: String, label: String, alert: Bool)] = [
@@ -611,7 +664,7 @@ struct ProfileView: View {
 
     // MARK: Activity (week chart)
 
-    private var activitySection: some View {
+    private func activitySection(_ stats: TaskStats) -> some View {
         let maxCount = max(1, stats.weekData.map(\.count).max() ?? 1)
 
         return VStack(alignment: .leading, spacing: 8) {
@@ -649,8 +702,20 @@ struct ProfileView: View {
             sectionTitle("Developer")
             inset {
                 VStack(spacing: 0) {
-                    devButton("Add \(EvryXP.perGoal) XP") {
-                        EvryXP.add(EvryXP.perGoal)
+                    // Queue and play straight away, to see the crystals fly.
+                    devButton("Fly in \(EvryXP.perGoal) XP") {
+                        EvryXP.queue(EvryXP.perGoal)
+                        playQueuedXP()
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Fly in 200 XP") {
+                        EvryXP.queue(200)
+                        playQueuedXP()
+                    }
+                    paletteDivider(palette).padding(.leading, 16)
+                    devButton("Replay section tours") {
+                        TourCenter.resetAll()
+                        projectNavState.requestedTab = .inbox
                     }
                     paletteDivider(palette).padding(.leading, 16)
                     devButton("Reset XP and level") {
@@ -786,24 +851,257 @@ struct ProfileView: View {
 
 }
 
+/// The photo's bounce when an XP crystal hits it.
+private struct XPBounce {
+    var lift: CGFloat = 0
+    var scaleX: CGFloat = 1
+    var scaleY: CGFloat = 1
+}
+
+// MARK: - Photo / Core carousel
+
+/// Two seats on a spinning carousel: the photo in front, the Core behind it.
+/// A sideways swipe (either way) turns it half a revolution so they trade
+/// places.
+///
+/// The swipe is read from a transparent horizontal paging `ScrollView` laid
+/// over the seats — three pages, resting on the middle one. Nested inside the
+/// page's vertical scroll, the two axes compose natively (the Inbox timeline's
+/// pattern), so a vertical drag that starts on the photo still scrolls the
+/// page. A SwiftUI `DragGesture` here swallowed those drags.
+private struct ProfileCarousel<Front: View, Back: View>: View {
+    var showHint: Bool
+    var onHinted: () -> Void
+    /// Checked just before the peek — it waits while XP crystals are flying.
+    var canHint: () -> Bool
+    /// Bumped by the page to bring the photo round to the front.
+    var photoRequest: Int
+    var onTapPhoto: () -> Void
+    /// Spoken values for each side (the faces themselves aren't read).
+    var photoValue: String
+    var coreValue: String
+    @ViewBuilder var front: Front
+    @ViewBuilder var back: Back
+
+    /// Committed turn: 0 (or any even half-turn) = photo in front.
+    @State private var angle: Double = 0
+    /// The live swipe, from the pager's offset (±π at the neighbouring page).
+    @State private var drag: Double = 0
+    /// The one-time peek.
+    @State private var hint: Double = 0
+    /// The pager's page: 0 at rest, ±1 once a swipe lands on a neighbour.
+    @State private var page: Int? = 0
+    /// Set while the pager jumps back to the middle after a turn, so that
+    /// jump isn't read as a swipe.
+    @State private var recentering = false
+    @State private var pagerWidth: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// How far the seats swing out to the sides.
+    private let radius: CGFloat = 96
+    private let height: CGFloat = 174
+
+    private var photoInFront: Bool { cos(angle) > 0 }
+
+    var body: some View {
+        let live = angle + drag + hint
+        ZStack {
+            front.modifier(CarouselSeat(angle: live, radius: radius))
+            back.modifier(CarouselSeat(angle: live + .pi, radius: radius))
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+        .allowsHitTesting(false)
+        .overlay { pager }
+        // One element for VoiceOver, speaking for whichever side is in front,
+        // so the hidden side can't be reached.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(photoInFront ? "Profile photo" : "Your Core")
+        .accessibilityValue(photoInFront ? photoValue : coreValue)
+        .accessibilityHint(photoInFront ? "Double-tap to change your photo" : "")
+        .accessibilityAddTraits(photoInFront ? .isButton : [])
+        .accessibilityAction { if photoInFront { onTapPhoto() } }
+        .accessibilityAction(named: photoInFront ? "Show your Core" : "Show your photo") { turn(1) }
+        .onChange(of: photoRequest) {
+            if !photoInFront { turn(1) }
+        }
+        .task {
+            guard showHint, !reduceMotion else {
+                if showHint { onHinted() }
+                return
+            }
+            // A small nudge, so the Core behind the photo gets noticed — but
+            // not over flying XP; it waits for the next visit instead.
+            try? await Task.sleep(for: .milliseconds(900))
+            guard canHint() else { return }
+            onHinted()
+            withAnimation(.easeInOut(duration: 0.45)) { hint = 0.45 } completion: {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) { hint = 0 }
+            }
+        }
+    }
+
+    /// Three invisible pages; only the middle one is ever at rest.
+    private var pager: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 0) {
+                ForEach(-1...1, id: \.self) { index in
+                    Color.clear
+                        .containerRelativeFrame(.horizontal)
+                        .frame(height: height)
+                        .contentShape(Rectangle())
+                        .onTapGesture { location in tapped(at: location, page: index) }
+                        .id(index)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollIndicators(.hidden)
+        .scrollPosition(id: $page)
+        .defaultScrollAnchor(.center)
+        .onScrollGeometryChange(for: Double.self) { geo in
+            let width = geo.containerSize.width
+            return width > 0 ? Double((geo.contentOffset.x - width) / width) : 0
+        } action: { _, offset in
+            if recentering {
+                if abs(offset) < 0.01 { recentering = false }
+                return
+            }
+            // Finger left → the photo swings left.
+            drag = -offset * .pi
+        }
+        .onScrollPhaseChange { _, phase in
+            if phase == .idle { landed() }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pagerWidth = $0 }
+        .accessibilityHidden(true)
+    }
+
+    /// The pager came to rest: on a neighbour, commit the half turn and jump
+    /// back to the middle in the same frame, so nothing visibly moves.
+    private func landed() {
+        guard let page, page != 0 else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            angle -= Double(page) * .pi
+            drag = 0
+            recentering = true
+            self.page = 0
+        }
+    }
+
+    /// A tap on the photo itself (when it's in front) changes the photo.
+    private func tapped(at location: CGPoint, page index: Int) {
+        guard index == 0, page == 0, photoInFront, abs(drag) < 0.05 else { return }
+        // The page spans the full width; the photo (ring included) is centred in it.
+        let dx = location.x - pagerWidth / 2, dy = location.y - height / 2
+        guard dx * dx + dy * dy <= 81 * 81 else { return }
+        onTapPhoto()
+    }
+
+    /// Accessibility: a half turn without a swipe.
+    private func turn(_ halfTurns: Double) {
+        let animation: Animation = reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.6, dampingFraction: 0.82)
+        withAnimation(animation) { angle += halfTurns * .pi }
+    }
+}
+
+/// Places one seat at `angle` around the carousel: out to the side by its
+/// sine, nearer (bigger, brighter, on top) by its cosine. Animatable, so a
+/// turn travels round the arc rather than straight across.
+private struct CarouselSeat: ViewModifier, Animatable {
+    var angle: Double
+    let radius: CGFloat
+
+    var animatableData: Double {
+        get { angle }
+        set { angle = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let depth = (cos(angle) + 1) / 2   // 1 in front, 0 behind
+        content
+            .rotation3DEffect(.degrees(-sin(angle) * 28), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
+            .scaleEffect(0.6 + 0.4 * depth)
+            .opacity(0.35 + 0.65 * depth)
+            .offset(x: CGFloat(sin(angle)) * radius)
+            .zIndex(cos(angle))
+    }
+}
+
+// MARK: - Pull to search
+
+/// How far the Profile page is pulled down past its top, and whether it's far
+/// enough to open search on release.
+@Observable
+final class PullToSearch {
+    static let threshold: CGFloat = 80
+    var distance: CGFloat = 0
+    var armed = false
+    private var interacting = false
+
+    func update(_ distance: CGFloat) {
+        self.distance = distance
+        guard interacting else { return }
+        if distance >= Self.threshold && !armed {
+            armed = true
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        } else if distance < Self.threshold * 0.8 && armed {
+            armed = false
+        }
+    }
+
+    /// Returns true when the finger lifts while armed — time to open search.
+    func phaseChanged(interacting: Bool) -> Bool {
+        self.interacting = interacting
+        guard !interacting, armed else { return false }
+        armed = false
+        return true
+    }
+}
+
+/// A magnifying glass that fades in above the header as the page is pulled
+/// down, filling in once it's pulled far enough to open search.
+private struct PullToSearchHint: View {
+    let pull: PullToSearch
+    let palette: Palette
+
+    var body: some View {
+        let progress = min(1, pull.distance / PullToSearch.threshold)
+        Image(systemName: "magnifyingglass")
+            .font(.nunito(size: 17, weight: .bold))
+            .foregroundStyle(pull.armed ? palette.onPrimary : palette.text)
+            .frame(width: 40, height: 40)
+            .background(pull.armed ? palette.primary : palette.hover, in: Circle())
+            .scaleEffect(0.6 + 0.4 * progress)
+            .opacity(Double(progress))
+            .offset(y: max(0, pull.distance / 2 - 20))
+            .animation(EvryMotion.pop, value: pull.armed)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
 // MARK: - Settings sheet
 
 struct SettingsSheet: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(Appearance.self) private var appearance
     @Environment(CalendarService.self) private var calendarService
-    @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
-    @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    /// Only what "Clear completed" needs (not every task).
+    @Query(filter: #Predicate<TaskItem> { $0.completed && $0.deletedAt == nil })
+    private var completedTasks: [TaskItem]
 
     @AppStorage("user_name") private var userName = ""
     @AppStorage("user_email") private var userEmail = ""
     @AppStorage("membership_plan") private var membershipPlan = ""
-    @AppStorage("pro_welcomed") private var proWelcomed = false
     @AppStorage("tab_inbox_visible") private var tabInbox = true
     @AppStorage("tab_habits_visible") private var tabHabits = true
-    @AppStorage("tab_calendar_visible") private var tabCalendar = false
     @AppStorage("tab_notes_visible") private var tabNotes = true
     @State private var showMembershipPlans = false
     @State private var showProfile = false
@@ -813,6 +1111,7 @@ struct SettingsSheet: View {
     @State private var showNotifications = false
     @State private var showLogoutConfirm = false
     @State private var showTrash = false
+    @State private var showCore = false
     @State private var showClearCompletedConfirm = false
     @State private var showClearCompletedFinalConfirm = false
     @State private var showReportIssue = false
@@ -838,12 +1137,12 @@ struct SettingsSheet: View {
     }
 
     private var clearCompletedCount: Int {
-        allTasks.filter { $0.completed && !$0.isTrashed }.count
+        completedTasks.count
     }
 
     private var layoutValueLabel: String {
         // Profile is always shown; count it alongside the toggleable tabs.
-        let count = [tabInbox, tabHabits, tabCalendar, tabNotes].filter { $0 }.count + 1
+        let count = [tabInbox, tabHabits, tabNotes].filter { $0 }.count + 1
         return "\(count) tabs"
     }
 
@@ -930,7 +1229,7 @@ struct SettingsSheet: View {
 
                         // Inline confirmation, right below the button.
                         if showClearCompletedConfirm {
-                            let count = allTasks.filter { $0.completed && !$0.isTrashed }.count
+                            let count = clearCompletedCount
                             HStack(spacing: 10) {
                                 Button("Cancel") {
                                     withAnimation(EvryMotion.settle) { showClearCompletedConfirm = false }
@@ -939,7 +1238,7 @@ struct SettingsSheet: View {
 
                                 Button {
                                     UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
-                                    // Second, deliberate confirmation — this can't be undone.
+                                    // Second, deliberate confirmation.
                                     showClearCompletedFinalConfirm = true
                                 } label: {
                                     Label(count > 0 ? "Delete \(count)" : "Delete", systemImage: "trash")
@@ -955,6 +1254,15 @@ struct SettingsSheet: View {
                             .transition(.opacity.combined(with: .move(edge: .top)))
                         }
                     }
+
+                    sectionLabel("Developer")
+
+                    // The Core's full readout and controls (the crystal on the
+                    // Profile page is the everyday view).
+                    settingsNavRow(
+                        icon: "circle.hexagongrid",
+                        label: "Your Core", value: "\(Int((EvryCore.shared.progress.overall * 100).rounded()))%"
+                    ) { showCore = true }
 
                     // Log out
                     VStack(spacing: 8) {
@@ -1014,10 +1322,10 @@ struct SettingsSheet: View {
         .evryConfirm(
             isPresented: $showClearCompletedFinalConfirm,
             title: "Delete \(clearCompletedCount) completed task\(clearCompletedCount == 1 ? "" : "s")?",
-            message: "This permanently removes them and can’t be undone.",
+            message: "They’ll move to Trash, where you can restore them for 30 days.",
             confirmTitle: "Delete \(clearCompletedCount)"
         ) {
-            for task in allTasks where task.completed && !task.isTrashed {
+            for task in completedTasks {
                 TaskActions.delete(task)
             }
             withAnimation(EvryMotion.settle) { showClearCompletedConfirm = false }
@@ -1034,16 +1342,12 @@ struct SettingsSheet: View {
         }
         .sheet(isPresented: $showProfile)         { ProfileAccountSheet() }
         .sheet(isPresented: $showAppearance)      { AppearanceSettingsView() }
-        .fullScreenCover(isPresented: $showMembershipPlans, onDismiss: {
-            // If the user just upgraded here, close Settings too so the root can
-            // present the Pro welcome — a fullScreenCover can't layer over this
-            // still-open sheet, which is why the celebration didn't play.
-            if membershipPlan == "pro" && !proWelcomed { dismiss() }
-        }) { MembershipPlansView() }
+        .fullScreenCover(isPresented: $showMembershipPlans) { MembershipPlansView() }
         .sheet(isPresented: $showCalendars)       { CalendarsSettingsView() }
         .sheet(isPresented: $showNotifications)   { NotificationsSettingsView() }
         .sheet(isPresented: $showLayout)          { LayoutSettingsView() }
         .sheet(isPresented: $showTrash)           { TrashView() }
+        .sheet(isPresented: $showCore)            { CoreSheet() }
         .sheet(isPresented: $showReportIssue) {
             ReportIssueSheet(userName: userName, userEmail: userEmail, appVersion: appVersion)
         }
@@ -1167,13 +1471,13 @@ private struct ReportIssueSheet: View {
     private var last30dCount: Int { timestamps.filter { now.timeIntervalSince($0) < 30 * 86400 }.count }
 
     private var canSend: Bool {
-        last24hCount < 3 && last30dCount < 10 && !messageText.trimmingCharacters(in: .whitespaces).isEmpty
+        last24hCount < 3 && last30dCount < 10 && !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var emailBody: String {
         let name = userName.isEmpty ? "Not set" : userName
         let email = userEmail.isEmpty ? "Not set" : userEmail
-        let trimmed = messageText.trimmingCharacters(in: .whitespaces)
+        let trimmed = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         let device = UIDevice.current
         return "\(trimmed)\n\n---\nName: \(name)\nEmail: \(email)\nApp: \(appVersion)\niOS: \(device.systemVersion)\nDevice: \(device.model)"
     }
@@ -1490,9 +1794,14 @@ struct ProfileAccountSheet: View {
         }
         .onChange(of: selectedPhoto) { _, item in
             Task {
-                if let data = try? await item?.loadTransferable(type: Data.self),
-                   let img = UIImage(data: data) {
-                    await MainActor.run { cropItem = CropImage(image: img); selectedPhoto = nil }
+                guard item != nil else { return }
+                let data = try? await item?.loadTransferable(type: Data.self)
+                let img = data.flatMap { CropImage.downsampled($0) }
+                // Clear the selection even when loading fails, so picking the
+                // same photo again still fires.
+                await MainActor.run {
+                    if let img { cropItem = CropImage(image: img) }
+                    selectedPhoto = nil
                 }
             }
         }
@@ -1894,18 +2203,16 @@ private struct LayoutSettingsView: View {
 
     @AppStorage("tab_inbox_visible") private var tabInbox = true
     @AppStorage("tab_habits_visible") private var tabHabits = true
-    @AppStorage("tab_calendar_visible") private var tabCalendar = false
     @AppStorage("tab_notes_visible") private var tabNotes = true
     @AppStorage("inbox_hide_completed") private var hideCompleted = false
     @AppStorage("inbox_hide_notes") private var hideNotes = false
     @AppStorage("inbox_hide_reschedule") private var hideReschedule = false
-    @AppStorage("inbox_swipe_layout") private var swipeLayout = true
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
     // Profile is always present, so only the toggleable tabs count toward the
     // "at least one must stay enabled" rule.
     private var enabledCount: Int {
-        [tabInbox, tabHabits, tabCalendar, tabNotes].filter { $0 }.count
+        [tabInbox, tabHabits, tabNotes].filter { $0 }.count
     }
 
     var body: some View {
@@ -1915,7 +2222,6 @@ private struct LayoutSettingsView: View {
                     sectionLabel("Tabs")
                     tabRow("Inbox",    tool: .tasks,    isOn: $tabInbox)
                     tabRow("Habits",   tool: .habits,   isOn: $tabHabits)
-                    tabRow("Calendar", tool: .calendar, isOn: $tabCalendar)
                     tabRow("Notes",    tool: .notes,    isOn: $tabNotes)
                     Text("Keep at least one tab on. Profile is always here.")
                         .font(.nunito(size: 14))
@@ -1928,9 +2234,6 @@ private struct LayoutSettingsView: View {
                     inboxRow("Hide completed tasks", icon: "eye.slash", isOn: $hideCompleted)
                     inboxRow("Hide notes", icon: "note.text.badge.plus", isOn: $hideNotes)
                     inboxRow("Hide reschedule button", icon: "calendar.badge.minus", isOn: $hideReschedule)
-                    // Swipe between Schedule and Tasks (and right for the menu),
-                    // instead of the Tasks / Schedule selector.
-                    inboxRow("Swipe navigation", icon: "hand.draw", isOn: $swipeLayout)
                 }
                 .padding(.horizontal, EvrySpace.gutter)
                 .padding(.vertical, 20)
@@ -2009,37 +2312,11 @@ private struct NotificationsSettingsView: View {
     @Environment(Appearance.self) private var appearance
     @Environment(\.dismiss) private var dismiss
 
+    /// The only notification setting that does anything (NotificationService
+    /// reads it); digests and default times were never wired up, so they're gone.
     @AppStorage("notif_task_reminders")    private var taskReminders = true
-    @AppStorage("notif_daily_digest")      private var dailyDigest   = false
-    @AppStorage("notif_weekly_summary")    private var weeklySummary = false
-    @AppStorage("notif_default_reminder_hour") private var defaultReminderHour = 9
-    @AppStorage("notif_digest_hour")       private var digestHour    = 8
-    @AppStorage("notif_digest_minute")     private var digestMinute  = 0
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
-
-    private var defaultReminderDate: Binding<Date> {
-        Binding(
-            get: {
-                Calendar.current.date(bySettingHour: defaultReminderHour, minute: 0, second: 0, of: Date()) ?? Date()
-            },
-            set: {
-                defaultReminderHour = Calendar.current.component(.hour, from: $0)
-            }
-        )
-    }
-
-    private var digestDate: Binding<Date> {
-        Binding(
-            get: {
-                Calendar.current.date(bySettingHour: digestHour, minute: digestMinute, second: 0, of: Date()) ?? Date()
-            },
-            set: {
-                digestHour   = Calendar.current.component(.hour, from: $0)
-                digestMinute = Calendar.current.component(.minute, from: $0)
-            }
-        )
-    }
 
     var body: some View {
         NavigationStack {
@@ -2049,35 +2326,9 @@ private struct NotificationsSettingsView: View {
 
                     notifRow("Task reminders", icon: "bell.fill",
                              subtitle: "A kind nudge before tasks are due", isOn: $taskReminders)
-
-                    if taskReminders {
-                        timePickerRow(
-                            icon: "clock.fill",
-                            label: "Default reminder time",
-                            subtitle: "Used when a task has no specific time",
-                            selection: defaultReminderDate
-                        )
-                    }
-
-                    notifRow("Daily digest", icon: "sun.max.fill",
-                             subtitle: "A morning look at your day’s tasks", isOn: $dailyDigest)
-
-                    if dailyDigest {
-                        timePickerRow(
-                            icon: "clock.fill",
-                            label: "Digest time",
-                            subtitle: "When to receive your daily summary",
-                            selection: digestDate
-                        )
-                    }
-
-                    notifRow("Weekly summary", icon: "chart.bar.fill",
-                             subtitle: "A look back at your week", isOn: $weeklySummary)
                 }
                 .padding(.horizontal, EvrySpace.gutter)
                 .padding(.vertical, 20)
-                .animation(EvryMotion.settle, value: taskReminders)
-                .animation(EvryMotion.settle, value: dailyDigest)
             }
             .background(palette.bg)
             .navigationTitle("Notifications")
@@ -2119,35 +2370,6 @@ private struct NotificationsSettingsView: View {
         .padding(.vertical, 12)
         .frame(minHeight: EvrySpace.storeHeight)
         .evryField(palette)
-    }
-
-    private func timePickerRow(icon: String, label: String, subtitle: String, selection: Binding<Date>) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: icon)
-                .font(.nunito(size: 18, weight: .semibold))
-                .foregroundStyle(palette.primary)
-                .frame(width: 30, height: 30)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label)
-                    .font(.evryBody)
-                    .foregroundStyle(palette.text)
-                Text(subtitle)
-                    .font(.nunito(size: 14))
-                    .foregroundStyle(palette.textSec)
-            }
-            Spacer()
-            DatePicker(label, selection: selection, displayedComponents: .hourAndMinute)
-                .labelsHidden()
-                .tint(palette.primary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .frame(minHeight: EvrySpace.storeHeight)
-        .background(palette.skyMist, in: RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: EvryRadius.card, style: .continuous)
-            .strokeBorder(palette.hairline, lineWidth: 1))
-        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     private func sectionLabel(_ text: String) -> some View {
@@ -2324,40 +2546,38 @@ private struct CalendarsSettingsView: View {
 // MARK: - Global Search Sheet
 
 struct GlobalSearchSheet: View {
-    @Environment(\.modelContext) private var context
     @Environment(\.colorScheme) private var scheme
     @Environment(Appearance.self) private var appearance
     @Environment(\.dismiss) private var dismiss
     @Environment(ProjectNavigationState.self) private var projectNavState
 
-    @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    @Query(filter: #Predicate<TaskItem> { $0.deletedAt == nil },
+           sort: \TaskItem.createdAt, order: .reverse) private var tasks: [TaskItem]
 
     @State private var searchText = ""
     @FocusState private var focused: Bool
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
-    private var tasks: [TaskItem] { allTasks.filter { !$0.isTrashed } }
 
     private var results: [TaskItem] {
-        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        let q = searchText.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return [] }
-        return tasks.filter {
-            $0.title.lowercased().contains(q) ||
-            $0.notes.lowercased().contains(q) ||
-            $0.tags.contains(where: { $0.lowercased().contains(q) })
-        }
+        func has(_ s: String) -> Bool { s.range(of: q, options: .caseInsensitive) != nil }
+        return tasks.filter { has($0.title) || has($0.notes) || $0.tags.contains(where: has) }
     }
 
     var body: some View {
-        NavigationStack {
+        // Searched once per render (it was re-run on each of five reads).
+        let results = self.results
+        return NavigationStack {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
                         .font(.nunito(size: 15, weight: .semibold))
                         .foregroundStyle(palette.textSec)
                         .accessibilityHidden(true)
-                    TextField("Tasks, notes, projects, tags…", text: $searchText)
+                    TextField("Tasks and tags…", text: $searchText)
                         .font(.evryBody)
                         .foregroundStyle(palette.text)
                         .autocorrectionDisabled()
@@ -2543,10 +2763,10 @@ struct TrashView: View {
     @Environment(Appearance.self) private var appearance
     @Environment(\.dismiss) private var dismiss
 
-    @Query(sort: \TaskItem.deletedAt, order: .reverse) private var allTasks: [TaskItem]
+    @Query(filter: #Predicate<TaskItem> { $0.deletedAt != nil },
+           sort: \TaskItem.deletedAt, order: .reverse) private var trashedTasks: [TaskItem]
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
-    private var trashedTasks: [TaskItem] { allTasks.filter { $0.deletedAt != nil } }
     @State private var confirmDeleteAll = false
 
     var body: some View {
@@ -2652,6 +2872,21 @@ struct TrashView: View {
 struct CropImage: Identifiable {
     let id = UUID()
     let image: UIImage
+
+    /// Decodes a library photo at no more than `maxPixel` on its long side.
+    /// A 12–48MP original decoded in full spikes memory for a 300px avatar.
+    static func downsampled(_ data: Data, maxPixel: CGFloat = 2000) -> UIImage? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, options) else { return UIImage(data: data) }
+        let thumb = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,   // respect orientation
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ] as CFDictionary
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, thumb) else { return UIImage(data: data) }
+        return UIImage(cgImage: cg)
+    }
 }
 
 /// A circular crop/zoom editor: pan and pinch the image within a round window,
@@ -2712,13 +2947,18 @@ struct ProfilePhotoCropper: View {
                         DragGesture()
                             .updating($drag) { v, state, _ in state = v.translation }
                             .onEnded { v in
-                                offset.width += v.translation.width
-                                offset.height += v.translation.height
+                                let moved = CGSize(width: offset.width + v.translation.width,
+                                                   height: offset.height + v.translation.height)
+                                withAnimation(EvryMotion.settle) { offset = clamped(moved, scale: scale) }
                             }
                             .simultaneously(with:
-                                MagnificationGesture()
-                                    .updating($pinch) { v, state, _ in state = v }
-                                    .onEnded { v in scale = min(4, max(1, scale * v)) }
+                                MagnifyGesture()
+                                    .updating($pinch) { v, state, _ in state = v.magnification }
+                                    .onEnded { v in
+                                        scale = min(4, max(1, scale * v.magnification))
+                                        // Zooming out can leave the photo off the window.
+                                        withAnimation(EvryMotion.settle) { offset = clamped(offset, scale: scale) }
+                                    }
                             )
                     )
 
@@ -2737,6 +2977,19 @@ struct ProfilePhotoCropper: View {
                 .padding(.top, 8)
             }
         }
+    }
+
+    /// Keeps the photo covering the whole crop window — panning past its edge
+    /// would otherwise leave an empty band in the saved avatar.
+    private func clamped(_ offset: CGSize, scale: CGFloat) -> CGSize {
+        let aspect = image.size.height > 0 ? image.size.width / image.size.height : 1
+        // The aspect-filled size before zoom.
+        let filled = aspect >= 1 ? CGSize(width: side * aspect, height: side)
+                                 : CGSize(width: side, height: side / aspect)
+        let maxX = max(0, (filled.width * scale - side) / 2)
+        let maxY = max(0, (filled.height * scale - side) / 2)
+        return CGSize(width: min(maxX, max(-maxX, offset.width)),
+                      height: min(maxY, max(-maxY, offset.height)))
     }
 
     /// The zoom/pan image layer, sized to fill the square crop window.

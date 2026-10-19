@@ -10,7 +10,6 @@
 
 import SwiftUI
 import SwiftData
-import UserNotifications
 import AppIntents
 import UIKit
 
@@ -31,12 +30,9 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(Appearance.self) private var appearance
     @Environment(PomodoroModel.self) private var pomodoro
-    @Environment(TourCoordinator.self) private var tourCoordinator
     @Environment(MembershipRouter.self) private var membershipRouter
+    @Environment(CalendarService.self) private var calendarService
 
-    @Query private var allFolders: [Folder]
-    @Query private var allNotes: [Note]
-    @Query private var allTasks: [TaskItem]
     @AppStorage("membership_plan") private var membershipPlan = ""
     // Trial clock (first launch) + the hard-wall state derived from it.
     @AppStorage("app_first_used") private var firstUsed = ""
@@ -44,13 +40,7 @@ struct ContentView: View {
     // The user's daily goals (set in Profile), surfaced in the daily recap.
     @AppStorage("daily_pomo_goal") private var dailyPomoGoal = 60
 
-    // Pro welcome + guided setup (shown once, right after upgrading).
-    @AppStorage("pro_welcomed") private var proWelcomed = false
-    @State private var showProWelcome = false
-    @State private var showWelcomeBrainDump = false
-
     // Tools launched from the add-handle's press-and-hold radial menu.
-    @State private var showHandleBrainDump = false
     @State private var showHandlePomodoro = false
     // Screen point of the tapped add-handle bubble, so the cover's fill-wipe grows from it.
     @State private var handleFillOrigin: CGPoint? = nil
@@ -75,7 +65,6 @@ struct ContentView: View {
     // Habits quick-add, opened from the same swipe-up handle on the Habits tab.
     @State private var showAddHabit = false
     @State private var addHabitSession = 0
-    @State private var addingNote: Note?
     @State private var showNewFolder = false
     @State private var editingTask: TaskItem?
     @State private var toast: ToastData?
@@ -86,7 +75,6 @@ struct ContentView: View {
     @AppStorage("tab_habits_visible")   private var tabHabitsVisible   = true
     // Calendar is hidden by default now that Habits has its spot; it can be
     // re-enabled from Settings → Layout.
-    @AppStorage("tab_calendar_visible") private var tabCalendarVisible = false
     @AppStorage("tab_notes_visible")    private var tabNotesVisible    = true
 
     // Focus Mode
@@ -94,16 +82,15 @@ struct ContentView: View {
     @State private var confirmExitFocus = false
     @State private var showPomodoro = false
     @State private var showChat = false
-    /// The Inbox's swipe-layout menu (the add handle rides along with its card).
-    @State private var inboxDrawer = InboxDrawerState()
 
     private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
 
     /// The swipe-up add bar only shows where adding makes sense — Inbox adds
     /// a task, Habits adds a habit, Notes adds a note. (The Calendar tab has its
-    /// own add button.)
+    /// own add button.) It steps away while a note's own page is open.
     private var showsAddHandle: Bool {
-        selectedTab == .inbox || selectedTab == .habits || selectedTab == .notes
+        selectedTab == .inbox || selectedTab == .habits
+            || (selectedTab == .notes && !notesNavState.noteOpen)
     }
 
     var body: some View {
@@ -141,73 +128,31 @@ struct ContentView: View {
         }
         .environment(projectNavState)
         .environment(notesNavState)
-        .environment(inboxDrawer)
         // Pays out XP the moment a daily task or habit goal is completed.
         .background(DailyGoalXPWatcher())
         .tint(palette.primary)
         .preferredColorScheme(appearance.preferredColorScheme)
-        .overlay {
-            if tourCoordinator.isActive {
-                // The tour's Evry is the one on screen while it runs.
-                TourOverlayView()
-                    .environment(\.evryAway, false)
-            }
-        }
-        .onChange(of: tourCoordinator.currentStep) { _, _ in
-            guard tourCoordinator.isActive else { return }
-            withAnimation(.easeInOut(duration: 0.3)) { selectedTab = tourCoordinator.currentTab }
-        }
-        .onChange(of: tourCoordinator.isActive) { _, active in
-            if active {
-                insertTourSampleData()
-                withAnimation(.easeInOut(duration: 0.3)) { selectedTab = tourCoordinator.currentTab }
-            } else {
-                deleteTourSampleData()
-            }
-        }
         .onChange(of: projectNavState.requestedTab) { _, tab in
             guard let tab else { return }
             withAnimation(.easeInOut(duration: 0.25)) { selectedTab = tab }
             projectNavState.requestedTab = nil
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { processPendingSiriTasks(); checkDailyRecap(); evaluateAccess() }
+            // Calendar access may have been turned on in Settings meanwhile.
+            if phase == .active { processPendingSiriTasks(); checkDailyRecap(); evaluateAccess(); calendarService.refreshStatus() }
+            // The Core: an app open (time, plus a coarse place with consent);
+            // leaving the app writes any pending Core changes.
+            if phase == .active { CoreHooks.appOpened(context: modelContext) }
+            if phase == .background { CoreHooks.appBackgrounded() }
         }
-        .task { checkDailyRecap() }
+        // A cold launch starts already active (no scenePhase change), so pick up
+        // anything Siri queued while the app wasn't running here too.
+        .task { processPendingSiriTasks(); checkDailyRecap(); CoreHooks.appOpened(context: modelContext) }
         // Subscribing (or its removal) flips access — re-check the wall. The trial
         // clock changing (e.g. the dev reset/expire tools) does too.
         .onChange(of: membershipPlan) { _, _ in evaluateAccess() }
         .onChange(of: firstUsed) { _, _ in evaluateAccess() }
-        // Celebrate + guide the user right after they upgrade to Pro.
-        .onChange(of: membershipPlan) { _, plan in
-            guard plan == "pro", !proWelcomed else { return }
-            // Upgrading from the promo dismisses two stacked presentations (the
-            // plans cover, then the promo sheet). Wait for that whole chain to
-            // finish, otherwise this cover is presented into a still-dismissing
-            // hierarchy and silently dropped (the celebration never plays).
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { showProWelcome = true }
-        }
-        .fullScreenCover(isPresented: $showProWelcome) {
-            ProWelcomeView(
-                onBrainDump: {
-                    proWelcomed = true
-                    showProWelcome = false
-                    selectedTab = .inbox
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { showWelcomeBrainDump = true }
-                },
-                onFinish: {
-                    proWelcomed = true
-                    showProWelcome = false
-                }
-            )
-        }
-        .fullScreenCover(isPresented: $showWelcomeBrainDump) {
-            BrainDumpSheet(context: .tasks(add: insertBrainDumpTasks))
-        }
-        // Add-handle radial menu tools — the fill-wipe grows from the tapped bubble.
-        .fullScreenCover(isPresented: $showHandleBrainDump) {
-            BrainDumpSheet(context: .tasks(add: insertBrainDumpTasks), fillOrigin: handleFillOrigin)
-        }
+        // Add-handle radial menu tool — the fill-wipe grows from the tapped bubble.
         .fullScreenCover(isPresented: $showHandlePomodoro) {
             PomodoroView(onStart: enterFocusMode, fillOrigin: handleFillOrigin)
         }
@@ -248,7 +193,7 @@ struct ContentView: View {
         // Evry is never in two places at once: while Evry is in the chat, the
         // guided tour or the daily recap sheet, every Evry on the page
         // underneath steps away (each of those resets it for its own Evry).
-        .environment(\.evryAway, showChat || tourCoordinator.isActive || showDailyRecap)
+        .environment(\.evryAway, showChat || showDailyRecap || TourCenter.shared.isActive)
         // The chat with Evry — a system sheet, so on iOS 26+ it floats as a
         // Liquid Glass bottom card with display-concentric corners.
         .sheet(isPresented: $showChat) {
@@ -262,10 +207,6 @@ struct ContentView: View {
         }
         .sheet(item: $editingTask) { task in
             EditTaskSheet(task: task, onDelete: deleteTask)
-        }
-        .sheet(item: $addingNote) { note in
-            NoteEditorView(note: note)
-                .environment(appearance)
         }
         // Presented from the root so a promo card can close itself and hand off to
         // the full-screen plans page.
@@ -282,6 +223,14 @@ struct ContentView: View {
         .overlay {
             if confirmExitFocus { focusExitPrompt }
         }
+        // First-visit section tours, over everything on the page (Evry brings
+        // its own presence, so it isn't hidden by `evryAway`).
+        .overlay {
+            SectionTourOverlay(palette: palette)
+                .environment(\.evryAway, false)
+        }
+        // A tour only starts once nothing else covers the page.
+        .onChange(of: tourGate, initial: true) { _, gate in TourCenter.shared.update(gate) }
         .task { await NotificationService.requestPermission() }
         .onAppear {
             // Stamp the trial clock on first launch, then check the wall.
@@ -299,6 +248,25 @@ struct ContentView: View {
                 case .longBreak: showToast("Nice work! Time for a longer break.")
                 }
             }
+            pomodoro.onTargetReached = { showToast("All your focus sessions are done. Nice work!") }
+        }
+    }
+
+    /// Which section is showing for tours, and whether anything covers it.
+    private var tourGate: TourCenter.Gate {
+        let covered = showChat || showDailyRecap
+            || showHandlePomodoro || showTrialWall || membershipRouter.showPlans
+            || focusMode || confirmExitFocus || editingTask != nil || notesNavState.noteOpen
+            || showAddTask || showAddHabit || showNewFolder
+        return TourCenter.Gate(blocked: covered, section: selectedTab.rawValue)
+    }
+
+    /// VoiceOver label for the add pill — matches what its tap creates.
+    private var addHandleLabel: String {
+        switch selectedTab {
+        case .notes: notesNavState.activeScope == nil ? "Add folder" : "Add note"
+        case .habits: "Add habit"
+        default: "Add task"
         }
     }
 
@@ -307,28 +275,24 @@ struct ContentView: View {
     private var normalShell: some View {
         TabView(selection: $selectedTab) {
             if tabInboxVisible {
-                InboxView(palette: palette, onEdit: { editingTask = $0 }, onDelete: deleteTask, onEnterFocusMode: enterFocusMode,
-                          onOpenChat: { showChat = true },
-                          onSelectTab: { tab in withAnimation(.easeInOut(duration: 0.25)) { selectedTab = tab } })
+                InboxView(palette: palette, onEdit: { editingTask = $0 }, onDelete: deleteTask,
+                          onOpenChat: { showChat = true })
                     .tabPageBackground(palette)
+                    .tabPageEntrance(.inbox, selected: selectedTab)
                     .tabItem { EvryTabLabel(tab: .inbox) }
                     .tag(AppTab.inbox)
             }
             if tabHabitsVisible {
                 HabitsView(palette: palette)
                     .tabPageBackground(palette)
+                    .tabPageEntrance(.habits, selected: selectedTab)
                     .tabItem { EvryTabLabel(tab: .habits) }
                     .tag(AppTab.habits)
-            }
-            if tabCalendarVisible {
-                CalendarTabView(palette: palette, onEdit: { editingTask = $0 })
-                    .tabPageBackground(palette)
-                    .tabItem { EvryTabLabel(tab: .calendar) }
-                    .tag(AppTab.calendar)
             }
             if tabNotesVisible {
                 NotesView(palette: palette)
                     .tabPageBackground(palette)
+                    .tabPageEntrance(.notes, selected: selectedTab)
                     .tabItem { EvryTabLabel(tab: .notes) }
                     .tag(AppTab.notes)
             }
@@ -336,6 +300,7 @@ struct ContentView: View {
             // so it can't be turned off in the Layout screen.
             ProfileView(palette: palette, onEnterFocusMode: enterFocusMode)
                 .tabPageBackground(palette)
+                .tabPageEntrance(.profile, selected: selectedTab)
                 .tabItem { EvryTabLabel(tab: .profile) }
                 .tag(AppTab.profile)
         }
@@ -347,7 +312,6 @@ struct ContentView: View {
         }
         .onChange(of: tabInboxVisible)    { _, v in if !v && selectedTab == .inbox    { jumpToFirstVisible() } }
         .onChange(of: tabHabitsVisible)   { _, v in if !v && selectedTab == .habits   { jumpToFirstVisible() } }
-        .onChange(of: tabCalendarVisible) { _, v in if !v && selectedTab == .calendar { jumpToFirstVisible() } }
         .onChange(of: tabNotesVisible)    { _, v in if !v && selectedTab == .notes    { jumpToFirstVisible() } }
         .overlay(alignment: .bottom) {
             // Hidden while a quick-add card is open. Its removal is the pill's
@@ -356,6 +320,7 @@ struct ContentView: View {
             if showsAddHandle && !showAddHabit && !showAddTask && !showNewFolder {
                 SwipeHandle(
                     palette: palette,
+                    actionLabel: addHandleLabel,
                     action: {
                         switch selectedTab {
                         case .notes:
@@ -373,13 +338,9 @@ struct ContentView: View {
                             withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) { showAddTask = true }
                         }
                     },
-                    onBrainDump: { origin in handleFillOrigin = origin; showHandleBrainDump = true },
                     onPomodoro: { origin in handleFillOrigin = origin; showHandlePomodoro = true }
                 )
                 .padding(.bottom, 42)
-                // Part of the main screen: slides with the Inbox card when its
-                // menu opens, rather than going anywhere.
-                .modifier(DrawerFollower(active: selectedTab == .inbox))
                 // Pinned above the tab bar regardless of the keyboard, so when a
                 // quick-add card closes the pill always pops back in at its home
                 // spot (instead of riding the keyboard down or up from below).
@@ -389,49 +350,19 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Tour sample data
+    // MARK: Leftover tour data
 
-    private static let tourSampleKey = "tourSampleUIDs"
-
-    private func insertTourSampleData() {
-        let today = startOfDay(Date())
-
-        let tasks: [TaskItem] = [
-            TaskItem(title: "Design new homepage layout",
-                     dueDate: today,
-                     tags: ["design"], priority: .high),
-            TaskItem(title: "Team standup",
-                     dueDate: today),
-            TaskItem(title: "Write API documentation",
-                     dueDate: addDays(today, 3),
-                     tags: ["dev"], priority: .medium),
-            TaskItem(title: "Buy groceries"),
-            TaskItem(title: "Prepare Q3 report",
-                     dueDate: addDays(today, 5),
-                     tags: ["work"], priority: .high),
-        ]
-        for task in tasks { modelContext.insert(task) }
-        try? modelContext.save()
-
-        let ids = tasks.map(\.uid).map(\.uuidString)
-        UserDefaults.standard.set(ids, forKey: Self.tourSampleKey)
-    }
-
-    private func deleteTourSampleData() {
-        let stored = UserDefaults.standard.stringArray(forKey: Self.tourSampleKey) ?? []
+    /// The guided tour was removed. Installs that force-quit mid-tour may still
+    /// hold its sample tasks — delete them once. (Safe to remove after a release.)
+    private func cleanupLeftoverTourSampleData() {
+        let key = "tourSampleUIDs"
+        let stored = UserDefaults.standard.stringArray(forKey: key) ?? []
         guard !stored.isEmpty else { return }
         let ids = Set(stored.compactMap(UUID.init(uuidString:)))
         let allTasks = (try? modelContext.fetch(FetchDescriptor<TaskItem>())) ?? []
         for t in allTasks where ids.contains(t.uid) { modelContext.delete(t) }
         try? modelContext.save()
-        UserDefaults.standard.removeObject(forKey: Self.tourSampleKey)
-    }
-
-    // Cleans up sample data left behind by a previous force-quit during a tour.
-    private func cleanupLeftoverTourSampleData() {
-        let stored = UserDefaults.standard.stringArray(forKey: Self.tourSampleKey) ?? []
-        guard !stored.isEmpty else { return }
-        deleteTourSampleData()
+        UserDefaults.standard.removeObject(forKey: key)
     }
 
     // Processes any tasks queued by AddTaskIntent via UserDefaults.
@@ -443,17 +374,23 @@ struct ContentView: View {
         for entry in pending {
             guard let title = entry["title"] as? String, !title.isEmpty else { continue }
             let dueDate = (entry["dueDate"] as? TimeInterval).map { Date(timeIntervalSince1970: $0) }
-            let task = TaskItem(title: title, dueDate: dueDate)
+            let task = TaskItem(
+                title: title,
+                dueDate: dueDate,
+                tags: entry["tags"] as? [String] ?? [],
+                priority: (entry["priority"] as? String).flatMap(TaskPriority.init(rawValue:)) ?? .normal
+            )
             modelContext.insert(task)
             NotificationService.schedule(task)
+            CoreHooks.taskCreated(task)
         }
         try? modelContext.save()
     }
 
     private func jumpToFirstVisible() {
-        let order: [AppTab] = [.inbox, .habits, .calendar, .notes, .profile]
+        let order: [AppTab] = [.inbox, .habits, .notes, .profile]
         // Profile is always present, so it's the guaranteed fallback.
-        let flags = [tabInboxVisible, tabHabitsVisible, tabCalendarVisible, tabNotesVisible, true]
+        let flags = [tabInboxVisible, tabHabitsVisible, tabNotesVisible, true]
         if let idx = flags.firstIndex(of: true) {
             selectedTab = order[idx]
         }
@@ -466,8 +403,7 @@ struct ContentView: View {
             PathView(
                 palette: palette,
                 onEdit: { editingTask = $0 },
-                onDelete: deleteTask,
-                inFocusMode: true
+                onDelete: deleteTask
             )
             .zIndex(0)
 
@@ -565,22 +501,12 @@ struct ContentView: View {
     // MARK: Shared handlers
 
     /// Swipe-up / tap inside a notes scope creates a blank note there and opens
-    /// the editor. Blank notes are discarded on dismiss by the editor itself.
-    /// Inserts tasks produced by a Brain Dump into the store.
-    private func insertBrainDumpTasks(_ tasks: [BrainPreviewTask]) {
-        for task in tasks {
-            let item = TaskItem(title: task.title)
-            item.dueDate = task.dueDate ?? Calendar.current.startOfDay(for: Date())
-            item.priority = task.priority
-            modelContext.insert(item)
-        }
-    }
-
+    /// it on its own page. Blank notes are discarded on dismiss by the editor itself.
     private func createNoteFromHandle(folder: Folder?) {
         let note = Note(folder: folder)
         modelContext.insert(note)
         try? modelContext.save()
-        addingNote = note
+        notesNavState.requestedNote = note
     }
 
     /// Shows the hard wall when the free trial has ended and the user hasn't
@@ -597,12 +523,16 @@ struct ContentView: View {
     private func checkDailyRecap() {
         let cal = Calendar.current
         let todayKey = AccomplishmentsStore.dateKey(Date())
-        guard lastRecapDay != todayKey else { return }
+        // Already seen today (also under the old key format, on the update day).
+        guard lastRecapDay != todayKey, lastRecapDay != AccomplishmentsStore.legacyDateKey(Date()) else { return }
         let yesterday = cal.date(byAdding: .day, value: -1, to: cal.startOfDay(for: Date())) ?? Date()
-        let tasks = allTasks.filter { t in
-            guard t.completed, let done = t.completedAt else { return false }
-            return cal.isDate(done, inSameDayAs: yesterday)
-        }.count
+        let today = cal.startOfDay(for: Date())
+        // A one-off fetch, not a root @Query — a query here re-rendered the
+        // whole app on every task change just for this once-a-day check.
+        let doneYesterday = FetchDescriptor<TaskItem>(predicate: #Predicate { t in
+            if let done = t.completedAt { t.completed && done >= yesterday && done < today } else { false }
+        })
+        let tasks = (try? modelContext.fetchCount(doneYesterday)) ?? 0
         let focus = FocusLog.minutes(on: yesterday)
         // Evaluate only once per day, whether or not we end up showing it.
         lastRecapDay = todayKey
@@ -610,9 +540,10 @@ struct ContentView: View {
         recapDate = yesterday
         recapTasks = tasks
         // The task goal follows the day: however many tasks were due then.
-        recapTaskGoal = allTasks.filter { t in
-            !t.isTrashed && !t.isNote && (t.dueDate.map { cal.isDate($0, inSameDayAs: yesterday) } ?? false)
-        }.count
+        let dueYesterday = FetchDescriptor<TaskItem>(predicate: #Predicate { t in
+            if let due = t.dueDate { t.deletedAt == nil && !t.isNote && due >= yesterday && due < today } else { false }
+        })
+        recapTaskGoal = (try? modelContext.fetchCount(dueYesterday)) ?? 0
         recapFocus = focus
         showDailyRecap = true
     }
@@ -701,7 +632,6 @@ private struct TrialCountdownBar: View {
         .environment(Appearance())
         .environment(PomodoroModel())
         .environment(CalendarService())
-        .environment(TourCoordinator())
         .environment(MembershipRouter())
         .modelContainer(for: [TaskItem.self, Note.self, Folder.self], inMemory: true)
 }
@@ -715,5 +645,51 @@ extension View {
         background(palette.bg.ignoresSafeArea())
             // The page's own controls stay navy; the blue is the tab bar's.
             .tint(palette.primary)
+    }
+}
+
+/// Slides a tab page in from the side of the tab bar it was reached from, so
+/// switching tabs moves rather than just cutting or fading. The system tab
+/// view swaps pages instantly; this animates the arriving page into place.
+private struct TabPageEntrance: ViewModifier {
+    let tab: AppTab
+    let selected: AppTab
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shift: CGFloat = 0
+    @State private var fade: Double = 1
+
+    func body(content: Content) -> some View {
+        content
+            .offset(x: shift)
+            .opacity(fade)
+            .onChange(of: selected) { old, new in
+                guard new == tab else { return }
+                // Arrive from the side of the tab bar the old tab sits on.
+                let order = AppTab.allCases
+                let direction: CGFloat = (order.firstIndex(of: new) ?? 0) >= (order.firstIndex(of: old) ?? 0) ? 1 : -1
+                if reduceMotion {
+                    fade = 0.4
+                    withAnimation(.easeOut(duration: 0.2)) { fade = 1 }
+                    return
+                }
+                // Start just off to the side, then glide home.
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) {
+                    shift = 64 * direction
+                    fade = 0.2
+                }
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                    shift = 0
+                    fade = 1
+                }
+            }
+    }
+}
+
+extension View {
+    fileprivate func tabPageEntrance(_ tab: AppTab, selected: AppTab) -> some View {
+        modifier(TabPageEntrance(tab: tab, selected: selected))
     }
 }

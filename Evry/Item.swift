@@ -37,17 +37,6 @@ enum TaskPriority: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    /// Short chip text ("High", "Medium", "Low"). Priority is carried by the
-    /// word and `symbol`, never by colour (the brand has no red/orange/green).
-    var chipLabel: String? {
-        switch self {
-        case .high: "High"
-        case .medium: "Medium"
-        case .low: "Low"
-        case .normal: nil
-        }
-    }
-
     /// SF Symbol that marks a non-normal priority — drawn in navy ink; the
     /// glyph's shape (two marks, one mark, a down arrow) tells the levels apart.
     /// (Task cards mark high priority with a sky outline instead.)
@@ -191,12 +180,9 @@ final class TaskGroup {
     @Relationship(deleteRule: .nullify, inverse: \TaskItem.group)
     var tasks: [TaskItem]? = []
 
-    init(name: String = "", colorHex: Int? = nil) {
+    init(name: String = "") {
         self.name = name
-        self.colorHex = colorHex
     }
-
-    var color: Color? { colorHex.map { Color(hex: UInt32(truncatingIfNeeded: $0)) } }
 
     /// The folder's display colour in the current theme — always a sky/navy
     /// shade; the legacy `colorHex` is ignored so no off-brand hue can appear.

@@ -5,7 +5,7 @@
 //  Notes tab — an Apple Notes-style two-level flow that mirrors the Projects
 //  tab: a Folders screen (this file's `NotesView`) whose cards navigate into a
 //  scoped `NotesListView`. The list groups notes by creation day, surfaces
-//  pinned notes, and drops you into the rich editor.
+//  pinned notes, and pushes each note onto its own editor page.
 //
 
 import SwiftUI
@@ -40,6 +40,11 @@ enum NoteScope: Hashable {
 @Observable
 final class NotesNavigationState {
     var activeScope: NoteScope? = nil
+    /// A note to open on its own page (a row tap, or the add handle making
+    /// one); `NotesView` pushes it onto its stack and clears this.
+    var requestedNote: Note? = nil
+    /// True while a note's page is on top — the add handle steps away.
+    var noteOpen = false
 }
 
 // MARK: - Folder styling shared between the edit sheet and quick-create
@@ -72,8 +77,11 @@ struct NotesView: View {
     @Environment(\.modelContext) private var context
     @Environment(Appearance.self) private var appearance
     @Environment(\.evryAway) private var evryAway
+    @Environment(NotesNavigationState.self) private var notesNav
     @Query(sort: \Folder.sortOrder) private var folders: [Folder]
-    @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
+    /// Trash is filtered in the store, not in Swift on every render.
+    @Query(filter: #Predicate<Note> { $0.deletedAt == nil },
+           sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
 
     @State private var navPath = NavigationPath()
     /// True while a notes list is on top, and for the length of the pop
@@ -82,7 +90,7 @@ struct NotesView: View {
     @State private var listOnTop = false
     @State private var editingFolder: Folder?
 
-    private var liveNotes: [Note] { allNotes.filter { !$0.isTrashed } }
+    private var liveNotes: [Note] { allNotes }
 
     /// Per-folder note counts in a single pass (avoids O(folders × notes) work
     /// when rendering the folder list).
@@ -171,6 +179,18 @@ struct NotesView: View {
             .navigationDestination(for: NoteScope.self) { scope in
                 NotesListView(scope: scope, palette: palette)
             }
+            // Each note opens on its own page, pushed over its list.
+            .navigationDestination(for: Note.self) { note in
+                NoteEditorView(note: note, style: .page)
+                    .environment(appearance)
+                    .onAppear { notesNav.noteOpen = true }
+                    .onDisappear { notesNav.noteOpen = false }
+            }
+        }
+        .onChange(of: notesNav.requestedNote) { _, note in
+            guard let note else { return }
+            navPath.append(note)
+            notesNav.requestedNote = nil
         }
         .sheet(item: $editingFolder) { folder in
             EditFolderSheet(folder: folder).environment(appearance)
@@ -234,54 +254,36 @@ struct NotesListView: View {
     let scope: NoteScope
     let palette: Palette
 
-    @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
-    @Environment(Appearance.self) private var appearance
     @Environment(NotesNavigationState.self) private var notesNav
-    @Environment(\.evryAway) private var evryAway
-    @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
+    /// Trash is filtered in the store, not in Swift on every render.
+    @Query(filter: #Predicate<Note> { $0.deletedAt == nil },
+           sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
 
     @State private var searchText = ""
     @State private var searchActive = false
     @FocusState private var searchFocused: Bool
-    @State private var sheet: NotesSheet?
-    // Brain Dump is presented full-screen (not as a card sheet), so it lives in
-    // its own cover rather than the editor item-sheet.
-    @State private var showBrainDump = false
-
-    private enum NotesSheet: Identifiable {
-        case editor(Note)
-        var id: String {
-            switch self {
-            case .editor(let n): return "editor-\(n.uid.uuidString)"
-            }
-        }
-    }
 
     // MARK: Derived collections
 
-    /// Non-trashed notes within this scope.
+    /// Notes within this scope (trash is already excluded by the query).
     private var notes: [Note] {
-        allNotes.filter { note in
-            guard !note.isTrashed else { return false }
-            switch scope {
-            case .all:              return true
-            case .folder(let f):    return note.folder?.uid == f.uid
-            }
+        switch scope {
+        case .all:              return allNotes
+        case .folder(let f):    return allNotes.filter { $0.folder?.uid == f.uid }
         }
     }
 
-    /// Scope notes narrowed by the search query.
+    /// Scope notes narrowed by the search query (case-insensitive, without
+    /// lowercasing a copy of every note's text on each pass).
     private var filtered: [Note] {
-        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        let q = searchText.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return notes }
         return notes.filter {
-            $0.title.lowercased().contains(q) || $0.plainText.lowercased().contains(q)
+            $0.title.range(of: q, options: .caseInsensitive) != nil
+                || $0.plainText.range(of: q, options: .caseInsensitive) != nil
         }
     }
-
-    private var pinned: [Note] { filtered.filter(\.pinned) }
-    private var unpinned: [Note] { filtered.filter { !$0.pinned } }
 
     /// In All Notes the folder chip is useful context; inside a folder it's noise.
     private var showsFolderChip: Bool {
@@ -296,7 +298,7 @@ struct NotesListView: View {
     }
 
     /// Unpinned notes bucketed by the day they were created, newest day first.
-    private var dateGroups: [DateGroup] {
+    private func dateGroups(_ unpinned: [Note]) -> [DateGroup] {
         let cal = Calendar.current
         let buckets = Dictionary(grouping: unpinned) { cal.startOfDay(for: $0.createdAt) }
         return buckets.keys.sorted(by: >).map { day in
@@ -330,8 +332,12 @@ struct NotesListView: View {
             }
 
             ScrollView {
-                VStack(spacing: 0) {
-                    if filtered.isEmpty {
+                // Filtered once per render, then split.
+                let shown = filtered
+                let pinned = shown.filter(\.pinned)
+                // Lazy, so long note lists only build the rows on screen.
+                LazyVStack(spacing: 0) {
+                    if shown.isEmpty {
                         emptyState
                             // Lines up with the Inbox's empty state.
                             .padding(.top, 36)
@@ -343,7 +349,7 @@ struct NotesListView: View {
                         }
                         // Unpinned notes grouped by creation day, newest first,
                         // with a date header between groups (Apple Notes style).
-                        ForEach(dateGroups) { group in
+                        ForEach(dateGroups(shown.filter { !$0.pinned })) { group in
                             SectionLabel(text: group.title, palette: palette)
                                 .padding(.horizontal, EvrySpace.gutter)
                             noteRows(group.notes)
@@ -373,21 +379,8 @@ struct NotesListView: View {
                         }
                 )
         }
-        // Brain Dump opens with its own Evry; the list's empty-state Evry steps
-        // away while it's up (applied before the cover so the cover keeps its own).
-        .environment(\.evryAway, evryAway || showBrainDump)
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
-        .sheet(item: $sheet) { which in
-            switch which {
-            case .editor(let note):
-                NoteEditorView(note: note).environment(appearance)
-            }
-        }
-        .fullScreenCover(isPresented: $showBrainDump) {
-            BrainDumpSheet(context: .note(save: { text in brainDumpToNewNote(text) }))
-                .environment(appearance)
-        }
         .onAppear { notesNav.activeScope = scope }
         .onDisappear { if notesNav.activeScope == scope { notesNav.activeScope = nil } }
     }
@@ -427,13 +420,6 @@ struct NotesListView: View {
                 }
             }
             .accessibilityLabel(searchActive ? "Close search" : "Search notes")
-
-            HeaderIconButton(systemName: "lightbulb", palette: palette) {
-                // Suppress the cover's slide-up so Brain Dump fades in.
-                var t = Transaction(); t.disablesAnimations = true
-                withTransaction(t) { showBrainDump = true }
-            }
-                .accessibilityLabel("Brain dump")
         }
     }
 
@@ -490,7 +476,7 @@ struct NotesListView: View {
                 ) {
                     NoteRowView(note: note, palette: palette, showFolder: showsFolderChip)
                         .contentShape(Rectangle())
-                        .onTapGesture { sheet = .editor(note) }
+                        .onTapGesture { notesNav.requestedNote = note }
                         .contextMenu {
                             Button {
                                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
@@ -524,17 +510,6 @@ struct NotesListView: View {
                 : "Try a different word, or clear the search to see every note.",
             palette: palette
         )
-    }
-
-    // MARK: Actions
-
-    /// Brain Dump from the list → a brand-new note in this scope, opened for review.
-    private func brainDumpToNewNote(_ text: String) {
-        let note = Note(body: NSAttributedString(string: text), folder: scope.folder)
-        note.modifiedAt = Date()
-        context.insert(note)
-        try? context.save()
-        sheet = .editor(note)
     }
 }
 
@@ -717,6 +692,8 @@ private struct EditFolderSheet: View {
     @Bindable var folder: Folder
 
     @Environment(\.dismiss) private var dismiss
+    /// The name on open, put back if the field is left empty.
+    @State private var originalName = ""
     @Environment(\.colorScheme) private var scheme
     @Environment(Appearance.self) private var appearance
 
@@ -752,6 +729,11 @@ private struct EditFolderSheet: View {
                     Button("Done") { dismiss() }.font(.evryLabel)
                 }
             }
+        }
+        .onAppear { originalName = folder.name }
+        // A folder can't be left nameless (creating one requires a name too).
+        .onDisappear {
+            if folder.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { folder.name = originalName }
         }
         .tint(palette.primary)
         .presentationCornerRadius(EvryRadius.panel)

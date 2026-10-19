@@ -2,17 +2,446 @@
 //  EvryTests.swift
 //  EvryTests
 //
-//  Created by Alec Walter on 7/23/26.
+//  Baseline tests for the app's riskiest pure logic — typed-input parsing,
+//  Evry's date reading, place labelling and matching, chat bullet formatting,
+//  habit streaks and recurring-task completion. They pin today's behaviour so
+//  refactors can't change it silently.
 //
 
+import Foundation
+import SwiftData
 import Testing
+@testable import Evry
 
-struct EvryTests {
+private let cal = Calendar.current
+private func hour(_ d: Date?) -> Int? { d.map { cal.component(.hour, from: $0) } }
+private func minute(_ d: Date?) -> Int? { d.map { cal.component(.minute, from: $0) } }
 
-    @Test func example() async throws {
-        // Write your test here and use APIs like `#expect(...)` to check expected conditions.
-        // Swift Testing Documentation
-        // https://developer.apple.com/documentation/testing
+/// An in-memory store with the app's full schema (a partial schema traps when a
+/// model's relationships point at types outside it).
+@MainActor
+private func memoryContext() throws -> ModelContext {
+    let schema = Schema([TaskItem.self, TaskGroup.self, Note.self, Folder.self, Habit.self, HabitEntry.self])
+    let container = try ModelContainer(for: schema,
+                                       configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true))
+    // Kept alive for the test's duration via the context's container reference.
+    retained.append(container)
+    return container.mainContext
+}
+@MainActor private var retained: [ModelContainer] = []
+
+// MARK: - Quick-add parsing
+
+@MainActor
+struct TaskParsingTests {
+    @Test func parsesTitleTagsPriorityAndTime() {
+        let p = parseTaskInput("Gym 3pm #health !high")
+        #expect(p.title == "Gym")
+        #expect(p.tags == ["health"])
+        #expect(p.priority == .high)
+        #expect(hour(p.date) == 15)
     }
 
+    @Test func parses24HourTime() {
+        let p = parseTaskInput("Standup at 9:30")
+        #expect(p.title == "Standup")
+        #expect(hour(p.date) == 9)
+        #expect(minute(p.date) == 30)
+    }
+
+    @Test func weekdayGivesAFutureDay() {
+        let p = parseTaskInput("Call mom friday")
+        #expect(p.title == "Call mom")
+        let d = try? #require(p.date)
+        #expect(d.map { cal.component(.weekday, from: $0) } == 6)
+        #expect(d.map { $0 > Date() } == true)
+    }
+
+    @Test func midnightIsTheEndOfToday() {
+        let p = parseTaskInput("Submit form at midnight")
+        #expect(p.title == "Submit form")
+        #expect(hour(p.date) == 23)
+        #expect(p.date.map(cal.isDateInToday) == true)
+    }
+
+    @Test func plainTitleHasNoDate() {
+        let p = parseTaskInput("Read a book")
+        #expect(p.title == "Read a book")
+        #expect(p.date == nil)
+    }
+}
+
+// MARK: - Evry's dates
+
+@MainActor
+struct EvryWhenTests {
+    @Test func todayAtShortTime() {
+        let d = EvryWhen.parse("today at 8p")
+        #expect(d.map { cal.isDateInToday($0) } == true)
+        #expect(hour(d) == 20)
+    }
+
+    @Test func tomorrowIsADayWithoutTime() {
+        let d = EvryWhen.parse("tomorrow")
+        #expect(d.map { cal.isDateInTomorrow($0) } == true)
+        #expect(EvryWhen.hasTime(d) == false)
+    }
+
+    @Test func tonightIsTheEvening() {
+        #expect(hour(EvryWhen.parse("tonight")) == 20)
+    }
+
+    @Test func relativeHours() {
+        let d = try? #require(EvryWhen.parse("in 2 hours"))
+        let gap = d.map { $0.timeIntervalSinceNow } ?? 0
+        #expect(abs(gap - 7200) < 120)
+    }
+
+    @Test func relativeMinutesWithoutSpace() {
+        let d = EvryWhen.parse("in 20min")
+        let gap = d.map { $0.timeIntervalSinceNow } ?? 0
+        #expect(abs(gap - 1200) < 120)
+    }
+
+    @Test func emptyIsNil() {
+        #expect(EvryWhen.parse("") == nil)
+    }
+}
+
+// MARK: - Distill's spoken days
+
+@MainActor
+struct SpokenTaskTests {
+    @Test func tomorrowLeavesTheTitleAndSetsTheDay() {
+        let p = EvryAssistant.parseSpokenTask("Call mom tomorrow")
+        #expect(p.title == "Call mom")
+        #expect(p.date.map { cal.isDateInTomorrow($0) } == true)
+    }
+
+    @Test func tomorrowKeepsAGivenTime() {
+        let p = EvryAssistant.parseSpokenTask("Gym tomorrow 7am")
+        #expect(p.title == "Gym")
+        #expect(p.date.map { cal.isDateInTomorrow($0) } == true)
+        #expect(hour(p.date) == 7)
+    }
+
+    @Test func plainTitlesAreUnchanged() {
+        let p = EvryAssistant.parseSpokenTask("Water the plants")
+        #expect(p.title == "Water the plants")
+        #expect(p.date == nil)
+    }
+}
+
+// MARK: - Place labels
+
+@MainActor
+struct PlaceLabelTests {
+    private func cand(_ name: String, _ category: MKPointOfInterestCategoryProxy = .none,
+                      address: Bool = false) -> PlaceCandidate {
+        PlaceCandidate(name: name, address: "1 Main St", category: category.value,
+                       coordinate: .init(latitude: 0, longitude: 0), distance: nil, isAddress: address)
+    }
+
+    @Test func gymByName() {
+        #expect(PlaceLabels.role(for: cand("North Mass Boulder"), stated: nil).label == "Gym")
+    }
+
+    @Test func groceryOnlyForChains() {
+        #expect(PlaceLabels.role(for: cand("Kroger", .foodMarket), stated: nil).label == "Grocery store")
+        let local = PlaceLabels.role(for: cand("Fresh Bites Market", .foodMarket), stated: nil)
+        #expect(local.label == "Work")
+        #expect(local.check == .work)
+    }
+
+    @Test func houseAsksHome() {
+        let r = PlaceLabels.role(for: cand("4410 N Park Ave", address: true), stated: nil)
+        #expect(r.label == "Home")
+        #expect(r.check == .home)
+    }
+
+    @Test func savedWorkIsNotAskedAgain() {
+        let r = PlaceLabels.role(for: cand("Salesforce Tower"), stated: nil, saved: ["Work"])
+        #expect(r.label == "Location")
+        #expect(r.check == .none)
+    }
+
+    @Test func statedKindIgnoresThePlaceName() {
+        #expect(PlaceLabels.statedKind(in: "my gym, Planet Fitness", excluding: "Planet Fitness") == "Gym")
+        #expect(PlaceLabels.statedKind(in: "Whole Foods Market", excluding: "Whole Foods Market") == nil)
+    }
+
+    @Test func repliesByRule() async {
+        #expect(await PlaceResolver.interpretReply("yes") == .yes)
+        #expect(await PlaceResolver.interpretReply("nope") == .no)
+        #expect(await PlaceResolver.interpretReply("wrong one") == .wrongPlace)
+        #expect(await PlaceResolver.interpretReply("no that's just a store I go to") == .kind("Store"))
+    }
+
+    @Test func negatedReplyIsANo() async {
+        #expect(await PlaceResolver.interpretReply("no, I don't work there") == .no)
+        #expect(await PlaceResolver.interpretReply("not my house") == .no)
+    }
+}
+
+/// Lets tests name a category (or none) without importing MapKit at each site.
+import MapKit
+struct MKPointOfInterestCategoryProxy {
+    let value: MKPointOfInterestCategory?
+    static let none = MKPointOfInterestCategoryProxy(value: nil)
+    static let foodMarket = MKPointOfInterestCategoryProxy(value: .foodMarket)
+}
+
+// MARK: - Saved place matching
+
+@MainActor
+struct PlaceMatchTests {
+    private let places = [
+        FrequentPlace(label: "Gym", name: "North Mass Boulder", address: "1411 Roosevelt Ave", latitude: 0, longitude: 0),
+        FrequentPlace(label: "Work", name: "Salesforce Tower", address: "111 Monument Cir", latitude: 0, longitude: 0),
+        FrequentPlace(label: "Home", name: "4410 N Park Ave", address: "4410 N Park Ave", latitude: 0, longitude: 0),
+    ]
+
+    @Test(arguments: [
+        ("Go to the gym", "Gym"), ("Leg day", "Gym"), ("North Mass with Sam", "Gym"),
+        ("Meeting at the office", "Work"), ("Commute", "Work"), ("Head home", "Home"),
+    ])
+    func matches(title: String, label: String) {
+        #expect(FrequentPlaces.match(for: title, in: places)?.label == label)
+    }
+
+    @Test(arguments: ["Work on API docs", "Pick up paint at Home Depot", "Write report",
+                      "Lift the couch", "Shift dentist to Friday"])
+    func noMatch(title: String) {
+        #expect(FrequentPlaces.match(for: title, in: places) == nil)
+    }
+}
+
+// MARK: - Chat formatting
+
+@MainActor
+struct BulletFormattingTests {
+    @Test func inlineBulletsBreakOntoLines() {
+        #expect(EvryConversation.formatBullets("Today: • A • B") == "Today:\n• A\n• B")
+    }
+
+    @Test func dashBulletsBecomeDots() {
+        #expect(EvryConversation.formatBullets("Notes:\n- A\n* B") == "Notes:\n• A\n• B")
+    }
+
+    @Test func plainTextUntouched() {
+        #expect(EvryConversation.formatBullets("All set!") == "All set!")
+    }
+}
+
+// MARK: - Habits
+
+@MainActor
+struct HabitStatsTests {
+    @Test func streakCountsConsecutiveDays() throws {
+        let ctx = try memoryContext()
+        let habit = Habit(name: "Read")
+        habit.createdAt = cal.date(byAdding: .day, value: -10, to: Date())!
+        ctx.insert(habit)
+        for back in 0..<3 {
+            ctx.insert(HabitEntry(habit: habit, day: cal.date(byAdding: .day, value: -back, to: Date())!))
+        }
+        let stats = HabitStats(habit: habit)
+        #expect(stats.currentStreak == 3)
+        #expect(stats.todayDone)
+        #expect(stats.completedDays == 3)
+        // The cheap helpers agree with the full stats.
+        #expect(habit.isDoneToday == stats.todayDone)
+        #expect(habit.checkIns(on: Date()) == stats.today)
+        #expect(habit.isDue(on: Date()))
+    }
+}
+
+extension HabitStatsTests {
+    @Test func cacheRefreshesAfterACheckIn() throws {
+        let ctx = try memoryContext()
+        let habit = Habit(name: "Walk")
+        ctx.insert(habit)
+        let cache = HabitStatsCache()
+        let today = cal.startOfDay(for: Date())
+        #expect(cache.stats(for: habit, today: today).today == 0)
+        HabitActions.checkIn(habit, context: ctx)
+        #expect(cache.stats(for: habit, today: today).today == 1)
+    }
+}
+
+// MARK: - Recurring tasks
+
+@MainActor
+struct RecurrenceTests {
+    private func context() throws -> ModelContext { try memoryContext() }
+
+    @Test func completingSpawnsTheNextOccurrence() throws {
+        let ctx = try context()
+        let task = TaskItem(title: "Water plants", dueDate: startOfDay(Date()), autoLocation: false)
+        task.recurrence = .daily
+        ctx.insert(task)
+        TaskActions.toggle(task, context: ctx)
+        let all = try ctx.fetch(FetchDescriptor<TaskItem>())
+        #expect(all.count == 2)
+        #expect(all.contains { !$0.completed && $0.dueDate.map { cal.isDateInTomorrow($0) } == true })
+    }
+
+    @Test func uncompletingRemovesTheSpawnedCopy() throws {
+        let ctx = try context()
+        let task = TaskItem(title: "Water plants", dueDate: startOfDay(Date()), autoLocation: false)
+        task.recurrence = .daily
+        ctx.insert(task)
+        TaskActions.toggle(task, context: ctx)
+        TaskActions.toggle(task, context: ctx)
+        let open = try ctx.fetch(FetchDescriptor<TaskItem>()).filter { !$0.isTrashed }
+        #expect(open.count == 1)
+    }
+}
+
+// MARK: - Note saving
+
+@MainActor
+struct NoteBodySaverTests {
+    @Test func flushWritesThePendingEdit() throws {
+        let ctx = try memoryContext()
+        let note = Note(title: "Trip")
+        ctx.insert(note)
+        let saver = NoteBodySaver()
+        saver.edited(NSAttributedString(string: "Pack boots"), note: note)
+        #expect(note.plainText.isEmpty)          // not written yet (debounced)
+        saver.flush(note)
+        #expect(note.plainText == "Pack boots")
+    }
+
+    @Test func debouncedEditLandsAfterThePause() async throws {
+        let ctx = try memoryContext()
+        let note = Note(title: "Trip")
+        ctx.insert(note)
+        let saver = NoteBodySaver()
+        saver.edited(NSAttributedString(string: "A"), note: note)
+        saver.edited(NSAttributedString(string: "AB"), note: note)
+        try await Task.sleep(for: .milliseconds(700))
+        #expect(note.plainText == "AB")
+    }
+}
+
+extension RecurrenceTests {
+    @Test func spawnedCopyKeepsLocationPinAndFolder() throws {
+        let ctx = try context()
+        let group = TaskGroup(name: "Home")
+        ctx.insert(group)
+        let task = TaskItem(title: "Water plants", dueDate: startOfDay(Date()),
+                            location: "Back garden", autoLocation: false)
+        task.recurrence = .daily
+        task.pinned = true
+        task.group = group
+        ctx.insert(task)
+        TaskActions.toggle(task, context: ctx)
+        let next = try #require(try ctx.fetch(FetchDescriptor<TaskItem>()).first { !$0.completed })
+        #expect(next.location == "Back garden")
+        #expect(next.pinned)
+        #expect(next.group?.uid == group.uid)
+    }
+
+    @Test func moveToTodayKeepsTheTime() throws {
+        let ctx = try context()
+        let twoDaysAgo3pm = cal.date(bySettingHour: 15, minute: 30, second: 0,
+                                     of: cal.date(byAdding: .day, value: -2, to: Date())!)!
+        let task = TaskItem(title: "Call", dueDate: twoDaysAgo3pm, autoLocation: false)
+        ctx.insert(task)
+        TaskActions.moveToToday([task], context: ctx)
+        #expect(task.dueDate.map { cal.isDateInToday($0) } == true)
+        #expect(hour(task.dueDate) == 15)
+        #expect(minute(task.dueDate) == 30)
+    }
+}
+
+// MARK: - Day keys
+
+@MainActor
+struct DayKeyTests {
+    @Test func dayKeyIsStableAndSortable() {
+        let d = cal.date(from: DateComponents(year: 2026, month: 4, day: 1, hour: 15))!
+        #expect(AccomplishmentsStore.dateKey(d) == "2026-04-01")
+    }
+
+    @Test func focusMinutesIncludeTheOldKey() {
+        let day = cal.date(from: DateComponents(year: 2001, month: 2, day: 3))!
+        let legacy = "focus_min_" + AccomplishmentsStore.legacyDateKey(day)
+        UserDefaults.standard.set(10, forKey: legacy)
+        defer { UserDefaults.standard.removeObject(forKey: legacy)
+                UserDefaults.standard.removeObject(forKey: "focus_min_" + AccomplishmentsStore.dateKey(day)) }
+        FocusLog.add(minutes: 5, on: day)
+        #expect(FocusLog.minutes(on: day) == 15)
+    }
+}
+
+// MARK: - Pomodoro
+
+/// Runs `body` with the Pomodoro snapshot and today's focus minutes saved
+/// and restored, so tests don't disturb the app's own state.
+@MainActor private func withCleanPomodoro(_ body: () -> Void) {
+    let defaults = UserDefaults.standard
+    let keys = ["pomodoro_state_v1", "focus_min_" + AccomplishmentsStore.dateKey(Date())]
+    let saved = keys.map { defaults.object(forKey: $0) }
+    keys.forEach { defaults.removeObject(forKey: $0) }
+    defer { for (k, v) in zip(keys, saved) { defaults.set(v, forKey: k) } }
+    body()
+}
+
+@MainActor
+struct PomodoroTests {
+    @Test func skippingFocusLogsOnlyTheTimeSpent() {
+        withCleanPomodoro {
+            let model = PomodoroModel()
+            model.start()
+            model.tick(at: Date().addingTimeInterval(10 * 60 + 5))
+            model.skip()
+            #expect(model.completedSessions == 0)
+            #expect(model.phase == .shortBreak)
+            #expect(FocusLog.minutes(on: Date()) == 10)
+            model.reset()
+        }
+    }
+
+    @Test func catchesUpOnPhasesMissedInTheBackground() {
+        withCleanPomodoro {
+            let model = PomodoroModel()   // Classic: 25 / 5
+            model.start()
+            // Back after focus (25) + break (5) + 3 minutes of the next focus.
+            model.tick(at: Date().addingTimeInterval(33 * 60))
+            #expect(model.phase == .work)
+            #expect(model.completedSessions == 1)
+            #expect(abs(model.remaining - 22 * 60) < 5)
+            model.reset()
+        }
+    }
+}
+
+// MARK: - Store queries
+
+@MainActor
+struct StoreQueryTests {
+    @Test func prioritiesOftenNeedsFortyPercent() throws {
+        let ctx = try memoryContext()
+        for i in 0..<5 {
+            ctx.insert(TaskItem(title: "t\(i)", priority: i < 2 ? .high : .normal, autoLocation: false))
+        }
+        #expect(EvryAssistant.usesPrioritiesOften(ctx))          // 2 of 5 = 40%
+        ctx.insert(TaskItem(title: "t5", autoLocation: false))
+        #expect(!EvryAssistant.usesPrioritiesOften(ctx))         // 2 of 6
+    }
+
+    @Test func purgeRemovesOnlyExpiredTrash() throws {
+        let ctx = try memoryContext()
+        let old = TaskItem(title: "old", autoLocation: false)
+        old.deletedAt = cal.date(byAdding: .day, value: -31, to: Date())
+        let recent = TaskItem(title: "recent", autoLocation: false)
+        recent.deletedAt = Date()
+        let live = TaskItem(title: "live", autoLocation: false)
+        [old, recent, live].forEach { ctx.insert($0) }
+        TaskActions.purgeExpiredTrash(context: ctx)
+        let left = try ctx.fetch(FetchDescriptor<TaskItem>()).map(\.title).sorted()
+        #expect(left == ["live", "recent"])
+    }
 }

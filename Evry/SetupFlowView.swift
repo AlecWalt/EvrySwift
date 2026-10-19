@@ -993,8 +993,6 @@ private struct BandLayout: Equatable {
     var bottom: Double
     var bottomBulge: Double = 0
     var bottomTilt: Double = 0
-    /// Navy instead of sky — the flow's one navy band (near the end).
-    var navy = false
 
     static let off = -0.2
     static let past = 1.2
@@ -1056,13 +1054,11 @@ private struct SetupBackdrop: View {
     @State private var breathe = false
 
     private var front: Color {
-        if layout.navy { return palette.dark ? Color.evryNavySoft : .evryNavy }
-        return palette.dark ? Color.evryNavy.mix(with: .evrySky, by: 0.28) : .evrySky
+        palette.dark ? Color.evryNavy.mix(with: .evrySky, by: 0.28) : .evrySky
     }
 
     private var back: Color {
-        if layout.navy { return palette.dark ? Color.evryNavy.mix(with: .evrySky, by: 0.28) : .evrySky }
-        return palette.dark ? Color.evryNavy.mix(with: .evrySky, by: 0.14) : .evrySkySoft
+        palette.dark ? Color.evryNavy.mix(with: .evrySky, by: 0.14) : .evrySkySoft
     }
 
     var body: some View {

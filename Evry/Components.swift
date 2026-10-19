@@ -14,7 +14,7 @@ import UIKit
 
 /// A fill that expands as a disc from an `origin` point, covering `progress`
 /// (0→1) of its own rect. When no origin is given it starts at the top-right
-/// corner. Used as Brain Dump / Pomodoro's fill-wipe intro — passing the tapped
+/// corner. Used as Pomodoro's fill-wipe intro — passing the tapped
 /// tool bubble's position makes the wipe grow out of that bubble.
 struct CornerFillShape: Shape {
     var progress: CGFloat
@@ -40,19 +40,6 @@ struct CornerFillShape: Shape {
         p.addArc(center: o, radius: maxR * min(1, progress),
                  startAngle: .degrees(0), endAngle: .degrees(360), clockwise: false)
         return p
-    }
-}
-
-// MARK: - Palette access
-
-/// Convenience for views: builds the current palette from the environment.
-struct PaletteReader<Content: View>: View {
-    @Environment(\.colorScheme) private var scheme
-    @Environment(Appearance.self) private var appearance
-    @ViewBuilder var content: (Palette) -> Content
-
-    var body: some View {
-        content(Palette(dark: scheme == .dark, accent: appearance.accent))
     }
 }
 
@@ -199,31 +186,7 @@ struct ProgressBarView: View {
     }
 }
 
-/// Header progress area — "3 of 5 done   60%" label + bar.
-struct ProgressArea: View {
-    let done: Int
-    let total: Int
-    let palette: Palette
-
-    private var fraction: Double { total > 0 ? Double(done) / Double(total) : 0 }
-    private var pct: Int { Int((fraction * 100).rounded()) }
-
-    var body: some View {
-        VStack(spacing: 5) {
-            HStack {
-                Text("\(done) of \(total) done")
-                Spacer()
-                Text("\(pct)%")
-            }
-            .font(.nunito(size: 12))
-            .foregroundStyle(palette.textSec)
-            ProgressBarView(fraction: fraction, palette: palette)
-        }
-        .padding(.top, 14)
-    }
-}
-
-// MARK: - Round icon button (38pt bordered circle — header actions, gear)
+// MARK: - Header icon button
 
 /// The standard page-header action (top-right of a page title): a 44pt white
 /// tile with a navy glyph — shared so every page's header controls match.
@@ -257,27 +220,6 @@ struct HeaderIconLabel: View {
                         in: RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: EvryRadius.field, style: .continuous)
                 .strokeBorder(palette.hairline, lineWidth: 1))
-    }
-}
-
-struct RoundIconButton: View {
-    let systemName: String
-    let palette: Palette
-    var size: CGFloat = 38
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.nunito(size: size * 0.42, weight: .medium))
-                .foregroundStyle(palette.text)
-                .frame(width: size, height: size)
-                .background(palette.card, in: Circle())
-                .overlay(Circle().strokeBorder(palette.border, lineWidth: 1))
-                .frame(minWidth: EvrySpace.tap, minHeight: EvrySpace.tap)
-                .contentShape(Circle())
-        }
-        .buttonStyle(PressScaleStyle())
     }
 }
 
@@ -379,11 +321,6 @@ struct EmptyStateView: View {
         .padding(32)
     }
 }
-
-let emptyMessages = [
-    "Nothing else left!", "All done for now.", "You’re all caught up!",
-    "A clear list. Enjoy it.", "Nice work — that’s everything.",
-]
 
 // MARK: - Checkbox (22pt circle, becomes the sky check disc when done)
 
@@ -519,11 +456,15 @@ struct BurstPillButton: View {
     @State private var popScale: CGFloat = 1
     @State private var burstScale: CGFloat = 1
     @State private var burstOpacity: Double = 0
+    @State private var firing = false
 
     var body: some View {
         Button {
+            // One action per tap — a second tap during the pop is ignored.
+            guard !firing else { return }
+            firing = true
             play()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { action() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { action(); firing = false }
         } label: {
             Text(title)
                 .font(.nunito(size: 13, weight: .bold))
@@ -575,12 +516,16 @@ struct TrashBurstButton: View {
     @State private var popScale: CGFloat = 1
     @State private var burstScale: CGFloat = 0.85
     @State private var burstOpacity: Double = 0
+    @State private var firing = false
     @State private var tinted = false
 
     var body: some View {
         Button {
+            // One action per tap — a second tap during the pop is ignored.
+            guard !firing else { return }
+            firing = true
             play()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { action() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { action(); firing = false }
         } label: {
             ZStack {
                 // Ring that bursts outward on tap (same shape as the checkbox's).
@@ -844,10 +789,8 @@ struct MultiSelectBar: View {
     let selectedCount: Int
     let palette: Palette
     var onDelete: () -> Void
-    var onMove: () -> Void
     var onCancel: () -> Void
     var onGroup: () -> Void = {}
-    var showMove: Bool = true
     var showGroup: Bool = false
 
     var body: some View {
@@ -873,17 +816,6 @@ struct MultiSelectBar: View {
             Spacer()
 
             if selectedCount > 0 {
-                if showMove {
-                    Button(action: onMove) {
-                        Text("Move")
-                            .font(.nunito(size: 13, weight: .semibold))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .evryButtonFace(palette, in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-
                 if showGroup {
                     Button(action: onGroup) {
                         HStack(spacing: 5) {
@@ -1459,7 +1391,10 @@ private struct InlineTaskInput: UIViewRepresentable {
         }
         func textViewDidChange(_ tv: UITextView) {
             parent.text = tv.text
-            if let t = tv as? _TaskTextView { applyHighlight(to: t) }
+            // Don't restyle mid-composition (Japanese, Chinese, Korean…):
+            // replacing attributedText would commit or break the marked text.
+            // The highlight catches up on the change that ends composition.
+            if tv.markedTextRange == nil, let t = tv as? _TaskTextView { applyHighlight(to: t) }
             tv.invalidateIntrinsicContentSize()
             reportHeight(tv)
         }
@@ -1952,28 +1887,6 @@ struct FieldError: View {
     }
 }
 
-// MARK: PlaceholderTag
-
-/// A dashed pill marking content still to be confirmed before launch.
-struct PlaceholderTag: View {
-    var label = "Placeholder"
-    let palette: Palette
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "pencil")
-            Text(label)
-        }
-        .font(.evryCaption)
-        .foregroundStyle(palette.text)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(palette.card, in: Capsule())
-        .overlay(Capsule().strokeBorder(palette.dark ? Color.evryWhite35 : .evryNavy40,
-                                        style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
-    }
-}
-
 // MARK: Soft glow
 
 /// The one gradient in the system: a soft sky radial glow fading to nothing,
@@ -2092,7 +2005,8 @@ struct QuickAddLabel: View {
 }
 
 /// The horizontal icon picker row used by the quick-add cards: 44pt tiles,
-/// sky-soft at rest, the selection filled with `tint` and ringed in ink.
+/// white with the light outline at rest (the quick-add task card's button
+/// face), the selection filled with `tint` and ringed in ink.
 struct QuickAddIconRow: View {
     let icons: [String]
     @Binding var selection: String
@@ -2113,13 +2027,11 @@ struct QuickAddIconRow: View {
                             .font(.nunito(size: 17, weight: .semibold))
                             .foregroundStyle(on ? ink : palette.text)
                             .frame(width: EvrySpace.tap, height: EvrySpace.tap)
-                            .background(on ? tint : palette.skySoft,
+                            .background(on ? tint : palette.card,
                                         in: RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous))
                             .overlay {
-                                if on {
-                                    RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous)
-                                        .strokeBorder(palette.text, lineWidth: 2)
-                                }
+                                RoundedRectangle(cornerRadius: EvryRadius.tile, style: .continuous)
+                                    .strokeBorder(on ? palette.text : palette.border, lineWidth: on ? 2 : 1)
                             }
                     }
                     .buttonStyle(PressScaleStyle())

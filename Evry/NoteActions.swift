@@ -13,6 +13,7 @@ enum NoteActions {
     /// Soft delete — the note goes to trash so a delete toast's Undo can restore it.
     static func softDelete(_ note: Note) {
         note.deletedAt = Date()
+        CoreHooks.noteDeleted(note)
     }
 
     /// Pinning isn't a content edit, so it doesn't bump `modifiedAt`.

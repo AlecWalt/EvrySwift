@@ -1,51 +1,37 @@
 //
-//  AccomplishmentsView.swift
+//  DailyRecapView.swift
 //  Evry
 //
-//  Evry's daily recap of completed tasks, written on-device (FoundationModels),
-//  stored in UserDefaults, and optionally saved to the calendar. Tone: celebrate
-//  progress without the pressure — calm copy, the mascot for success, and
-//  charts in sky / navy strength steps only.
+//  The start-of-day recap of yesterday (tasks, focus, time saved). Tone:
+//  celebrate progress without the pressure — calm copy, the mascot for
+//  success, and charts in sky / navy strength steps only.
 //
 
-import FoundationModels
 import SwiftUI
-import SwiftData
-
-// MARK: - Generable summary type
-
-@Generable(description: "A calm, warm daily accomplishments summary")
-private struct AccomplishmentResult {
-    @Guide(description: "A short, warm one-sentence summary of what the person accomplished today — at most 14 words. Be specific but concise. Start with 'Today you'. No exclamation marks or emoji. No trailing period is required.")
-    var summary: String
-
-    @Guide(description: "A short theme for the day — 1-4 words in sentence case, no emoji (e.g. 'Deep work day', 'Creative sprint', 'Family first')")
-    var theme: String
-}
 
 // MARK: - UserDefaults storage
 
 enum AccomplishmentsStore {
-    private static let key = "evry_accomplishments_v1"
-
-    static func load() -> [String: String] {
-        (UserDefaults.standard.dictionary(forKey: key) as? [String: String]) ?? [:]
-    }
-
-    static func save(summary: String, for date: Date) {
-        var all = load()
-        all[dateKey(date)] = summary
-        let cutoff = Calendar.current.date(byAdding: .day, value: -60, to: date) ?? date
-        let cutoffKey = dateKey(cutoff)
-        all = all.filter { $0.key > cutoffKey }
-        UserDefaults.standard.set(all, forKey: key)
-    }
-
-    static func summary(for date: Date) -> String? { load()[dateKey(date)] }
-
+    /// The per-day key used by FocusLog and the once-a-day recap guard:
+    /// "2026-10-14", the same whatever the device's language or region (the old
+    /// locale-formatted key changed when they did, losing focus history).
     static func dateKey(_ date: Date) -> String {
+        dayFormatter.string(from: date)
+    }
+
+    /// The pre-fix, locale-formatted key — still read so earlier days count.
+    static func legacyDateKey(_ date: Date) -> String {
         date.formatted(.dateTime.year().month().day())
     }
+
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
 }
 
 // MARK: - Chart steps
@@ -58,213 +44,6 @@ extension Palette {
         let dark: [Color] = [.evrySky, Color.evrySky.mix(with: .evryNavy, by: 0.25), Color.evrySky.mix(with: .evryNavy, by: 0.45)]
         let steps = self.dark ? dark : light
         return steps[index % steps.count]
-    }
-}
-
-// MARK: - View
-
-struct AccomplishmentsView: View {
-    let completedTasks: [TaskItem]
-    let date: Date
-
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var scheme
-    @Environment(Appearance.self) private var appearance
-    @Environment(CalendarService.self) private var calendarService
-
-    @State private var phase: Phase = .idle
-    @State private var summary = ""
-    @State private var theme = ""
-    @State private var savedToCalendar = false
-
-    private var palette: Palette { Palette(dark: scheme == .dark, accent: appearance.accent) }
-    private var aiAvailable: Bool { SystemLanguageModel.default.isAvailable }
-
-    private enum Phase { case idle, generating, done, error }
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: EvrySpace.grid) {
-                    // Completed task list
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 10) {
-                            ToolIcon(tool: .tasks, tile: 32, palette: palette)
-                            Text("Completed today")
-                                .font(.evryTitle)
-                                .foregroundStyle(palette.text)
-                            Spacer()
-                            if !completedTasks.isEmpty {
-                                Text("\(completedTasks.count)")
-                                    .font(.evryLabel)
-                                    .monospacedDigit()
-                                    .foregroundStyle(palette.textSec)
-                                    .accessibilityLabel("\(completedTasks.count) tasks")
-                            }
-                        }
-
-                        if completedTasks.isEmpty {
-                            Text("Nothing finished yet today, and that’s okay. Small steps count.")
-                                .font(.evryBody)
-                                .foregroundStyle(palette.textSec)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .padding(.vertical, 4)
-                        } else {
-                            ForEach(completedTasks) { task in
-                                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                    EvryCheck(size: 18)
-                                        .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 5 }
-                                    Text(task.title)
-                                        .font(.evryBody)
-                                        .foregroundStyle(palette.textSec)
-                                        .strikethrough(true, color: palette.textMuted)
-                                }
-                                .accessibilityElement(children: .combine)
-                                .accessibilityLabel("Done: \(task.title)")
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(EvrySpace.grid)
-                    .evryCard(palette)
-
-                    // Evry's recap card
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack(spacing: 8) {
-                            Image("EvryIconStar")
-                                .renderingMode(.template)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 20, height: 20)
-                                .foregroundStyle(palette.primary)
-                                .accessibilityHidden(true)
-                            Text("Evry’s recap")
-                                .font(.evryTitle)
-                                .foregroundStyle(palette.text)
-                            Spacer()
-                        }
-
-                        switch phase {
-                        case .idle:
-                            if let stored = AccomplishmentsStore.summary(for: date) {
-                                EvryBubble(text: stored, palette: palette)
-                                    .onAppear { summary = stored; phase = .done }
-                            } else if !aiAvailable {
-                                EvryBubble(text: "I can’t write recaps on this device yet. Everything you finished is still listed above.",
-                                           palette: palette)
-                            } else if completedTasks.isEmpty {
-                                EvryBubble(text: "Once you finish a task or two, I can write you a little recap. Sound good?",
-                                           palette: palette)
-                            } else {
-                                EvryBubble(text: "You’ve been busy. Shall I write a short recap of your day?",
-                                           palette: palette)
-                                Button { Task { await generate() } } label: {
-                                    Text("Write my recap")
-                                }
-                                .buttonStyle(EvryPrimaryButtonStyle(palette: palette, fullWidth: true))
-                            }
-
-                        case .generating:
-                            HStack(spacing: 10) {
-                                ProgressView().tint(palette.primary)
-                                Text("Writing your recap…")
-                                    .font(.evryBody)
-                                    .foregroundStyle(palette.textSec)
-                            }
-                            .frame(minHeight: EvrySpace.tap)
-
-                        case .done:
-                            if !theme.isEmpty {
-                                EyebrowPill(text: theme, palette: palette, size: 12)
-                            }
-                            EvryBubble(text: summary, palette: palette)
-
-                            if calendarService.isAuthorized {
-                                Button {
-                                    let title = theme.isEmpty ? "Daily summary" : theme
-                                    if calendarService.saveAccomplishment(date: date, title: title, notes: summary) {
-                                        withAnimation(EvryMotion.settle) { savedToCalendar = true }
-                                    }
-                                } label: {
-                                    Label(
-                                        savedToCalendar ? "Saved to your calendar" : "Save to calendar",
-                                        systemImage: savedToCalendar ? "checkmark.circle.fill" : "calendar.badge.plus"
-                                    )
-                                }
-                                .buttonStyle(EvrySecondaryButtonStyle(palette: palette, fullWidth: true))
-                                .disabled(savedToCalendar)
-                            }
-
-                            Button { Task { await generate() } } label: {
-                                Label("Write it again", systemImage: "arrow.counterclockwise")
-                                    .font(.evrySmall)
-                                    .foregroundStyle(palette.textSec)
-                                    .frame(minHeight: EvrySpace.tap)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .opacity(completedTasks.isEmpty || !aiAvailable ? 0 : 1)
-                            .disabled(completedTasks.isEmpty || !aiAvailable)
-
-                        case .error:
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Image(systemName: "exclamationmark.circle.fill")
-                                    .accessibilityHidden(true)
-                                Text("I couldn’t write your recap just now. Please try again in a moment.")
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .font(.evrySmall)
-                            .foregroundStyle(palette.text)
-                            Button { Task { await generate() } } label: {
-                                Text("Try again")
-                            }
-                            .buttonStyle(EvrySecondaryButtonStyle(palette: palette, fullWidth: true))
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(EvrySpace.grid)
-                    .evryCard(palette)
-                }
-                .padding(.horizontal, EvrySpace.gutter)
-                .padding(.top, 8)
-                .padding(.bottom, 40)
-            }
-            .background(palette.bg.ignoresSafeArea())
-            .navigationTitle("Today’s progress")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }.font(.evryLabel)
-                }
-            }
-        }
-        .tint(palette.primary)
-    }
-
-    private func generate() async {
-        guard aiAvailable, !completedTasks.isEmpty else { return }
-        withAnimation { phase = .generating }
-        do {
-            let list = completedTasks.map { "• \($0.title)" }.joined(separator: "\n")
-            let session = LanguageModelSession(instructions: """
-                You are a calm, kind assistant who gently celebrates what someone got done today, \
-                without pressure or hype.
-                Today's date: \(date.formatted(.dateTime.weekday().day().month().year()))
-                """)
-            let response = try await session.respond(
-                to: "Here are the tasks I completed today:\n\n\(list)\n\nWrite my accomplishments summary.",
-                generating: AccomplishmentResult.self
-            )
-            let result = response.content
-            await MainActor.run {
-                summary = result.summary
-                theme = result.theme
-                AccomplishmentsStore.save(summary: result.summary, for: date)
-                withAnimation { phase = .done }
-            }
-        } catch {
-            await MainActor.run { withAnimation { phase = .error } }
-        }
     }
 }
 
